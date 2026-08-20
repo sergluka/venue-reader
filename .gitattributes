@@ -1,0 +1,2 @@
+# Bundled dictionaries are pinned by SHA-256; never convert line endings.
+xml/standard/** -text

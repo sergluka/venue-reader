@@ -1,0 +1,350 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/sergluka/fix-lsp/schema/fix-lsp.schema.json",
+  "title": "fix-lsp configuration",
+  "description": "Configuration for the fix-lsp server, sent under the `fix` section. Reusable by editor extensions (e.g. a VS Code `contributes.configuration`).",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "defaultVersion": {
+      "type": "string",
+      "default": "FIX.4.4",
+      "description": "FIX version used when a message has no (or an unknown) BeginString (tag 8).",
+      "x-fix-lsp-scope": "user-global"
+    },
+    "dictionaries": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mode": {
+            "enum": [
+              "auto",
+              "quickfix",
+              "repository"
+            ],
+            "default": "auto"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "Unique name within the applicable configuration chain; duplicate names are errors."
+          },
+          "default": {
+            "type": "boolean",
+            "default": false,
+            "description": "Make this definition the version default in this source's scope. FIX version comes only from XML."
+          }
+        },
+        "required": [
+          "path",
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "description": "External XML definitions require global allowDictionaryPath. Definitions accumulate under unique names; a stronger source may replace a version default under a distinct name."
+    },
+    "inlayHints": {
+      "type": "object",
+      "properties": {
+        "tagNames": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/label"
+            }
+          ],
+          "default": {
+            "enabled": false,
+            "format": "({})"
+          }
+        },
+        "enumValues": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/label"
+            }
+          ],
+          "default": {
+            "enabled": false,
+            "format": "({})"
+          }
+        },
+        "groupPaths": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/enabled"
+            }
+          ],
+          "default": {
+            "enabled": true
+          }
+        }
+      },
+      "x-fix-lsp-scope": "user-document"
+    },
+    "messageSummary": {
+      "type": "object",
+      "description": "Everything about the one-line message summary, including which LSP channels carry it.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Document-overridable master summary gate."
+        },
+        "channels": {
+          "type": "object",
+          "description": "Document-overridable output channels, constrained by advertised client capabilities. Enabling both draws the summary twice.",
+          "properties": {
+            "codeLens": {
+              "type": "boolean",
+              "default": true
+            },
+            "inlayHints": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "template": {
+          "type": "string",
+          "default": "{52|???}: {34|???}: {49|???}=>{56|???} | {35:name|???}{possDup}"
+        },
+        "details": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "x-fix-lsp-scope": "user-document"
+    },
+    "diagnostics": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "rules": {
+          "type": "object",
+          "description": "Built-in diagnostic rules. Unknown identifiers are non-fatal configuration errors and are ignored.",
+          "properties": {
+            "beginString": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/rule"
+                }
+              ],
+              "default": true
+            },
+            "unknownVersion": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/rule"
+                }
+              ],
+              "default": true
+            },
+            "integrity": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/rule"
+                }
+              ],
+              "default": {
+                "enabled": true,
+                "severity": "error"
+              },
+              "description": "BodyLength and CheckSum, checked as one rule: they are recomputed from the same walk of the line and a repair fixes both, so two ids would be two ways to half-fix a message."
+            },
+            "dictionaryVersion": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/rule"
+                }
+              ],
+              "default": {
+                "enabled": true,
+                "severity": "warning"
+              },
+              "description": "Selected dictionary and resolved message version do not match; one finding per mismatching version in each diagnostic walk."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "x-fix-lsp-scope": "user-document"
+    },
+    "hover": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/enabled"
+        }
+      ],
+      "default": {
+        "enabled": true
+      },
+      "x-fix-lsp-scope": "user-document"
+    },
+    "semanticTokens": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/enabled"
+        }
+      ],
+      "default": {
+        "enabled": true
+      },
+      "x-fix-lsp-scope": "user-document"
+    },
+    "documentSymbol": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "depth": {
+          "enum": [
+            "messages",
+            "fields",
+            "full"
+          ],
+          "default": "full"
+        },
+        "template": {
+          "type": "string",
+          "default": "#{34} {49}→{56} {35:name} ({35})",
+          "description": "The message symbol's name. Same slots as messageSummary.template; fields, groups and instances are not templated."
+        }
+      },
+      "x-fix-lsp-scope": "user-document"
+    },
+    "documentLink": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "default": "https://www.onixs.biz/fix-dictionary/{version}/tagNum_{tag}.html",
+          "description": "Where a tag's reference page lives. `{tag}` is the tag number; `{version}` is the version as the default site spells it (`4.4`, `5.0` — lossy: 5.0SP1, 5.0SP2 and FIXT.1.1 are all `5.0` there); `{fixVersion}` is the line's own version string (`FIX.5.0SP2`, `FIXT.1.1`). A template that avoids `{version}` also works for versions the default site does not publish. Empty removes the link without disabling hover. Global-only; non-empty URLs must use http or https. Substituted values are percent-encoded."
+        }
+      },
+      "x-fix-lsp-scope": "user-global"
+    },
+    "overrides": {
+      "type": "object",
+      "properties": {
+        "modeline": {
+          "type": "boolean",
+          "default": true
+        },
+        "projectConfig": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "description": "Global-only source controls; a source cannot disable or enable itself.",
+      "x-fix-lsp-scope": "user-global"
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "rangeLines": {
+          "type": "integer",
+          "default": 2000,
+          "description": "Largest span of lines any ranged request will answer about: a code action, an inlay hint, an expanded selection, a coloured viewport. Each request decides for itself what happens past it.",
+          "minimum": 0
+        },
+        "semanticTokensFullLines": {
+          "type": "integer",
+          "default": 2000,
+          "description": "How many lines from the top a whole-document colouring answers about; past it the tail is uncoloured and one log line says so. 2000 is about 255000 tokens on a dense log, which is what a client can rebuild per response without a heap it cannot afford — the server itself colours the whole file in half a second.",
+          "minimum": 0
+        },
+        "codeLensLines": {
+          "type": "integer",
+          "default": 20000,
+          "minimum": 0
+        },
+        "documentSymbolItems": {
+          "type": "integer",
+          "default": 50000,
+          "minimum": 1,
+          "description": "Largest number of symbols one outline may hold, the truncation marker included. A cap of zero cannot hold the marker it would need."
+        },
+        "diagnosticsPerDocument": {
+          "type": "integer",
+          "default": 10000,
+          "minimum": 0
+        },
+        "dictionaryBytes": {
+          "type": "integer",
+          "default": 16777216,
+          "minimum": 0
+        },
+        "cachedLines": {
+          "type": "integer",
+          "default": 4000,
+          "description": "How many lines of one document may keep their analysis cached before the least recently read are dropped; never applied below rangeLines. About 440 bytes a line.",
+          "minimum": 0
+        }
+      },
+      "x-fix-lsp-scope": "user-global"
+    },
+    "allowDictionaryPath": {
+      "type": "boolean",
+      "default": false,
+      "description": "Global-only filesystem permission for every external dictionary. Project TOML and modelines cannot enable it.",
+      "x-fix-lsp-scope": "user-global"
+    }
+  },
+  "$defs": {
+    "enabled": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "label": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "format": {
+          "type": "string",
+          "description": "How the label is written: literal text plus a nameless hole, {}. Each setting draws one thing, so the hole needs no name: for tagNames it is what the tag is called (its group path inside a group, unless groupPaths is off), for enumValues it is what the value means. An empty hole suppresses the whole label including its literals, which is why a tag the dictionary does not define is passed over; a format with no hole is therefore drawn on every field. Write a literal brace by doubling it; the hole may appear more than once and each repeats the same value. The label reaches the client verbatim, newlines included, and what it does with them is the client's."
+        }
+      }
+    },
+    "rule": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "severity": {
+              "enum": [
+                "error",
+                "warning",
+                "info",
+                "hint"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

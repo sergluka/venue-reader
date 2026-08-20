@@ -1,0 +1,11 @@
+fix-lsp — https://github.com/sergluka/fix-lsp
+Copyright 2026 Sergey Lukashevich
+
+This product includes software developed by quickfixengine.org
+(http://www.quickfixengine.org/): the bundled FIX dictionaries are QuickFIX/J
+files under the QuickFIX Software License, Version 1.0.
+
+This product bundles metadata projected from FIX Orchestra,
+Copyright (c) FIX Protocol Ltd., under the Apache License, Version 2.0.
+
+See THIRD_PARTY_LICENSES.txt.

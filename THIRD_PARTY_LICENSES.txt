@@ -1,0 +1,97 @@
+Bundled FIX dictionaries
+========================
+
+xml/standard/FIX40.xml, FIX41.xml, FIX42.xml, FIX43.xml, FIX44.xml, FIX50.xml,
+FIX50SP1.xml, FIX50SP2.xml and FIXT11.xml are unmodified copies from QuickFIX/J:
+
+  Repository: https://github.com/quickfix-j/quickfixj
+  Commit:     560200e6237bb6172acb18cbf3e5513fdf8cacb5
+  Paths:      quickfixj-messages/quickfixj-messages-<version>/src/main/resources/<file>
+  Retrieved:  2026-09-17
+  SHA-256:    see xml/README.md and xml/standard/SHA256SUMS
+
+They are redistributed under the QuickFIX Software License, Version 1.0, which
+QuickFIX/J ships as its LICENSE file at that commit:
+
+The QuickFIX Software License, Version 1.0
+
+Copyright (c) 2001-2005 quickfixengine.org  All rights
+reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in
+   the documentation and/or other materials provided with the
+   distribution.
+
+3. The end-user documentation included with the redistribution,
+   if any, must include the following acknowledgment:
+      "This product includes software developed by
+       quickfixengine.org (http://www.quickfixengine.org/)."
+   Alternately, this acknowledgment may appear in the software itself,
+   if and wherever such third-party acknowledgments normally appear.
+
+4. The names "QuickFIX" and "quickfixengine.org" must
+   not be used to endorse or promote products derived from this
+   software without prior written permission. For written
+   permission, please contact ask@quickfixengine.org
+
+5. Products derived from this software may not be called "QuickFIX",
+   nor may "QuickFIX" appear in their name, without prior written
+   permission of quickfixengine.org
+
+THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
+WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED.  IN NO EVENT SHALL QUICKFIXENGINE.ORG OR
+ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
+USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
+
+
+FIX Orchestra metadata
+======================
+
+xml/standard/FIXLatest-metadata.xml is a mechanical projection, made by
+tools/orchestra_projection.py, of OrchestraFIXLatest.xml from the FIX Trading
+Community's orchestrations repository:
+
+  Repository: https://github.com/FIXTradingCommunity/orchestrations
+  Commit:     cd24169a2abd8daba7c360987c7a46ca11873a12
+  Path:       FIX Standard/OrchestraFIXLatest.xml
+  Retrieved:  2026-09-16
+  Source SHA-256: 1bf82a22423d6504fbb77c4c8c522a4efefb32aec19b630c138860ccddf8228d
+  Output SHA-256: see xml/README.md and xml/standard/SHA256SUMS
+
+The projection retains only: field id, name, base type, added, addedEP,
+deprecated, ownCodeSet and the first non-empty SYNOPSIS; per code its value,
+name, added, addedEP, deprecated and the first non-empty SYNOPSIS; and message
+type, name, category and the first non-empty SYNOPSIS. Nothing else from the
+source file is reproduced.
+
+Copyright (c) FIX Protocol Ltd.
+
+The orchestrations repository licenses its contents under the Apache License,
+Version 2.0 (its LICENSE file, and the Maven artifact
+io.fixprotocol.orchestrations:fix-standard that ships this file). A copy of
+that license is in LICENSE. The source file itself carries the line "Copyright
+(c) FIX Protocol Ltd. All Rights Reserved." as its copyright notice.
+
+
+Synthetic test dictionaries
+===========================
+
+The dictionaries under xml/custom/synthetic/ were written for this project's
+tests and are covered by the project licence (Apache-2.0); they contain no
+third-party data.

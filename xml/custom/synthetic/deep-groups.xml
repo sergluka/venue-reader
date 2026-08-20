@@ -1,0 +1,179 @@
+<!-- Synthetic QuickFIX dictionary written for fix-lsp's tests (Apache-2.0).
+     32 groups nested one inside the next — the only way to reach the
+     codec's `MAX_GROUP_DEPTH`, since nesting depth is a property of a
+     dictionary and no input line can exceed what its dictionary declares.
+     Generated shape, kept as a file so the test reads rather than builds it. -->
+<fix type='FIX' major='4' minor='4'>
+    <header />
+    <messages>
+        <message name='Deep' msgtype='ZZ' msgcat='app'>
+            <field name='Symbol' required='N'/>
+            <group name='NoLevel0' required='N'>
+            <field name='Leaf0' required='N'/>
+                <group name='NoLevel1' required='N'>
+                <field name='Leaf1' required='N'/>
+                    <group name='NoLevel2' required='N'>
+                    <field name='Leaf2' required='N'/>
+                        <group name='NoLevel3' required='N'>
+                        <field name='Leaf3' required='N'/>
+                            <group name='NoLevel4' required='N'>
+                            <field name='Leaf4' required='N'/>
+                                <group name='NoLevel5' required='N'>
+                                <field name='Leaf5' required='N'/>
+                                    <group name='NoLevel6' required='N'>
+                                    <field name='Leaf6' required='N'/>
+                                        <group name='NoLevel7' required='N'>
+                                        <field name='Leaf7' required='N'/>
+                                            <group name='NoLevel8' required='N'>
+                                            <field name='Leaf8' required='N'/>
+                                                <group name='NoLevel9' required='N'>
+                                                <field name='Leaf9' required='N'/>
+                                                    <group name='NoLevel10' required='N'>
+                                                    <field name='Leaf10' required='N'/>
+                                                        <group name='NoLevel11' required='N'>
+                                                        <field name='Leaf11' required='N'/>
+                                                            <group name='NoLevel12' required='N'>
+                                                            <field name='Leaf12' required='N'/>
+                                                                <group name='NoLevel13' required='N'>
+                                                                <field name='Leaf13' required='N'/>
+                                                                    <group name='NoLevel14' required='N'>
+                                                                    <field name='Leaf14' required='N'/>
+                                                                        <group name='NoLevel15' required='N'>
+                                                                        <field name='Leaf15' required='N'/>
+                                                                            <group name='NoLevel16' required='N'>
+                                                                            <field name='Leaf16' required='N'/>
+                                                                                <group name='NoLevel17' required='N'>
+                                                                                <field name='Leaf17' required='N'/>
+                                                                                    <group name='NoLevel18' required='N'>
+                                                                                    <field name='Leaf18' required='N'/>
+                                                                                        <group name='NoLevel19' required='N'>
+                                                                                        <field name='Leaf19' required='N'/>
+                                                                                            <group name='NoLevel20' required='N'>
+                                                                                            <field name='Leaf20' required='N'/>
+                                                                                                <group name='NoLevel21' required='N'>
+                                                                                                <field name='Leaf21' required='N'/>
+                                                                                                    <group name='NoLevel22' required='N'>
+                                                                                                    <field name='Leaf22' required='N'/>
+                                                                                                        <group name='NoLevel23' required='N'>
+                                                                                                        <field name='Leaf23' required='N'/>
+                                                                                                            <group name='NoLevel24' required='N'>
+                                                                                                            <field name='Leaf24' required='N'/>
+                                                                                                                <group name='NoLevel25' required='N'>
+                                                                                                                <field name='Leaf25' required='N'/>
+                                                                                                                    <group name='NoLevel26' required='N'>
+                                                                                                                    <field name='Leaf26' required='N'/>
+                                                                                                                        <group name='NoLevel27' required='N'>
+                                                                                                                        <field name='Leaf27' required='N'/>
+                                                                                                                            <group name='NoLevel28' required='N'>
+                                                                                                                            <field name='Leaf28' required='N'/>
+                                                                                                                                <group name='NoLevel29' required='N'>
+                                                                                                                                <field name='Leaf29' required='N'/>
+                                                                                                                                    <group name='NoLevel30' required='N'>
+                                                                                                                                    <field name='Leaf30' required='N'/>
+                                                                                                                                        <group name='NoLevel31' required='N'>
+                                                                                                                                        <field name='Leaf31' required='N'/>
+                                                                                                                                        </group>
+                                                                                                                                    </group>
+                                                                                                                                </group>
+                                                                                                                            </group>
+                                                                                                                        </group>
+                                                                                                                    </group>
+                                                                                                                </group>
+                                                                                                            </group>
+                                                                                                        </group>
+                                                                                                    </group>
+                                                                                                </group>
+                                                                                            </group>
+                                                                                        </group>
+                                                                                    </group>
+                                                                                </group>
+                                                                            </group>
+                                                                        </group>
+                                                                    </group>
+                                                                </group>
+                                                            </group>
+                                                        </group>
+                                                    </group>
+                                                </group>
+                                            </group>
+                                        </group>
+                                    </group>
+                                </group>
+                            </group>
+                        </group>
+                    </group>
+                </group>
+            </group>
+        </message>
+    </messages>
+    <components />
+    <fields>
+        <field number='8' name='BeginString' type='STRING'/>
+        <field number='35' name='MsgType' type='STRING'/>
+        <field number='55' name='Symbol' type='STRING'/>
+        <field number='20000' name='NoLevel0' type='NUMINGROUP'/>
+        <field number='20100' name='Leaf0' type='STRING'/>
+        <field number='20001' name='NoLevel1' type='NUMINGROUP'/>
+        <field number='20101' name='Leaf1' type='STRING'/>
+        <field number='20002' name='NoLevel2' type='NUMINGROUP'/>
+        <field number='20102' name='Leaf2' type='STRING'/>
+        <field number='20003' name='NoLevel3' type='NUMINGROUP'/>
+        <field number='20103' name='Leaf3' type='STRING'/>
+        <field number='20004' name='NoLevel4' type='NUMINGROUP'/>
+        <field number='20104' name='Leaf4' type='STRING'/>
+        <field number='20005' name='NoLevel5' type='NUMINGROUP'/>
+        <field number='20105' name='Leaf5' type='STRING'/>
+        <field number='20006' name='NoLevel6' type='NUMINGROUP'/>
+        <field number='20106' name='Leaf6' type='STRING'/>
+        <field number='20007' name='NoLevel7' type='NUMINGROUP'/>
+        <field number='20107' name='Leaf7' type='STRING'/>
+        <field number='20008' name='NoLevel8' type='NUMINGROUP'/>
+        <field number='20108' name='Leaf8' type='STRING'/>
+        <field number='20009' name='NoLevel9' type='NUMINGROUP'/>
+        <field number='20109' name='Leaf9' type='STRING'/>
+        <field number='20010' name='NoLevel10' type='NUMINGROUP'/>
+        <field number='20110' name='Leaf10' type='STRING'/>
+        <field number='20011' name='NoLevel11' type='NUMINGROUP'/>
+        <field number='20111' name='Leaf11' type='STRING'/>
+        <field number='20012' name='NoLevel12' type='NUMINGROUP'/>
+        <field number='20112' name='Leaf12' type='STRING'/>
+        <field number='20013' name='NoLevel13' type='NUMINGROUP'/>
+        <field number='20113' name='Leaf13' type='STRING'/>
+        <field number='20014' name='NoLevel14' type='NUMINGROUP'/>
+        <field number='20114' name='Leaf14' type='STRING'/>
+        <field number='20015' name='NoLevel15' type='NUMINGROUP'/>
+        <field number='20115' name='Leaf15' type='STRING'/>
+        <field number='20016' name='NoLevel16' type='NUMINGROUP'/>
+        <field number='20116' name='Leaf16' type='STRING'/>
+        <field number='20017' name='NoLevel17' type='NUMINGROUP'/>
+        <field number='20117' name='Leaf17' type='STRING'/>
+        <field number='20018' name='NoLevel18' type='NUMINGROUP'/>
+        <field number='20118' name='Leaf18' type='STRING'/>
+        <field number='20019' name='NoLevel19' type='NUMINGROUP'/>
+        <field number='20119' name='Leaf19' type='STRING'/>
+        <field number='20020' name='NoLevel20' type='NUMINGROUP'/>
+        <field number='20120' name='Leaf20' type='STRING'/>
+        <field number='20021' name='NoLevel21' type='NUMINGROUP'/>
+        <field number='20121' name='Leaf21' type='STRING'/>
+        <field number='20022' name='NoLevel22' type='NUMINGROUP'/>
+        <field number='20122' name='Leaf22' type='STRING'/>
+        <field number='20023' name='NoLevel23' type='NUMINGROUP'/>
+        <field number='20123' name='Leaf23' type='STRING'/>
+        <field number='20024' name='NoLevel24' type='NUMINGROUP'/>
+        <field number='20124' name='Leaf24' type='STRING'/>
+        <field number='20025' name='NoLevel25' type='NUMINGROUP'/>
+        <field number='20125' name='Leaf25' type='STRING'/>
+        <field number='20026' name='NoLevel26' type='NUMINGROUP'/>
+        <field number='20126' name='Leaf26' type='STRING'/>
+        <field number='20027' name='NoLevel27' type='NUMINGROUP'/>
+        <field number='20127' name='Leaf27' type='STRING'/>
+        <field number='20028' name='NoLevel28' type='NUMINGROUP'/>
+        <field number='20128' name='Leaf28' type='STRING'/>
+        <field number='20029' name='NoLevel29' type='NUMINGROUP'/>
+        <field number='20129' name='Leaf29' type='STRING'/>
+        <field number='20030' name='NoLevel30' type='NUMINGROUP'/>
+        <field number='20130' name='Leaf30' type='STRING'/>
+        <field number='20031' name='NoLevel31' type='NUMINGROUP'/>
+        <field number='20131' name='Leaf31' type='STRING'/>
+    </fields>
+</fix>

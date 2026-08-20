@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic FIX Repository-layout fixture written for this project (Apache-2.0); no third-party data. -->
+<Components version="FIX.4.4">
+  <Component><ComponentID>1</ComponentID><ComponentType>Block</ComponentType><Name>StandardHeader</Name></Component>
+  <Component><ComponentID>2</ComponentID><ComponentType>Block</ComponentType><Name>StandardTrailer</Name></Component>
+  <Component><ComponentID>3</ComponentID><ComponentType>BlockRepeating</ComponentType><Name>HopGrp</Name></Component>
+</Components>

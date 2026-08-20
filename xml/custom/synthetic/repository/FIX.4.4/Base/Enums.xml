@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic FIX Repository-layout fixture written for this project (Apache-2.0); no third-party data. -->
+<Enums version="FIX.4.4">
+  <Enum added="FIX.4.0"><Tag>35</Tag><Value>0</Value><SymbolicName>Heartbeat</SymbolicName><Description>Synthetic Heartbeat.</Description></Enum>
+  <Enum added="FIX.4.0"><Tag>35</Tag><Value>D</Value><SymbolicName>NewOrderSingle</SymbolicName><Description>Synthetic NewOrderSingle.</Description></Enum>
+  <Enum added="FIX.4.0"><Tag>35</Tag><Value>W</Value><SymbolicName>MarketDataSnapshotFullRefresh</SymbolicName><Description>Synthetic MarketDataSnapshotFullRefresh.</Description></Enum>
+  <Enum added="FIX.4.0"><Tag>54</Tag><Value>1</Value><SymbolicName>Buy</SymbolicName><Description>Synthetic Buy.</Description></Enum>
+  <Enum added="FIX.4.0"><Tag>54</Tag><Value>2</Value><SymbolicName>Sell</SymbolicName><Description>Synthetic Sell.</Description></Enum>
+  <Enum added="FIX.4.0"><Tag>269</Tag><Value>0</Value><SymbolicName>Bid</SymbolicName><Description>Synthetic Bid.</Description></Enum>
+  <Enum added="FIX.4.0"><Tag>269</Tag><Value>1</Value><SymbolicName>Offer</SymbolicName><Description>Synthetic Offer.</Description></Enum>
+</Enums>

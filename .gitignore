@@ -1,0 +1,12 @@
+/plans/
+/tasks/
+/target
+
+__pycache__/
+
+# Editor-local setup. The server is generic; no editor-specific files here.
+.helix/
+.zed/
+
+# Developer-local direnv setup.
+.envrc
