@@ -29,35 +29,72 @@ pub struct StdioClient {
     stdout_thread: Option<JoinHandle<()>>,
     stderr_thread: Option<JoinHandle<()>>,
     directory: PathBuf,
-    home: PathBuf,
+    personal_file: PathBuf,
     workspace: PathBuf,
 }
 
 impl StdioClient {
+    /// `XDG_CONFIG_HOME` points at a directory of this test's own, which is
+    /// where the personal file goes.
     pub fn start(
         label: &str,
         personal_config: Option<&str>,
         configuration_reply: Option<Value>,
     ) -> Self {
-        static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+        Self::spawn(label, personal_config, true, configuration_reply)
+    }
+
+    /// `XDG_CONFIG_HOME` unset, so the personal file goes to the `$HOME/.config`
+    /// default the server must fall back to. Only `process_location` resolves
+    /// that; `location`'s own unit tests cannot reach it.
+    pub fn start_without_config_home(
+        label: &str,
+        personal_config: Option<&str>,
+        configuration_reply: Option<Value>,
+    ) -> Self {
+        Self::spawn(label, personal_config, false, configuration_reply)
+    }
+
+    fn spawn(
+        label: &str,
+        personal_config: Option<&str>,
+        in_config_home: bool,
+        configuration_reply: Option<Value>,
+    ) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
             "fix-lsp-stdio-{label}-{}-{}",
             std::process::id(),
-            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+            COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
+
         let home = directory.join("home");
         let workspace = directory.join("workspace");
-        std::fs::create_dir_all(home.join(".config")).expect("create test home");
+        let config_home = directory.join("xdg-config");
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        if let Some(contents) = personal_config {
-            std::fs::write(home.join(".config/fix-lsp.toml"), contents)
-                .expect("write personal configuration");
-        }
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_fix-lsp"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fix-lsp"));
+        command
             .arg("--stdio")
             .env("HOME", &home)
-            .env("USERPROFILE", &home)
+            .env("USERPROFILE", &home);
+        // The developer's own configuration directory must never reach the
+        // server under test: every child is given one of the two locations, and
+        // neither is inherited.
+        let personal_directory = if in_config_home {
+            command.env("XDG_CONFIG_HOME", &config_home);
+            config_home
+        } else {
+            command.env_remove("XDG_CONFIG_HOME");
+            home.join(".config")
+        };
+        std::fs::create_dir_all(&personal_directory).expect("create personal configuration dir");
+        let personal_file = personal_directory.join("fix-lsp.toml");
+        if let Some(contents) = personal_config {
+            std::fs::write(&personal_file, contents).expect("write personal configuration");
+        }
+
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -71,6 +108,7 @@ impl StdioClient {
         let reader_input = Arc::clone(&input);
         let reader_error = Arc::new(Mutex::new(None));
         let reported_reader_error = Arc::clone(&reader_error);
+
         let stdout_thread = std::thread::spawn(move || {
             let report_error = |error: String| {
                 *reported_reader_error.lock().expect("reader error lock") = Some(error.clone());
@@ -155,13 +193,15 @@ impl StdioClient {
             stdout_thread: Some(stdout_thread),
             stderr_thread: Some(stderr_thread),
             directory,
-            home,
+            personal_file,
             workspace,
         }
     }
 
-    pub fn home(&self) -> &Path {
-        &self.home
+    /// Where this test's personal configuration was written, whichever location
+    /// the child was given.
+    pub fn personal_file(&self) -> &Path {
+        &self.personal_file
     }
 
     pub fn write_workspace(&self, relative: &str, contents: &[u8]) -> String {

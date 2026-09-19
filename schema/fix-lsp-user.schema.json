@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/sergluka/fix-lsp/schema/fix-lsp-user.schema.json",
   "title": "fix-lsp user-wide TOML configuration",
-  "description": "Schema after removing known foreign editor settings. ~/.config/fix-lsp.toml provides personal defaults below global LSP settings. Unknown server keys reject the file. No file or dictionary version field exists.",
+  "description": "Schema after removing known foreign editor settings. The user-wide fix-lsp.toml provides personal defaults below global LSP settings; the README states where it lives. Unknown server keys reject the file. No file or dictionary version field exists.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

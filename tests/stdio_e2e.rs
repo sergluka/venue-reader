@@ -29,7 +29,7 @@ fn a_real_client_round_trips_the_full_stdio_lifecycle() {
             "inlayHints": { "tagNames": { "enabled": true } }
         }])),
     );
-    assert!(client.home().join(".config/fix-lsp.toml").is_file());
+    assert!(client.personal_file().is_file());
 
     let bad_both = include_str!("fixtures/validation/bad-both.fix").trim_end();
     let raw_line = format!("8=FIX.4.4|58=A{RAW_BYTE_MARKER}B|35=0|49=CLIENT1|56=BROKER1|10=000|");
@@ -190,6 +190,27 @@ fn unanswered_configuration_exits_nonzero_without_waiting_for_stdin_to_close() {
         "{}",
         client.stderr()
     );
+}
+
+#[test]
+fn without_xdg_config_home_the_personal_file_comes_from_the_home_default() {
+    // `location`'s unit tests cover the rule; only a child process covers the
+    // startup glue that hands it the home directory. A malformed file names
+    // itself in a startup warning, which is the observable.
+    let mut client = StdioClient::start_without_config_home("home-default", Some("bad ="), None);
+
+    client.request("initialize", json!({ "capabilities": {} }));
+    client.notify("initialized", json!({}));
+    let status = client.shutdown_and_exit();
+    assert!(
+        status.success(),
+        "status={status}; stderr={}",
+        client.stderr()
+    );
+
+    let personal_file = client.personal_file().display().to_string();
+    let stderr = client.stderr();
+    assert!(stderr.contains(&personal_file), "{stderr}");
 }
 
 fn replace_marker_with_raw_byte(body: &mut Vec<u8>, marker: &[u8], byte: u8) {

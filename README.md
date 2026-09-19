@@ -251,7 +251,7 @@ From lowest to highest priority:
 | Priority | Source | Scope |
 | --- | --- | --- |
 | 1 | Built-in defaults | All documents. |
-| 2 | `~/.config/fix-lsp.toml` | Personal defaults for the server user. |
+| 2 | Personal TOML (user config directory) | Personal defaults for the server user. |
 | 3 | Global LSP `fix` settings | The editor's server session. |
 | 4 | Matching `.fix-lsp.toml` files | Workspace root to document directory; nearer files override ancestors. |
 | 5 | Document modelines | Settings embedded in edge comments. |
@@ -295,8 +295,9 @@ Use nested JSON objects. Literal dotted JSON keys such as
 
 ### Personal and project TOML
 
-Personal settings use the fixed path `~/.config/fix-lsp.toml`, resolved
-against the server user's home directory:
+Personal settings live in `fix-lsp.toml` inside the server user's
+configuration directory: `$XDG_CONFIG_HOME/fix-lsp.toml`, or
+`~/.config/fix-lsp.toml` when that variable is unset, empty, or relative.
 
 ```toml
 # ~/.config/fix-lsp.toml

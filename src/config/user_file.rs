@@ -6,8 +6,24 @@ use std::path::{Path, PathBuf};
 use crate::overrides::project::{self, LoadedFile, ProjectFile};
 use crate::overrides::SourceKind;
 
-pub fn location(home: Option<&Path>) -> Option<PathBuf> {
-    home.map(|directory| directory.join(".config/fix-lsp.toml"))
+const FILE_NAME: &str = "fix-lsp.toml";
+
+/// `$XDG_CONFIG_HOME/fix-lsp.toml`, or `~/.config/fix-lsp.toml` without it. The
+/// XDG Base Directory specification says an unset, empty or relative
+/// `XDG_CONFIG_HOME` must be ignored, so a bad value falls back rather than
+/// resolving against the working directory.
+fn location(config_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    config_home
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join(FILE_NAME))
+        .or_else(|| home.map(|directory| directory.join(".config").join(FILE_NAME)))
+}
+
+/// The location for this process. The only place the configuration directory is
+/// read from the environment.
+pub fn process_location() -> Option<PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    location(config_home.as_deref(), std::env::home_dir().as_deref())
 }
 
 pub fn parse(text: &str, path: &Path) -> Result<ProjectFile, String> {
@@ -23,6 +39,31 @@ mod tests {
     use super::*;
     use crate::overrides::{merge, parse_client};
     use serde_json::json;
+
+    #[test]
+    fn xdg_config_home_replaces_the_home_default() {
+        assert_eq!(
+            location(Some(Path::new("/xdg")), Some(Path::new("/home/test"))),
+            Some(PathBuf::from("/xdg/fix-lsp.toml"))
+        );
+        assert_eq!(
+            location(None, Some(Path::new("/home/test"))),
+            Some(PathBuf::from("/home/test/.config/fix-lsp.toml"))
+        );
+        assert_eq!(location(None, None), None);
+    }
+
+    #[test]
+    fn a_relative_or_empty_xdg_config_home_is_ignored() {
+        for value in ["relative/config", ""] {
+            assert_eq!(
+                location(Some(Path::new(value)), Some(Path::new("/home/test"))),
+                Some(PathBuf::from("/home/test/.config/fix-lsp.toml")),
+                "{value:?}"
+            );
+        }
+        assert_eq!(location(Some(Path::new("relative/config")), None), None);
+    }
 
     #[test]
     fn sparse_client_leaves_do_not_erase_user_defaults() {

@@ -14,6 +14,7 @@ pub mod overrides;
 pub mod render;
 pub mod rules;
 pub mod server;
+pub mod tag;
 pub mod transport;
 
 use std::path::PathBuf;
@@ -36,7 +37,7 @@ pub fn run(args: Args) -> ExitCode {
         eprintln!("{}: only --stdio transport is supported", SERVER_NAME);
         return ExitCode::from(2);
     }
-    let path = std::env::home_dir().map(|home| home.join(".config/fix-lsp.toml"));
+    let path = config::user_file::process_location();
     let startup = match server::Startup::load(path) {
         Ok(startup) => startup,
         Err(error) => {

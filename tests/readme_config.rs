@@ -24,12 +24,15 @@ fn readme_toml_examples_match_current_source_parsers() {
     let blocks = examples("toml");
     assert_eq!(blocks.len(), 5);
     for example in blocks {
-        let parsed = if example.starts_with("# ~/.config/fix-lsp.toml") {
+        // Dispatch on the project file name, which is fixed. The personal file's
+        // location is not, so the example header must stay free to change.
+        let header = format!("# {}", project::FILE_NAME);
+        let parsed = if example.starts_with(&header) {
+            project::parse(example, Path::new("/work/.fix-lsp.toml")).expect("project example")
+        } else {
+            assert!(example.starts_with("# "), "{example}");
             fix_lsp::config::user_file::parse(example, Path::new("/home/test/.config/fix-lsp.toml"))
                 .expect("personal defaults example")
-        } else {
-            assert!(example.starts_with("# .fix-lsp.toml"));
-            project::parse(example, Path::new("/work/.fix-lsp.toml")).expect("project example")
         };
         assert!(
             parsed.layer.warnings.is_empty(),
