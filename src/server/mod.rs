@@ -447,8 +447,7 @@ impl ServerState {
                 self.pull_base_config();
             }
             method::DID_CHANGE_CONFIGURATION => self.on_did_change_configuration(note.params),
-            // TODO: move to method::
-            "workspace/didChangeWorkspaceFolders" => self.on_workspace_folders(note.params),
+            method::DID_CHANGE_WORKSPACE_FOLDERS => self.on_workspace_folders(note.params),
             method::DID_OPEN => self.on_did_open(note.params),
             method::DID_CHANGE => self.on_did_change(note.params),
             method::DID_CLOSE => self.on_did_close(note.params),

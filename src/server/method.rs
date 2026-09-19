@@ -15,14 +15,15 @@
 use lsp_types::{
     CancelNotification, CodeActionRequest, CodeLensRefreshRequest, CodeLensRequest,
     CodeLensResolveRequest, ConfigurationRequest, DidChangeConfigurationNotification,
-    DidChangeTextDocumentNotification, DidCloseTextDocumentNotification,
-    DidOpenTextDocumentNotification, DocumentSymbolRequest, ExecuteCommandRequest,
-    ExitNotification, HoverRequest, InitializeRequest, InitializedNotification,
-    InlayHintRefreshRequest, InlayHintRequest, InlayHintResolveRequest, LogMessageNotification,
-    Notification as _, ProgressNotification, PublishDiagnosticsNotification, Request as _,
-    SelectionRangeRequest, SemanticTokensDeltaRequest, SemanticTokensRangeRequest,
-    SemanticTokensRefreshRequest, SemanticTokensRequest, SetTraceNotification,
-    ShowMessageNotification, ShutdownRequest, WorkDoneProgressCreateRequest,
+    DidChangeTextDocumentNotification, DidChangeWorkspaceFoldersNotification,
+    DidCloseTextDocumentNotification, DidOpenTextDocumentNotification, DocumentSymbolRequest,
+    ExecuteCommandRequest, ExitNotification, HoverRequest, InitializeRequest,
+    InitializedNotification, InlayHintRefreshRequest, InlayHintRequest, InlayHintResolveRequest,
+    LogMessageNotification, Notification as _, ProgressNotification,
+    PublishDiagnosticsNotification, Request as _, SelectionRangeRequest,
+    SemanticTokensDeltaRequest, SemanticTokensRangeRequest, SemanticTokensRefreshRequest,
+    SemanticTokensRequest, SetTraceNotification, ShowMessageNotification, ShutdownRequest,
+    WorkDoneProgressCreateRequest,
 };
 
 pub const INITIALIZE: &str = InitializeRequest::METHOD.as_str();
@@ -48,6 +49,8 @@ pub const PROGRESS_CREATE: &str = WorkDoneProgressCreateRequest::METHOD.as_str()
 pub const INITIALIZED: &str = InitializedNotification::METHOD.as_str();
 pub const EXIT: &str = ExitNotification::METHOD.as_str();
 pub const DID_CHANGE_CONFIGURATION: &str = DidChangeConfigurationNotification::METHOD.as_str();
+pub const DID_CHANGE_WORKSPACE_FOLDERS: &str =
+    DidChangeWorkspaceFoldersNotification::METHOD.as_str();
 pub const DID_OPEN: &str = DidOpenTextDocumentNotification::METHOD.as_str();
 pub const DID_CHANGE: &str = DidChangeTextDocumentNotification::METHOD.as_str();
 pub const DID_CLOSE: &str = DidCloseTextDocumentNotification::METHOD.as_str();
