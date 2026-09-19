@@ -2,6 +2,7 @@
 
 use crate::codec::MessageAnalysis;
 use crate::dictionary::Lifecycle;
+use crate::tag;
 
 use super::Options;
 
@@ -59,7 +60,7 @@ pub fn hover(
                 removed_in: None,
             }));
         }
-        if field.tag == MSG_TYPE {
+        if field.tag == tag::MSG_TYPE {
             if let Some(message) = field
                 .text(line)
                 .and_then(|value| dict.message_idx(value))
@@ -97,8 +98,6 @@ pub fn hover(
         .collect::<Vec<_>>();
     Some(sections.join("\n\n---\n\n"))
 }
-
-const MSG_TYPE: u32 = 35;
 
 /// When the thing entered the protocol, when it was deprecated, and when it
 /// was removed — as one italic line, or nothing when none is known.

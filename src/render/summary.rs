@@ -7,6 +7,7 @@
 //! rather than any spelling of "nothing".
 
 use crate::codec::MessageAnalysis;
+use crate::tag::{self, exec_type};
 
 use super::template::{Fmt, Piece, Ref, Template};
 use super::Options;
@@ -109,7 +110,7 @@ fn raw<'a>(line: &'a [u8], analysis: &MessageAnalysis, tag: u32) -> Option<&'a s
 
 /// Per-MsgType detail line.
 pub fn details(line: &[u8], analysis: &MessageAnalysis) -> Option<String> {
-    let msg_name = analysis.label(35)?;
+    let msg_name = analysis.label(tag::MSG_TYPE)?;
 
     let text_of = |tag: u32| raw(line, analysis, tag);
     let label_of = |tag: u32| analysis.label(tag);
@@ -119,17 +120,17 @@ pub fn details(line: &[u8], analysis: &MessageAnalysis) -> Option<String> {
 
     let detail = match msg_name {
         "ExecutionReport" => {
-            // TODO: Move magic numbers for common tags into constants, and the tag numbers for the
-            // enum values into an enum.
-            let exec_type = label_of(150).unwrap_or(UNKNOWN);
-            // By value: dictionaries spell the label differently (`Trade`, `TRADE`).
-            if matches!(text_of(150), Some("F" | "G")) {
+            let exec_type = label_of(tag::EXEC_TYPE).unwrap_or(UNKNOWN);
+            if matches!(
+                text_of(tag::EXEC_TYPE),
+                Some(exec_type::TRADE | exec_type::TRADE_CORRECT)
+            ) {
                 format!(
                     "{exec_type} {}@{} ClOrdId={} ExecId={}",
-                    or(38, UNKNOWN),
-                    or(44, "MKT"),
-                    text_of(11).unwrap_or_default(),
-                    or(17, "MISSING"),
+                    or(tag::ORDER_QTY, UNKNOWN),
+                    or(tag::PRICE, "MKT"),
+                    text_of(tag::CL_ORD_ID).unwrap_or_default(),
+                    or(tag::EXEC_ID, "MISSING"),
                 )
             } else {
                 exec_type.to_owned()
@@ -137,19 +138,23 @@ pub fn details(line: &[u8], analysis: &MessageAnalysis) -> Option<String> {
         }
         "NewOrderSingle" => format!(
             "{} {} {} {} {} @ {}",
-            label_of(54).unwrap_or(UNKNOWN),
-            label_of(59).unwrap_or(UNKNOWN),
-            label_of(40).unwrap_or(UNKNOWN),
-            or(38, UNKNOWN),
-            or(55, UNKNOWN),
-            or(44, "MKT"),
+            label_of(tag::SIDE).unwrap_or(UNKNOWN),
+            label_of(tag::TIME_IN_FORCE).unwrap_or(UNKNOWN),
+            label_of(tag::ORD_TYPE).unwrap_or(UNKNOWN),
+            or(tag::ORDER_QTY, UNKNOWN),
+            or(tag::SYMBOL, UNKNOWN),
+            or(tag::PRICE, "MKT"),
         ),
-        "Logout" => text_of(58).unwrap_or_default().to_owned(),
-        "ResendRequest" => format!("{} - {}", or(7, "MISSING"), or(16, "MISSING")),
+        "Logout" => text_of(tag::TEXT).unwrap_or_default().to_owned(),
+        "ResendRequest" => format!(
+            "{} - {}",
+            or(tag::BEGIN_SEQ_NO, "MISSING"),
+            or(tag::END_SEQ_NO, "MISSING")
+        ),
         "SequenceReset" => {
-            let new_seq = or(36, "MISSING");
-            match text_of(123) {
-                Some("Y") => format!("Gap Fill to {new_seq}"),
+            let new_seq = or(tag::NEW_SEQ_NO, "MISSING");
+            match text_of(tag::GAP_FILL_FLAG) {
+                Some(tag::YES) => format!("Gap Fill to {new_seq}"),
                 _ => format!("Reset to {new_seq}"),
             }
         }

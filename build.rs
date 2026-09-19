@@ -18,6 +18,9 @@ mod model;
 #[allow(dead_code)]
 #[path = "src/dictionary/parse.rs"]
 mod parse;
+#[allow(dead_code)]
+#[path = "src/tag.rs"]
+mod tag;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;

@@ -395,7 +395,9 @@ impl MessageAnalysis {
 
     /// PossDupFlag(43) is `Y`: the line repeats a message that was sent before.
     pub fn is_poss_dup(&self, line: &[u8]) -> bool {
-        self.first(43).and_then(|field| field.text(line)) == Some("Y")
+        self.first(crate::tag::POSS_DUP_FLAG)
+            .and_then(|field| field.text(line))
+            == Some(crate::tag::YES)
     }
 
     /// Byte spans of this message's repeating groups.

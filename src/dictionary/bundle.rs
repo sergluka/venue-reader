@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::model::{EnumDef, FieldDef, GroupDef, ParsedDict};
 use super::parse::{attr, parse_doc, ParseError, Source};
+use crate::tag;
 
 /// Protocol order for comparing Orchestra pedigree against a bundled version.
 /// FIXT.1.1 shipped with FIX.5.0, so it shares that rank.
@@ -24,8 +25,6 @@ const VERSION_RANK: [(&str, u8); 12] = [
     ("FIX.5.0SP2", 9),
     ("FIX.Latest", 10),
 ];
-
-const MSG_TYPE: u32 = 35;
 
 fn rank(version: &str) -> Option<u8> {
     VERSION_RANK
@@ -122,7 +121,7 @@ pub fn parse_metadata(src: &Source) -> Result<Metadata, ParseError> {
 /// extension pack: not this version's. Everything QuickFIX declares stays,
 /// whatever Orchestra says about it — the file is the version.
 fn restore_values(field: &mut FieldDef, meta: &FieldMeta, current: Option<u8>) {
-    if field.tag == MSG_TYPE || !meta.own_code_set {
+    if field.tag == tag::MSG_TYPE || !meta.own_code_set {
         return;
     }
     let Some(current) = current else { return };
@@ -192,7 +191,7 @@ pub fn enrich(dict: &mut ParsedDict, meta: &Metadata, version: &str) {
         for value in &mut field.enums {
             // A MsgType value the version defines a message for is labelled by
             // that message's own name.
-            if field.tag == MSG_TYPE {
+            if field.tag == tag::MSG_TYPE {
                 if let Some(name) = messages.get(value.value.as_str()) {
                     value.name = (*name).to_owned();
                     value.description = (*name).to_owned();
@@ -201,7 +200,8 @@ pub fn enrich(dict: &mut ParsedDict, meta: &Metadata, version: &str) {
             let Some(code) = found.codes.get(&value.value) else {
                 continue;
             };
-            let relabel = field.tag != MSG_TYPE || !messages.contains_key(value.value.as_str());
+            let relabel =
+                field.tag != tag::MSG_TYPE || !messages.contains_key(value.value.as_str());
             if relabel && !code.name.is_empty() {
                 value.name = code.name.clone();
             }

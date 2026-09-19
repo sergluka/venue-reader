@@ -5,6 +5,7 @@
 
 use super::{Diag, LineCtx, Precondition, Rule};
 use crate::config::Severity;
+use crate::tag;
 
 /// The tokenizer parses any run of `tag=value` pairs, so a log can hold
 /// fragments — a dumped repeating group, a truncated line — that the other
@@ -29,7 +30,7 @@ impl Rule for BeginString {
         let fields = &ctx.message.fields;
         // The precondition guarantees the line has fields; a line that also has
         // a BeginString is a message, and there is nothing to report.
-        if fields.is_empty() || ctx.message.first(8).is_some() {
+        if fields.is_empty() || ctx.message.first(tag::BEGIN_STRING).is_some() {
             return Vec::new();
         }
         vec![Diag {
@@ -63,7 +64,7 @@ impl Rule for UnknownVersion {
     }
 
     fn check(&self, ctx: &LineCtx, severity: Severity) -> Vec<Diag> {
-        let Some(field) = ctx.message.first(8) else {
+        let Some(field) = ctx.message.first(tag::BEGIN_STRING) else {
             return Vec::new();
         };
         // Compared against what the line *resolved* to rather than against the
@@ -113,7 +114,11 @@ impl Rule for DictionaryVersion {
         if crate::dictionary::versions_compatible(selected, resolved) {
             return Vec::new();
         }
-        let Some(field) = ctx.message.first(8).or_else(|| ctx.message.fields.first()) else {
+        let Some(field) = ctx
+            .message
+            .first(tag::BEGIN_STRING)
+            .or_else(|| ctx.message.fields.first())
+        else {
             return Vec::new();
         };
         vec![Diag {

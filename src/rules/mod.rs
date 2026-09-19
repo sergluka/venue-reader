@@ -15,6 +15,7 @@ use std::sync::LazyLock;
 
 use crate::codec::{ByteOffset, Integrity, LineAnalysis, MessageAnalysis};
 use crate::config::{Diagnostics, Severity};
+use crate::tag;
 
 /// Every rule this server knows, in the order they are checked.
 pub const BUILTINS: &[&dyn Rule] = &[
@@ -101,7 +102,7 @@ impl<'a> LineCtx<'a> {
 
     /// BeginString(8)'s value as text, when the line carries one and it is UTF-8.
     pub fn begin_string(&self) -> Option<&'a str> {
-        self.message.first(8)?.text(self.bytes)
+        self.message.first(tag::BEGIN_STRING)?.text(self.bytes)
     }
 }
 
@@ -167,7 +168,7 @@ impl Registry {
         };
         let mut ctx = LineCtx::new(bytes, message);
         ctx.selected_version = self.selected_version.as_deref();
-        let is_fix = message.first(8).is_some();
+        let is_fix = message.first(tag::BEGIN_STRING).is_some();
         let mut out = Vec::new();
         for (rule, severity) in &self.rules {
             let holds = match rule.precondition() {

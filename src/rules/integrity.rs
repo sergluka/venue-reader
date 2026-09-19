@@ -15,6 +15,7 @@
 use super::{Diag, Edit, LineCtx, Precondition, Repair, Rule};
 use crate::codec::tokenize;
 use crate::config::Severity;
+use crate::tag;
 
 /// Below this the rule declines — too broken to reason about. Anchoring a
 /// repair needs a field to put it next to.
@@ -82,7 +83,7 @@ pub fn repair(ctx: &LineCtx) -> Option<Repair> {
     // reached by a free function that no precondition guards. Arithmetic over a
     // line that is not a message is arithmetic about nothing — and offering to
     // rewrite a line nothing was reported on is worse than not offering at all.
-    if fields.len() < MIN_FIELDS || ctx.message.first(8).is_none() {
+    if fields.len() < MIN_FIELDS || ctx.message.first(tag::BEGIN_STRING).is_none() {
         return None;
     }
     let facts = ctx.integrity();
