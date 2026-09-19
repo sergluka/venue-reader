@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use fix_lsp::config::Config;
 use fix_lsp::overrides::{modeline, parse_client, project};
 use serde_json::Value;
 
@@ -21,12 +22,15 @@ fn examples(language: &str) -> Vec<&'static str> {
 #[test]
 fn readme_toml_examples_match_current_source_parsers() {
     let blocks = examples("toml");
-    assert_eq!(blocks.len(), 4);
-    fix_lsp::config::user_file::parse(blocks[0], Path::new("/home/test/.config/fix-lsp.toml"))
-        .expect("personal defaults example");
-    for example in &blocks[1..] {
-        let parsed =
-            project::parse(example, Path::new("/work/.fix-lsp.toml")).expect("project example");
+    assert_eq!(blocks.len(), 5);
+    for example in blocks {
+        let parsed = if example.starts_with("# ~/.config/fix-lsp.toml") {
+            fix_lsp::config::user_file::parse(example, Path::new("/home/test/.config/fix-lsp.toml"))
+                .expect("personal defaults example")
+        } else {
+            assert!(example.starts_with("# .fix-lsp.toml"));
+            project::parse(example, Path::new("/work/.fix-lsp.toml")).expect("project example")
+        };
         assert!(
             parsed.layer.warnings.is_empty(),
             "{:?}",
@@ -40,7 +44,7 @@ fn readme_json_settings_match_the_global_parser() {
     let mut settings = 0;
     for example in examples("json") {
         let value: Value = serde_json::from_str(example).expect("valid JSON example");
-        if value.get("command").is_some() || value.get("source").is_some() {
+        if value.get("command").is_some() {
             continue;
         }
         let section = value.get("fix").cloned().unwrap_or(value);
@@ -52,6 +56,25 @@ fn readme_json_settings_match_the_global_parser() {
 }
 
 #[test]
+fn readme_defaults_match_the_complete_server_defaults() {
+    let readme = include_str!("../README.md");
+    let section = readme
+        .split("### Default settings\n")
+        .nth(1)
+        .expect("defaults section");
+    let example = section
+        .split("```json\n")
+        .nth(1)
+        .and_then(|block| block.split("```").next())
+        .expect("default settings example");
+    let documented: Value = serde_json::from_str(example).expect("valid defaults JSON");
+    assert_eq!(
+        documented,
+        fix_lsp::overrides::public_config(&Config::default())
+    );
+}
+
+#[test]
 fn readme_modelines_are_valid_together_at_one_level() {
     let examples = examples("text");
     let block = examples
@@ -59,7 +82,7 @@ fn readme_modelines_are_valid_together_at_one_level() {
         .find(|example| example.starts_with("# fix:"))
         .expect("modeline example");
     let lines: Vec<_> = block.lines().map(str::as_bytes).collect();
-    let layer = modeline::parse(&lines, "file:///work/orders.fix");
+    let layer = modeline::parse(&lines, "file:///work/example.fix");
     assert!(layer.warnings.is_empty(), "{:?}", layer.warnings);
     assert_eq!(
         layer.get("dictionary"),

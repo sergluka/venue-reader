@@ -1,766 +1,926 @@
 # fix-lsp
 
-An editor-independent [Language Server Protocol](https://microsoft.github.io/language-server-protocol/)
-server for **FIX protocol** logs. It decodes tag/value fields, message summaries,
-groups, and validation diagnostics for any LSP client (Neovim, VS Code, Helix,
-Zed, JetBrains via LSP4IJ).
+The project is evolving; its functionality and configuration may change.
 
-## Status
+An editor-independent language server for inspecting FIX protocol logs.
+It resolves fields and enum values against FIX dictionaries, reconstructs
+repeating groups, and provides annotations, navigation, and message integrity
+checks through the [Language Server Protocol](https://microsoft.github.io/language-server-protocol/).
 
-Pre-1.0. Stage 1 provides the transport, main loop, incremental document sync,
-configuration pull, and a hover stub. Stage 2 adds the dictionaries:
-QuickFIX/J's FIX.4.0 – FIX.5.0SP2 dictionaries, with descriptions from FIX
-Orchestra, compiled into the binary (one merged tag table with exact
-per-version views; `FIXT.1.1` resolves to `FIX.5.0SP2`, which also carries the
-FIXT.1.1 session layer — see [where the dictionaries come
-from](#where-the-dictionaries-come-from) and [bundled dictionary
-data](xml/README.md)),
-plus custom QuickFIX or Repository XML dictionaries configured through
-`fix.dictionaries` (`path` and `name` required, plus optional
-`mode: auto|quickfix|repository` and `default`). The XML is the only source of
-the dictionary's FIX version. `<component>` references inside QuickFIX messages
-are expanded, so groups defined in components are recognised. `default` is off unless
-asked for: registering a dictionary does not by itself change how every log of
-its version is read. Several venues share a FIX version but not its
-user-defined tag space, and only one dictionary can answer for that version --
-so mark that one `default: true` and leave the rest optional, to be selected
-per document by name.
-Stage 3 adds the codec. A line is tokenized, decoded against the dictionary
-its BeginString selects, its repeating groups and group paths reconstructed,
-and its BodyLength and CheckSum recomputed from the bytes; the result is cached
-per line, dropped when the dictionaries or `defaultVersion` change, and swept
-past `fix.limits.cachedLines` (4000 lines, about 1.8 MB) so a long scroll does
-not keep the whole file analysed. Message
-summaries render from the `fix.messageSummary.template` grammar.
+All analysis runs locally. FIX messages are not uploaded to a decoding service.
 
-Stage 4a-1 turns that into the first thing a user sees. Opening a FIX log
-publishes diagnostics for it: a BodyLength or CheckSum that disagrees with the
-bytes, a line that carries no BeginString and so is not a FIX message at all,
-and a BeginString no dictionary answers for. They are computed on a background
-thread, re-published as you type, and capped by
-`fix.limits.diagnosticsPerDocument` with one entry saying how many were left
-out. Each rule can be switched off or regraded under `fix.diagnostics.rules`.
+- [Functionality](#functionality)
+- [Installation](#installation)
+- [Running the server](#running-the-server)
+- [Configuration](#configuration)
+- [Custom dictionaries](#custom-dictionaries)
+- [LSP capabilities](#lsp-capabilities)
+- [Custom commands](#custom-commands)
+- [Semantic tokens](#semantic-tokens)
+- [Diagnostics](#diagnostics)
+- [Bundled dictionary sources](#bundled-dictionary-sources)
+- [Security](#security)
+- [Contributing](#contributing)
+- [License](#license)
 
-Stage 4a-2 makes those diagnostics actionable. Put the cursor on a line whose
-BodyLength or CheckSum disagrees with its bytes, invoke code actions, and one
-entry corrects it -- inserting a missing tag with the separator that line
-actually uses, and carrying the document version so it cannot be applied to
-text that has moved. A client that cannot take a versioned code-action literal
-is offered no provider at all rather than an edit it did not agree to.
+## Functionality
 
-Stage 4a-3 finishes Stage 4a with hover. Put the cursor on a tag or its value
-and get what the dictionary knows: the field's name, type and description, the
-enum label and what it means, the message description and category for
-MsgType(35),
-the group path when the field sits inside a repeating group, when the tag
-entered the protocol and when it left it, and a link to the reference -- which
-is `fix.documentLink.url`, so it can point at your own dictionary browser
-instead. Hovers are asserted whole, not in fragments: the order of the
-paragraphs is as much the contract as their text.
+fix-lsp processes one FIX message per line. It accepts SOH, pipe (`|`), and
+caret (`^`) separators, and can skip a log prefix before BeginString(8).
+Blank lines and `#` comments are supported.
 
-Stage 4b draws the dictionary's answer beside the bytes. With
-`fix.inlayHints.tagNames` and `fix.inlayHints.enumValues` switched on, every tag
-is labelled with its name -- or with its full path when it sits inside a
-repeating group -- and every value with its enum label, and hovering the hint
-gives the same markdown hover does.
+Bundled dictionaries cover FIX 4.0, 4.1, 4.2, 4.3, 4.4, 5.0, 5.0 SP1, and
+5.0 SP2. FIXT 1.1 resolves to the bundled FIX 5.0 SP2 dictionary, which includes
+the FIXT session definitions. Versions are resolved independently for each
+line from BeginString(8), so one log can contain messages from different FIX
+versions. Custom XML dictionaries can define their own fields, values,
+messages, and groups.
 
-Both labels are yours to write. `fix.inlayHints.tagNames.format` and
-`.enumValues.format` are literal text plus a nameless hole, `{}`, which is the
-tag's name for the first and the value's meaning for the second. The hole needs
-no name because each setting draws one thing, and writing it twice simply
-repeats the value. An empty hole draws nothing at all, so a tag the dictionary
-does not define is passed over rather than labelled `()`; by the same rule a
-format with no hole, such as `"!"`, is drawn on every field. Write a literal
-brace by doubling it.
+### Inspecting messages
 
-The one-line message summary rides one of
-two channels, selected by `fix.messageSummary.channels`: a code lens above the
-line, or an inlay hint at its start. Both are bounded -- the inlay channel by
-the range in its request, the lens channel by lazy resolve over a list that only
-classifies lines -- so neither reads the whole document to answer. A
-configuration change that alters what they would say asks the client to
-re-request them.
+- **Hover:** field name, number, type, description, enum meaning, and available
+  introduction/deprecation metadata. MsgType(35) also shows the message
+  description and category. Fields inside repeating groups include their path.
+- **Inlay hints:** tag names and enum labels alongside the original text.
+  Group paths can identify which entry a field belongs to.
+- **Message summaries:** configurable summaries above each line through code
+  lens, or at the start of the line through inlay hints. Optional details
+  describe selected message types using fields on that line.
+- **Document symbols (`textDocument/documentSymbol`):** an outline of messages,
+  fields, and nested repeating-group entries.
+  `documentSymbol.depth` selects `messages`, `fields`, or `full`.
+- **Expand selection:** value → field → group entry → group → enclosing
+  groups → message line.
+- **Decoded selections:** `fix.decode` returns annotated text for an editor
+  to display or copy.
+- **Diagnostics and quick fixes:** identify missing or incorrect
+  BodyLength(9) and CheckSum(10), and repair both together.
 
-Two limitations worth knowing before you switch a channel on. **Code lens does
-not scale**: `CodeLensParams` carries no range, so the list is whole-document by
-protocol and past `fix.limits.codeLensLines` the answer is empty rather than
-slow. And **in Helix the summary has no working channel**: Helix implements no
-code lens, and an inlay hint at the start of a line is clipped to its last few
-characters there with no way to scroll to it. Tag and value hints work normally
-in Helix; the summary is for VS Code and Neovim.
+### Usage
 
-Stage 4c-1 adds **expand-selection** that knows the shape of a line: from
-inside a value it grows to the value, then the whole `tag=value`, then the line.
+Open a FIX log through your editor's LSP client with language ID `fix`.
+For example, this synthetic Heartbeat has a valid length and checksum:
 
-Stage 4c-2 adds the **outline**: one entry per message, its fields under it,
-and a repeating group as a list of entries holding their own fields, nested as
-deep as the message goes. `fix.documentSymbol.depth` chooses how far down it
-goes -- `messages`, `fields` or `full` -- and `fix.documentSymbol.template`
-names the message row. The same stage gives expand-selection the levels it was
-missing: a field inside a repeating group now grows through its entry, then the
-whole group, then its parent's, before reaching the line.
+```text
+8=FIX.4.4|9=61|35=0|49=DEMO_SENDER|56=DEMO_TARGET|34=1|52=20260919-12:00:00|10=149|
+```
 
-An outline is counted in symbols, and a log carries far more of them than it
-carries lines: a 10 000-line log at 62 fields a line is 642 000 symbols, which
-no editor will draw. So the answer degrades by steps rather than emptying --
-every message first, then fields while `fix.limits.documentSymbolItems` lasts,
-then a final entry saying how many messages were left out, and one log line
-naming the setting that would show more.
+Hover over MsgType(35) to inspect the message definition. Enable tag and enum
+hints to display `35(MsgType)=0(Heartbeat)` without changing the file.
+Use the outline to navigate messages and groups, or `fix.decode` to obtain
+annotated text for a selection. If CheckSum(10) is changed to `000`, the
+editor offers an integrity diagnostic and a quick fix.
 
-The repository ships no broker dictionaries;
-[custom dictionary fixtures](xml/custom/README.md) explain how to run the
-parser over ones you download yourself.
+### Document symbols
 
-Stage 5 adds personal and project TOML configuration, comment modelines,
-per-document dictionary selection, and commands for selecting a session
-dictionary and inspecting the effective settings. The editor and server run
-on the same host: the server reads configuration and XML files itself. Clients
-provide global LSP settings, not discovered or merged TOML files.
+The editor's outline exposes each message as a tree. Selecting a message,
+field, group, or group entry navigates to its location in the log.
+`documentSymbol.depth` controls the detail: `messages` shows message titles,
+`fields` adds fields, and `full` nests repeating groups and their entries.
 
-## Colours
+With `documentSymbol.depth = "full"` and
+`documentSymbol.template = "{msgName} ({35})"`, a synthetic FIX 4.4
+NewOrderSingle excerpt with two parties and one nested party sub-ID produces:
 
-Highlighting is sent as semantic tokens: the server names a type and a set of
-modifiers for each range, and the client decides what colour that is. Two tags
-are read for what they are rather than for their datatype, because a QuickFIX
-dictionary invents an enum for every message type and would otherwise leave
-nothing spelled as a keyword.
+```text
+NewOrderSingle (D)
+├── BeginString (8) = FIX.4.4
+├── MsgType (35) = D (NewOrderSingle)
+├── NoPartyIDs (453) = 2
+│   ├── [1]
+│   │   ├── PartyID (448) = A
+│   │   ├── PartyIDSource (447) = D (Proprietary)
+│   │   ├── PartyRole (452) = 1 (ExecutingFirm)
+│   │   └── NoPartySubIDs (802) = 1
+│   │       └── [1]
+│   │           ├── PartySubID (523) = S1
+│   │           └── PartySubIDType (803) = 1 (Firm)
+│   └── [2]
+│       ├── PartyID (448) = B
+│       ├── PartyIDSource (447) = D (Proprietary)
+│       └── PartyRole (452) = 2 (BrokerOfCredit)
+└── Side (54) = 1 (Buy)
+```
 
-Seven of the token types are the standard LSP names, so they colour under any
-theme:
+Entry numbers such as `[1]` are local to each group. This feature requires the
+LSP client to advertise hierarchical document-symbol support.
 
-| type | what carries it |
+### Labels and summaries
+
+`inlayHints.tagNames.format` and `inlayHints.enumValues.format` use `{}`
+for the resolved name or label. For example, `"[{}]"` produces `[MsgType]`.
+Write literal braces as `{{` and `}}`. An unresolved placeholder suppresses
+the label; a format containing only literal text applies to every field.
+With group paths enabled, a tag name can become
+`NoMDEntries/1/MDEntryType`, identifying entry 1 of NoMDEntries(268) and its
+MDEntryType(269) field.
+
+Message summaries and outline message titles use a separate template grammar:
+
+| Form | Meaning |
 | --- | --- |
-| `property` | every tag |
-| `namespace` | the value of BeginString(8), the FIX version |
-| `keyword` | the value of MsgType(35), the message type |
-| `enumMember` | a value the dictionary resolves to a named constant |
-| `number` | a sequence number, a length, a percentage, a group counter |
-| `string` | text, characters, booleans and raw data |
-| `comment` | a comment line, and a log prefix before the first tag |
+| `{35}` | Raw value of MsgType(35). Any numeric tag is accepted. |
+| `{35:name}` | Message name for MsgType(35); enum label for other tags, falling back to the raw value. |
+| `{52\|???}` | SendingTime(52), or the fallback text when absent or empty. |
+| `{35:name\|???}` | Combine a format and fallback. |
+| `{msgName}`, `{sender}`, `{target}` | Aliases for the message name, SenderCompID(49), and TargetCompID(56). |
+| `{possDup}` | Append `[POSS DUP]` when PossDupFlag(43) is `Y`. |
+| `{details}` | Place the available message-specific detail text here. |
+| `{{`, `}}` | Literal braces. |
 
-Five are our own, because no standard name describes them. A theme has to map
-these before they take a colour of their own; until it does they keep whatever
-the editor's grammar already gave them.
+The default summary includes SendingTime(52), MsgSeqNum(34),
+SenderCompID(49), TargetCompID(56), and MsgType(35). With
+`messageSummary.details = true`, available detail text is appended unless
+the template already contains `{details}`.
 
-| type | what carries it | from |
-| --- | --- | --- |
-| `price` | a price per unit | `Price` |
-| `quantity` | a number of units | `Qty` |
-| `money` | an amount rather than a level: a total, or a difference read against a price | `Amt`, `PriceOffset` |
-| `timestamp` | any date or time | `UTCTimestamp`, `LocalMktDate`, and the rest |
-| `group` | one whole entry of a repeating group | — |
+Detail renderers cover NewOrderSingle, ExecutionReport, Logout, ResendRequest,
+and SequenceReset. These summarize fields from an individual message; they do
+not reconstruct order lifecycles or correlate session history.
 
-The last of those is the only token that overlaps another, and it is sent only
-to a client that says it can render overlapping tokens. **A group entry's own
-fields carry the same group modifier the overlay does, so colour one of the two
-and not both.**
+### Hover
 
-The modifiers say what the dictionary knows beyond the type. `deprecated` is
-the standard name; the rest are FIX facts.
+Hover over a tag or its value to inspect the field's dictionary definition,
+datatype, description, and decoded enum value. Available metadata shows when
+the field or value was introduced, and when the field was deprecated or
+removed. Fields inside repeating groups include their group path;
+MsgType(35) also includes the message description and category.
 
-| modifier | meaning |
+For example, hovering over `35=0` (MsgType(35)) in the Heartbeat above displays:
+
+> **MsgType** (35) — String
+>
+> Defines message type ALWAYS THIRD FIELD IN MESSAGE. (Always unencrypted)
+>
+> *Introduced in FIX.2.7*
+>
+> ---
+>
+> Value: `0` — **Heartbeat**
+>
+> *Introduced in FIX.2.7*
+>
+> The Heartbeat monitors the status of the communication link and identifies when the last of a string of messages was not received.
+>
+> *Category: Session*
+>
+> ---
+>
+> [FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/4.4/tagNum_35.html)
+
+The popup's appearance depends on the editor and theme. Reference links can
+be disabled or redirected through `documentLink.url`.
+
+### Large logs and editor support
+
+Requests are bounded to keep large logs usable. The default limits are listed
+under [Configuration](#default-settings).
+
+- Code lens returns no summaries for documents above `limits.codeLensLines`.
+  For larger logs, use `messageSummary.channels.codeLens = false` and
+  `messageSummary.channels.inlayHints = true` to request summaries by range.
+- Full semantic highlighting covers only the first
+  `limits.semanticTokensFullLines` lines. Range-capable clients can request
+  other portions of the document.
+- The outline reduces detail when its symbol budget is exhausted, then
+  truncates message entries with a marker indicating how many remain.
+- Diagnostics are capped, with a final entry reporting omitted diagnostics.
+
+Features depend on the client's advertised capabilities. In particular, a
+hierarchical outline requires hierarchical document-symbol support; quick
+fixes require versioned document edits. Custom token colors depend on the
+editor's theme configuration.
+
+The project has recorded a Helix compatibility limitation: unavailable code
+lens and clipped line-start inlay summaries, while tag and enum hints remained
+usable. Recheck summary display against the installed Helix version; the server
+has no editor-specific workaround.
+
+## Installation
+
+TODO: provide installation instructions and a configuration or add-on for each
+editor. The first candidates are:
+
+- **Neovim:** configuration for the built-in LSP client.
+- **VS Code:** an extension connecting FIX files to the server and declaring
+  custom semantic token types.
+
+## Running the server
+
+Build from source with Rust 1.91 or later:
+
+```sh
+cargo build --release
+./target/release/fix-lsp --stdio
+```
+
+The binary is a standalone LSP process. An editor or another LSP client starts
+it and exchanges framed JSON-RPC messages over stdin/stdout. It does not accept
+raw FIX logs on stdin as a command-line decoder. Only stdio transport is
+supported; there is no TCP listener.
+
+Once the binary is on `PATH`:
+
+```sh
+fix-lsp --stdio --log-level debug --log-file /tmp/fix-lsp.log
+fix-lsp --version
+fix-lsp --help
+```
+
+| Option | Purpose / default |
 | --- | --- |
-| `deprecated` | the dictionary marks the tag deprecated |
-| `header`, `trailer` | the tag belongs to the session layer, as that dictionary declares it |
-| `session` | the whole line is administrative traffic rather than an order |
-| `possDup` | the line repeats a message sent before |
-| `unknown` | the tag is not in the dictionary the line selected |
-| `count` | the field counts the entries of a repeating group |
-| `group1a` … `group3b` | nesting depth, alternating between two markers so adjacent entries differ |
+| `--stdio` | Required to run the LSP server. |
+| `--log-level <level>` | `off`, `error`, `warn`, `info`, `debug`, or `trace`; default `info`. |
+| `--log-file <path>` | Append server logs to a file; default is stderr. |
+| `--version` | Print the version and exit. |
+| `--help`, `-h` | Print usage and exit. |
 
-Groups nested deeper than three share the deepest pair of markers. One
-limitation: a repeating group declared inside a QuickFIX `<header>` marks its
-fields as header fields, but is not recognised as a group, because groups are
-read only from message definitions.
-
-**Mapping the custom names.** In an editor whose highlight groups are named
-after the legend, a rule per name is enough — `price`, `quantity`, `money`,
-`timestamp` and `group`, optionally with a modifier, and each is addressable
-together with a modifier as well. In VS Code the five are unknown types, so an
-extension has to declare each with a `superType` a theme already colours
-(`number` for the first three, `string` for `timestamp`, `variable` for
-`group`); without that declaration a theme cannot reach them.
-
-**How much is coloured.** Which of two requests a client gets depends on what it
-says it will send. A client that asks about a viewport is answered about a
-viewport, bounded by `fix.limits.rangeLines` (2000), and past that bound the
-answer is empty with one line in the log rather than a shorter answer it could
-not tell from an uncoloured file. A client that asks about the whole document is
-answered about the first `fix.limits.semanticTokensFullLines` lines (2000) and
-then keeps up through edits. That number is set by the client rather than by the
-server: colouring a whole 10 000-line log takes half a second here, but the
-2000-line answer is already 255 000 tokens, and a client rebuilds every one of
-them per response. `fix.semanticTokens.enabled` switches the whole thing off
-without a reconnect.
-
-## Commands
-
-The server advertises exactly three commands over `workspace/executeCommand`:
-`fix.decode`, `fix.useDictionary`, and `fix.describeOverrides`.
-
-`fix.decode` takes two arguments -- a document URI and a list of ranges -- and
-answers with the decoded text as a single string: every selected field as
-`tag(Name)=value(Label)`, fields joined by `|` and lines by newlines. Names and
-enum labels are written by the same two format settings the inlay hints use, so
-a decoded field reads the way the hint beside it does. The hint *switches* do
-not reach here: how a field is spelled is one choice, whether it is drawn on
-screen is another, and a client that asked for a decode and got the bytes back
-unchanged was given nothing.
-
-Each range is read the way LSP means a range: from the start position to the
-end position, so the first line is taken from its start column, the last to its
-end column, and the ones between whole. There is no mode argument. A rectangle
-is the one selection two positions cannot describe, so a blockwise selection is
-sent as one range per line, and so is a multi-cursor selection. Ranges answer
-independently and in the order given; an overlap decodes twice, because merging
-them would be a guess about what was selected. An empty range is a cursor and
-answers with the field under it.
-
-A selection over `fix.limits.rangeLines` in total is refused rather than
-truncated: the answer is headed for a register or a clipboard, where half a
-selection is worse than being told the selection is too big.
-
-`fix.useDictionary` takes one non-empty dictionary name. It sets a session-wide
-choice below project/modeline selectors, not `defaultVersion`:
-
-```json
-{"command":"fix.useDictionary","arguments":["venue-a"]}
-```
-
-Names come from bundled, personal, or global LSP definitions; project-only
-names are unavailable to this URI-less command. Before the first global
-configuration commits, only bundled names are available. The command selects
-an entry from the last committed global registry: it does not read or reload
-XML and does not accept paths. A representative result is:
-
-```json
-{"name":"venue-a","version":"FIX.4.4","source":"/work/dict/venue-a.xml"}
-```
-
-The result's `name` is always a string. The choice survives global settings
-updates while the name remains registered. If a later update removes the name,
-the server clears the choice and reports a warning; adding it back does not
-restore the old choice. Restart also clears it.
-
-`fix.describeOverrides` takes one open document URI:
-
-```json
-{"command":"fix.describeOverrides","arguments":["file:///work/logs/orders.fix"]}
-```
-
-It returns `effective` (all settings under canonical dotted keys, including
-defaults and global controls), `sources` (the winning source for every key),
-`warnings`, and the applicable `dictionaries`. For example, `effective` may contain
-`"inlayHints.tagNames.enabled": true` and `"dictionary": "venue-a"`.
-Each `sources` entry contains its layer and source; a modeline source also has
-the exact LSP `range` of the assignment. TOML sources identify the file rather
-than an approximate key position.
-The command returns data for the client to display; no editor-specific API is
-needed. It never reads files, reloads dictionaries, applies configuration, or
-scans document text. During an update it returns the last committed state;
-before a document has usable configuration it returns `RequestFailed`.
-Canonical local dictionary paths are visible, but document text and XML
-contents are not. Normal analysis-cache eviction after requests is unaffected.
+Stdout is reserved for LSP traffic. There is no `--config` option; settings
+come from the sources below.
 
 ## Configuration
 
-All settings are optional. The schemas describe [global LSP settings](schema/fix-lsp.schema.json),
-[personal TOML](schema/fix-lsp-user.schema.json), and
-[project TOML](schema/fix-lsp-project.schema.json); the
-[settings catalog](src/overrides/catalog.rs) defines known paths and their scope.
-There is no system/admin configuration file or `--config` option.
+Settings use the same canonical names across LSP, TOML, and modelines. Only
+explicitly supplied values override lower-priority values, including when an
+explicit value equals a built-in default. Objects merge per setting;
+dictionary declarations accumulate subject to name and version-default rules.
 
-Settings merge from weakest to strongest:
+### Sources and precedence
 
-1. Built-in defaults.
-2. Personal `~/.config/fix-lsp.toml`.
-3. Global LSP `fix` settings.
-4. `fix.useDictionary` session choice, for the dictionary selector only.
-5. Matching project `.fix-lsp.toml` files, workspace root to document directory.
-6. Modelines in the document's first and last five lines.
+From lowest to highest priority:
 
-Only explicit values override weaker settings, even when equal to defaults.
-Removing a value reveals the weaker one; an empty object does not erase its
-unspecified children. There is no scoped LSP configuration or
-`fix.documentOverrides`. Non-file buffers use only the global base and session
-choice, without project discovery or modelines.
+| Priority | Source | Scope |
+| --- | --- | --- |
+| 1 | Built-in defaults | All documents. |
+| 2 | `~/.config/fix-lsp.toml` | Personal defaults for the server user. |
+| 3 | Global LSP `fix` settings | The editor's server session. |
+| 4 | Matching `.fix-lsp.toml` files | Workspace root to document directory; nearer files override ancestors. |
+| 5 | Document modelines | Settings embedded in edge comments. |
 
-### Personal defaults and global LSP settings
+The `fix.useDictionary` command changes only the session's dictionary selection.
+Project configuration and modelines take precedence over this selection; the
+command does not change any other settings.
 
-Create `~/.config/fix-lsp.toml`, if desired:
+Project discovery starts at the longest containing workspace folder, falling
+back to a containing `rootUri`. Without either, only the document's directory
+is searched. Non-file buffers use global settings and the session selection,
+without project discovery or modelines.
 
-```toml
-[inlayHints.tagNames]
-enabled = true
+### LSP settings
 
-[diagnostics.rules.integrity]
-severity = "warning"
-```
-
-The location is resolved from the server user's home directory, not the
-workspace or working directory. It is independent of project discovery and
-still loads when `overrides.projectConfig = false`. No TOML file has a
-format-version field: it must match the current server's schema. Unknown server
-keys reject the entire file with an Error; known editor-owned keys are ignored,
-and schema-permitted opaque rule options are preserved.
-
-The client supplies global settings under `fix` in `initializationOptions` or
-`workspace/didChangeConfiguration.settings`. For example:
+Supply settings under `initializationOptions.fix` when starting the server.
+For push updates, use `workspace/didChangeConfiguration` with this
+`settings` object:
 
 ```json
-{"fix":{"inlayHints":{"tagNames":{"enabled":false}}}}
+{
+  "fix": {
+    "inlayHints": {
+      "tagNames": { "enabled": true },
+      "enumValues": { "enabled": true }
+    },
+    "messageSummary": {
+      "channels": { "codeLens": false, "inlayHints": true }
+    }
+  }
+}
 ```
 
-This overrides the personal tag-name gate but retains the personal integrity
-severity. If the client supports `workspace/configuration`, the server pulls
-only `{"section":"fix"}`, without `scopeUri`, on `initialized` and
-`didChangeConfiguration`. Its response item is the section itself, without a
-second `fix` wrapper. JSON uses nested properties; literal dotted properties,
-old aliases, and `fix_*` names are not expanded. Unknown global JSON keys are
-preserved, unlike unknown TOML keys.
+If the client advertises `workspace.configuration`, the server requests
+`workspace/configuration` on initialization and configuration changes,
+using `{"section":"fix"}` without `scopeUri`. The response is a one-element
+array containing the section object itself, without a second `fix` wrapper.
 
-### Project configuration
+Use nested JSON objects. Literal dotted JSON keys such as
+`"inlayHints.tagNames.enabled"` are not expanded.
 
-Each directory can contain `.fix-lsp.toml`; matching files merge per setting:
+### Personal and project TOML
 
-```text
-work/
-├── .fix-lsp.toml
-└── logs/
-    └── venue-a/
-        ├── .fix-lsp.toml
-        └── orders.fix
-```
-
-For example, the root file enables tag labels and selects a summary channel:
+Personal settings use the fixed path `~/.config/fix-lsp.toml`, resolved
+against the server user's home directory:
 
 ```toml
+# ~/.config/fix-lsp.toml
 [inlayHints.tagNames]
 enabled = true
+
+[inlayHints.enumValues]
+enabled = true
+```
+
+Project files are named `.fix-lsp.toml` and may be placed in nested directories,
+not just at the workspace root. For example, `logs/archive/.fix-lsp.toml` can
+override settings from `logs/.fix-lsp.toml` and the root `.fix-lsp.toml` for
+documents under `logs/archive/`. Matching configurations are merged from root
+to leaf; a nested file overrides only the settings it supplies.
+
+Example configuration:
+
+```toml
+# .fix-lsp.toml
+files = ["*.fix", "logs/**/*.fix"]
+
+[inlayHints.tagNames]
+format = "[{}]"
 
 [messageSummary.channels]
 codeLens = false
 inlayHints = true
 ```
 
-The child file changes only the label format for matching files:
+The optional `files` array filters documents relative to that configuration
+file. Patterns are case-sensitive and anchored; `*` does not cross directory
+separators, while `**` does. Omit `files` to apply settings to all descendant
+documents. Empty arrays, absolute patterns, and `..` components are rejected.
+A nonmatching configuration does not prevent other ancestors or descendants
+from contributing settings.
 
-```toml
-files = ["*.fix"]
-
-[inlayHints.tagNames]
-format = "[{}]"
-```
-
-`orders.fix` inherits the enabled labels and summary channel, with `[Name]`
-labels. Without `files`, a file applies to every descendant document. When
-present, `files` is a non-empty list of anchored, case-sensitive globs relative
-to that configuration's directory: `*` and `?` do not cross `/`, while `**`
-does. Absolute patterns and escaping `..` are rejected. A non-matching file
-does not stop ancestor/child merging.
-
-Discovery starts at the longest containing workspace folder (or a containing
-`rootUri`). Without either boundary, only the document's directory is checked.
-Symlinked roots and unsaved paths use canonical ancestor containment. Workspace
-folder changes update discovery; they do not change the initialization root
-used by relative global dictionary paths.
+TOML has no format-version field. Unknown server keys reject the file's
+settings. Known editor-owned settings are ignored; duplicate TOML keys are
+invalid. See the [personal schema](schema/fix-lsp-user.schema.json) and
+[project schema](schema/fix-lsp-project.schema.json).
 
 ### Modelines
 
-Only `#` comment lines in the first/last five lines are scanned. Interior blank
-lines count; the synthetic empty line after a final newline does not. Short
-documents are scanned without counting overlapping windows twice.
+Place `# fix:` comments within the first or last five content lines.
+A terminal newline does not add a line to that scan:
 
 ```text
 # fix: inlayHints.tagNames.enabled=true: inlayHints.tagNames.format="[{}]":
 # fix: dictionary=FIX.4.4 diagnostics.rules.integrity.severity=warning
 ```
 
-The `fix:` marker must start the comment body or follow a space/tab. Assignments
-use canonical dotted keys, separated by whitespace or colons. Quoted strings
-can contain whitespace and colons; `\:` escapes a literal colon. Empty segments
-and a trailing colon are ignored. Only this form is supported, not `fix: set`.
-Markers inside FIX payloads are never settings. `unset` removes a modeline
-candidate to reveal a weaker value; `"unset"` is an ordinary string. TOML has
-no `unset` extension: remove the key instead.
+Assignments use `key=value`, separated by whitespace or colons. Quote values
+containing spaces or colons; `\:` also escapes a colon. A trailing colon is
+allowed. Only comment lines are scanned, never FIX payload fields.
+The `fix: set` form is not supported.
 
-Duplicate setting keys at one level are errors even when equal. A TOML file
-is one level and native duplicate keys reject it. All scanned modelines form
-one level: a duplicate rejects that setting's candidates across those lines,
-while unrelated settings remain usable. Different files can override ordinary
-settings without being duplicates.
+`unset` removes that modeline setting and reveals the lower-priority value;
+`"unset"` is a literal string. All scanned modelines form one scope:
+duplicate keys reject that key's modeline override and report an error.
+Other valid assignments remain usable. TOML has no `unset` value;
+remove the key instead.
 
-### Settings and scope
+### Setting scope
 
-| Settings | Personal TOML / global LSP | Project TOML / modeline |
-| --- | --- | --- |
-| `inlayHints.tagNames.{enabled,format}`, `inlayHints.enumValues.{enabled,format}`, `inlayHints.groupPaths.enabled` | yes | yes |
-| `messageSummary.{enabled,template,details}`, `messageSummary.channels.{codeLens,inlayHints}` | yes | yes |
-| `diagnostics.enabled`, `diagnostics.rules.*` | yes | yes |
-| `hover.enabled`, `semanticTokens.enabled` | yes | yes |
-| `documentSymbol.{enabled,depth,template}` | yes | yes |
-| `defaultVersion`, `documentLink.url`, `allowDictionaryPath` | yes | no |
-| `limits.*`, `overrides.modeline`, `overrides.projectConfig` | yes | no |
-| `dictionaries[]` | yes, path permission required | project TOML only, path permission required |
-| `dictionary` selector | session command only | yes |
+| Settings | Personal TOML / global LSP | Project TOML | Modelines |
+| --- | --- | --- | --- |
+| `hover.*`, `semanticTokens.*`, `inlayHints.*`, `messageSummary.*`, `documentSymbol.*`, `diagnostics.*` | Yes | Yes | Yes |
+| `defaultVersion`, `allowDictionaryPath`, `documentLink.url`, `overrides.*`, `limits.*` | Yes | No | No |
+| `dictionaries[]` | Yes | Yes | No |
+| `dictionary` selector | Session command only | Yes | Yes |
+| `files` filter | No | Yes | No |
 
-A project cannot grant itself filesystem access or redirect reference links.
-Attempts to set global-only controls there produce configuration warnings and
-leave weaker values in force. Switching a source off removes its values and
-diagnostics and stops scanning/discovery for it. Presentation changes cannot
-enable a provider or refresh method the client did not negotiate.
+Global-only settings in project files or modelines are rejected with a
+configuration warning. A document cannot grant itself dictionary file access
+or redirect reference links.
 
-Editor-owned `render.summary.position`, `render.group.highlight.{enabled,target}`,
-`formatter.*`, `annotate.title.position`, and `annotate.group.highlight.enabled`
-are silently ignored and omitted from effective-settings reports. How an
-editor displays these is entirely its choice.
+### Default settings
 
-### Default values
+These are the complete built-in configuration values, expressed as the LSP
+`fix` section. TOML and modelines inherit the same defaults for settings
+allowed in their scope; they do not have separate default sets. Keep actual
+configuration files sparse so higher layers only override intended settings.
 
 ```json
 {
-  "defaultVersion": "FIX.4.4",
   "allowDictionaryPath": false,
+  "defaultVersion": "FIX.4.4",
   "dictionaries": [],
-
-  "hover":          { "enabled": true },
+  "overrides": { "projectConfig": true, "modeline": true },
+  "hover": { "enabled": true },
   "semanticTokens": { "enabled": true },
-  "documentSymbol": { "enabled": true, "depth": "full",
-                      "template": "#{34} {49}→{56} {35:name} ({35})" },
-
   "inlayHints": {
-    "tagNames":   { "enabled": false, "format": "({})" },
+    "tagNames": { "enabled": false, "format": "({})" },
     "enumValues": { "enabled": false, "format": "({})" },
     "groupPaths": { "enabled": true }
   },
-
   "messageSummary": {
     "enabled": true,
-    "channels": { "codeLens": true, "inlayHints": false },
     "template": "{52|???}: {34|???}: {49|???}=>{56|???} | {35:name|???}{possDup}",
-    "details": true
+    "details": true,
+    "channels": { "codeLens": true, "inlayHints": false }
   },
-
-  "diagnostics": {
+  "documentSymbol": {
     "enabled": true,
-    "rules": { "beginString": true, "unknownVersion": true,
-               "dictionaryVersion": { "enabled": true, "severity": "warning" },
-               "integrity": { "enabled": true, "severity": "error" } }
+    "depth": "full",
+    "template": "#{34} {49}→{56} {35:name} ({35})"
   },
-
-  "documentLink": { "url": "https://www.onixs.biz/fix-dictionary/{version}/tagNum_{tag}.html" },
-
-  "overrides": { "modeline": true, "projectConfig": true },
-
+  "documentLink": {
+    "url": "https://www.onixs.biz/fix-dictionary/{version}/tagNum_{tag}.html"
+  },
+  "diagnostics": { "enabled": true, "rules": {} },
   "limits": {
-    "rangeLines": 2000, "semanticTokensFullLines": 2000, "codeLensLines": 20000,
-    "documentSymbolItems": 50000, "diagnosticsPerDocument": 10000,
-    "dictionaryBytes": 16777216, "cachedLines": 4000
+    "dictionaryBytes": 16777216,
+    "diagnosticsPerDocument": 10000,
+    "rangeLines": 2000,
+    "codeLensLines": 20000,
+    "documentSymbolItems": 50000,
+    "semanticTokensFullLines": 2000,
+    "cachedLines": 4000
   }
 }
 ```
 
-Two hints are off by default because they double the width of every line; the
-summary is on. A section written but left empty keeps its own default rather
-than the type's, so `"tagNames": {}` does not turn anything on. The two
-structural rules and dictionary-version mismatch run at `warning`; integrity
-runs at `error`.
+An empty `diagnostics.rules` uses each rule's defaults: all four rules are
+enabled, with severities listed under [Diagnostics](#diagnostics).
+`inlayHints.groupPaths.enabled` changes tag labels; it produces no hints
+while tag-name hints are disabled.
 
-**A section that is malformed is refused whole and named**, so the server keeps
-the configuration it had rather than half-applying a new one, and the message
-says which key it could not read. A section the server does not *know*, though,
-is simply kept unread -- so a misspelled `inlayHnts` costs you the hints with
-no complaint. Check a key against the schema rather than against the log.
+There is no explicit `dictionary` selection by default: BeginString(8)
+selects the version, using `defaultVersion` when it cannot.
+`files` has no filter by default. Dictionary-entry defaults are
+`mode = "auto"` and `default = false`; `name` and `path` are required.
 
-### Custom XML dictionaries
+| Limit | Effect |
+| --- | --- |
+| `dictionaryBytes` | Maximum bytes per external XML file; default 16 MiB. |
+| `diagnosticsPerDocument` | Maximum FIX diagnostics per document. |
+| `rangeLines` | Maximum lines for hints, range tokens, and code actions; total selected lines for `fix.decode`; distinct cursor lines for selection expansion. |
+| `codeLensLines` | Maximum document size for code-lens summaries. |
+| `documentSymbolItems` | Outline symbol budget, including fields and groups. |
+| `semanticTokensFullLines` | Prefix covered by full/delta semantic tokens. |
+| `cachedLines` | Target bound on retained line analyses per open document. |
 
-Each custom dictionary needs a path and a non-blank, unique name. Enable
-`allowDictionaryPath` in personal TOML or global LSP before registering any
-external XML, including personal/global definitions:
+Above `limits.rangeLines`, hints and range tokens return no data; explicitly
+requested code actions and `fix.decode` fail rather than return partial
+results. Automatic code-action requests return no actions. Selection expansion
+still answers every cursor, but returns whole-line ranges only.
+
+The [global settings schema](schema/fix-lsp.schema.json) describes accepted
+values. `documentSymbol.depth` accepts `messages`, `fields`, or `full`;
+diagnostic severity accepts `error`, `warning`, `info`, or `hint`.
+`defaultVersion` must resolve to a bundled or configured version.
+
+### Applying changes and troubleshooting
+
+There is no filesystem watcher or reload command. Personal TOML is read at
+startup and global configuration refresh. Project TOML is checked on document
+open, configuration changes, and workspace-folder changes. Modelines are
+reevaluated on edits; those edits do not reload unchanged TOML files.
+Send a configuration-change notification or restart the server after editing
+configuration or dictionary files.
+
+Use `fix.describeOverrides` to inspect committed effective settings and
+their winning sources. It does not reload anything.
+
+Updates commit atomically. Existing documents retain their previous state
+while an update is pending. A new document's configuration-dependent requests
+can return `RequestFailed` until its first valid configuration commits.
+Annotation refresh requests are sent only when the client supports them.
+
+Configuration errors remain visible even when FIX diagnostics are disabled.
+Unknown rule IDs are reported and omitted; valid sibling settings still apply.
+Malformed TOML rejects that file's layer; invalid LSP settings preserve the
+last committed configuration. Unknown global JSON keys are not treated like
+unknown TOML keys, so use the schema to catch misspellings.
+
+Missing optional configuration files are normal. Missing configured XML,
+permission errors, other configuration I/O failures, and a failed LSP
+configuration request are fatal. A configuration batch also has a 500 ms
+deadline covering client response, file loading, and preparation; exceeding
+it terminates the server. Check paths, file access, and client responsiveness
+before restarting.
+
+## Custom dictionaries
+
+Custom dictionaries are standalone, not overlays on bundled dictionaries.
+Fields, enum values, and message or group structures missing from a custom
+dictionary are not inherited from a bundled one. Include the standard
+definitions you need alongside your custom definitions.
+
+### Supported formats
+
+| Format | Input | Contents |
+| --- | --- | --- |
+| QuickFIX XML | One file rooted at `<fix>`. | Fields, enums, header/trailer membership, messages, components, and nested groups. Component references are expanded. |
+| FIX Repository 2010 Edition | Directory, its `Fields.xml`, or a directory containing `Base/`. | `Fields.xml` and `Enums.xml` are required. `Messages.xml`, `MsgContents.xml`, and `Components.xml` add message/group structure when all three are present. |
+
+QuickFIX requires `<fields>` and declarations for referenced field names.
+The first member of a group defines its entry delimiter. Repository inputs
+without the complete optional structure set still provide field and enum
+lookups.
+
+The FIX version comes from XML metadata, for example
+`<fix type="FIX" major="4" minor="4">` or
+`<Fields version="FIX.4.4">`. It is not inferred from filenames, and there
+is no `dictionaries[].version` option. Direct loading of FIX Orchestra XML
+is not supported; Orchestra is used to build bundled metadata.
+
+Working synthetic examples are included in
+[QuickFIX format](xml/custom/synthetic/oe-fix44.xml) and
+[Repository format](xml/custom/synthetic/repository/FIX.4.4/Base/).
+
+### Registering and selecting dictionaries
+
+First enable `allowDictionaryPath` in personal TOML or global LSP settings.
+The following is a global LSP `fix` section:
 
 ```json
 {
   "allowDictionaryPath": true,
   "dictionaries": [
     {
-      "name": "venue-a",
-      "path": "/path/to/FIX44-venue-a.xml",
+      "name": "custom44",
+      "path": "/path/to/custom-fix44.xml",
       "mode": "quickfix",
-      "default": false
+      "default": true
     }
   ]
 }
 ```
 
-`mode` is `auto`, `quickfix`, or `repository`. In `auto` mode, a directory or a
-path ending in `Fields.xml` is a FIX Repository dictionary; any other file is a
-QuickFIX dictionary. A definition has no `version` field: the XML must declare
-the FIX version, and missing/invalid metadata rejects the entry. `default`
-controls whether it answers for lines of that version without an explicit
-selector. It is false unless supplied.
+Every definition requires a nonblank, unique `name` and a `path`.
+`mode` accepts `auto`, `quickfix`, or `repository`. In `auto` mode,
+directories and paths named `Fields.xml` use the Repository loader;
+other files use QuickFIX.
 
-To register multiple dictionaries in a project file and select one:
+`default = true` makes a dictionary the fallback for messages of its
+declared FIX version. Registration alone does not replace the bundled
+dictionary: `default` is false unless specified.
+
+To keep multiple dictionaries available and select one per project:
 
 ```toml
-dictionary = "venue-a"
+# .fix-lsp.toml
+dictionary = "custom44"
 
 [[dictionaries]]
-name = "venue-a"
-path = "dict/venue-a.xml"
+name = "custom44"
+path = "dict/custom-fix44.xml"
 mode = "quickfix"
 
 [[dictionaries]]
-name = "venue-b"
-path = "dict/venue-b.xml"
-mode = "quickfix"
+name = "repository44"
+path = "dict/FIX.4.4/Base"
+mode = "repository"
 ```
 
-The same arrays are valid in personal TOML, but its top-level `dictionary`
-selector is not: use `default = true` there, a project/modeline selector, or the
-session command. A child project file can select `dictionary = "venue-b"`, or
-the document can contain `# fix: dictionary=venue-b`. A modeline cannot declare
-a structured dictionary array; an allowed path selector is sufficient for a
-one-off dictionary. Selector paths must be platform-native absolute paths or
-start with `./`, `../`, or `~/`; any other selector is a dictionary name. This
-restriction does not apply to `dictionaries[].path`, whose relative paths
-continue to resolve beside the file that defines them.
+This is an alternative to global registration, not an additional declaration
+of the same names. Names must be unique across the applicable global/project
+chain and cannot shadow bundled names. Within one array, duplicate defaults
+for the same version are errors. A stronger layer can replace a version
+default with a differently named dictionary.
 
-Names must be unique across the applicable chain, including global definitions
-and bundled names. A conflict is an Error naming both sources; the later entry
-is rejected entirely, including its default binding, while unrelated settings
-remain usable. Independent project subtrees can reuse names. Within one array,
-duplicate version defaults are Errors: the first default wins, but a later
-entry's distinct name remains selectable. A stronger layer can replace a
-version default using a different name; a stronger default never erases a
-weaker explicit selector.
+The same definition arrays are supported in personal TOML, but a top-level
+`dictionary` selector is not. Selection can come from project TOML, a
+modeline such as `# fix: dictionary=custom44`, or `fix.useDictionary` for a
+globally registered name. Bundled names such as `FIX.4.4` always select
+bundled data even when a custom version default exists.
 
-Bundled selectors `FIX.4.0` through `FIX.4.4`, `FIX.5.0`, `FIX.5.0SP1`,
-`FIX.5.0SP2`, and `FIXT.1.1` always select immutable bundled data, even when a
-custom dictionary replaces a version default. `FIXT.1.1` selects the bundled
-FIX.5.0SP2 tables. Reserved, known-unbundled `FIX.2.7` and `FIX.3.0` selectors
-are rejected, never interpreted as file paths. Custom names for those versions
-can still be selected.
+A project or modeline selector can also be a path when file access is enabled.
+Absolute paths and prefixes `./`, `../`, or `~/` identify path selectors;
+other strings are dictionary names. Modelines cannot declare dictionary
+arrays. `fix.useDictionary` accepts names only and does not load XML.
 
-One file is expected to use one FIX version. BeginString(8) resolves the message version
-first; absent, malformed, or unknown values use global `defaultVersion`.
-Selection applies only if its dictionary matches that resolved version;
-FIX.5.0SP2 also matches FIXT.1.1, not vice versa. A mismatch uses the resolved
-version's default dictionary, not a weaker selector. Thus selecting a FIX.4.2
-dictionary does not change a tag-8-free fragment's default FIX.4.4 version.
-`diagnostics.rules.dictionaryVersion` reports the first mismatch for each
-resolved version per diagnostic pass, with normal rule/global gates, severity,
-and diagnostic limits. It is absent when diagnostics are disabled.
+Selection does not change the message version. The selected dictionary must
+match the version resolved from BeginString(8); FIX 5.0 SP2 dictionaries also
+accept FIXT 1.1 messages. A mismatch falls back to the resolved version's
+default dictionary and is reported by `dictionaryVersion`.
+Selecting a FIX 4.2 dictionary does not change the default version of a
+fragment without BeginString(8).
 
-#### QuickFIX format
+### Path resolution
 
-Use one XML file rooted at `<fix>`. The practical format reference is
-[QuickFIX/n: Custom Fields, Groups, and Messages](https://quickfixengine.org/n/documentation/custom-fields-groups-messages.html),
-and the QuickFIX project provides a
-[complete FIX 4.4 dictionary](https://github.com/quickfix/quickfix/blob/master/spec/FIX44.xml).
-This repository also contains a smaller
-[custom FIX 4.4 example](xml/custom/synthetic/oe-fix44.xml).
-
-Its structure is:
-
-```xml
-<fix type="FIX" major="4" minor="4" servicepack="0">
-  <header>...</header>
-  <trailer>...</trailer>
-  <messages>
-    <message name="NewOrderSingle" msgtype="D" msgcat="app">
-      <field name="ClOrdID" required="Y"/>
-      <component name="Instrument" required="Y"/>
-      <group name="NoPartyIDs" required="N">...</group>
-    </message>
-  </messages>
-  <components>...</components>
-  <fields>
-    <field number="50001" name="SyntheticMode" type="INT">
-      <value enum="1" description="MODE_ALPHA"/>
-    </field>
-  </fields>
-</fix>
-```
-
-`<fields>` is required. Header, trailer, messages, components, and groups are
-optional. Every field referenced by name from another section must be declared
-under `<fields>`. A group's first child is its delimiter field, and nested
-groups are allowed.
-
-#### FIX Repository 2010 Edition
-
-The authoritative format definition is the FIX Trading Community's
-[FIX Repository project and XSDs](https://github.com/FIXTradingCommunity/fix-repository/tree/master/2010_edition).
-Point `path` at the version directory, its `Fields.xml`, or a parent directory
-containing `Base/` with this layout:
-
-```text
-Base/
-├── Fields.xml       required
-├── Enums.xml        required
-├── Messages.xml     optional
-├── MsgContents.xml  optional
-└── Components.xml   optional
-```
-
-The three optional structure files are used only when all three are present;
-otherwise the dictionary still provides fields and enum values but no message
-or group structure. The [synthetic Repository fixture](xml/custom/synthetic/repository/FIX.4.4/Base/)
-is a small working example of every file the parser reads.
-
-QuickFIX takes its version from `<fix type="FIX" major="4" minor="4">`;
-Repository metadata supplies it in the `Fields` element's `version` attribute,
-for example `<Fields version="FIX.4.4">`. No filename or directory name is
-used as a version fallback.
-
-### Reloading and troubleshooting
-
-Saving TOML alone does not reload it. The server checks personal TOML at startup,
-on `initialized`, and on `didChangeConfiguration`; it discovers/rechecks project
-files on document open, configuration changes, and workspace-folder changes.
-Modelines are rescanned on relevant edge-line edits or changes in line count.
-There is no filesystem watcher or reload command. If your client cannot send
-the relevant event, restart the server after editing configuration files.
-`fix.describeOverrides` is inspection only and never triggers a reload.
-
-Changes commit atomically. Already configured documents keep their previous
-state while a batch is pending; a new document is not processed until its first
-valid configuration commits. Its early configuration-dependent requests return
-`RequestFailed`. If validation rejects the update, it waits for a later valid
-update, while edits and close events are still accepted. Batch membership is
-fixed at launch: documents opened later wait for the following successful
-batch with its own deadline, rather than shortening their load time.
-
-The first ready commit publishes diagnostics and requests supported annotation
-refreshes even when settings equal defaults. Refresh requests are sent only
-when supported. Clients without the relevant refresh support may not retry an
-early refused request; annotations appear on their next explicit request.
-
-Configuration errors remain visible even with `diagnostics.enabled = false`
-and do not consume the FIX diagnostic cap. Modeline errors point at the
-offending assignment; project errors name the source file. Personal-file errors
-are reported globally, not once for every open document. Correcting/removing a
-bad source clears its errors at the next configuration refresh.
-
-An unknown `diagnostics.rules.*` identifier is a non-fatal configuration Error.
-That entry is omitted from the effective configuration and ignored, while valid
-sibling settings still apply.
-
-| Problem | Behavior and remedy |
+| Source | Relative dictionary paths resolve against |
 | --- | --- |
-| External dictionary refused | Set global `allowDictionaryPath = true`; a project/modeline cannot enable it. |
-| Unknown key, malformed TOML, obsolete `version` field | The file contributes no settings and reports Error; correct it to match the current schema. |
-| Duplicate name or setting | Correct the conflicting source; names must be unique across the applicable chain. |
-| Missing optional personal/project TOML | Normal absence; no layer is added. |
-| Missing configured XML, permission/I/O failure, source disappears after discovery | Fatal: the server exits nonzero, even if an old dictionary exists. Fix the path/access before restarting. A path typo is also fatal. |
-| Configuration takes longer than 500 ms | Fatal: one hardcoded whole-batch budget includes client response, loader queue, reads, XML parsing, and result preparation; it is not renewed per file. Check the client response and file access. |
+| Personal/project TOML definition | The directory containing that TOML file. |
+| Modeline path selector | The document's directory. |
+| Global LSP definition | The initialization root: first workspace folder, otherwise `rootUri`. |
 
-Readable validation errors follow the source-specific rejection rules, but
-unavailable dependencies cannot be skipped. Fatal shutdown logs the cause and
-does not wait for blocked file reads or an LSP shutdown exchange.
+Only a leading `~/` is expanded. There is no shell, environment-variable,
+or glob expansion. Global relative paths without an initialization root are
+rejected; the process working directory is not used as a fallback.
+Paths refer to the server's filesystem.
 
-## Build
+## LSP capabilities
 
-```sh
-cargo build --release
+| Method | Function / requirement |
+| --- | --- |
+| `textDocument/didOpen`, `didChange`, `didClose` | Incremental document synchronization. |
+| `textDocument/hover` | Dictionary descriptions and field context. |
+| `textDocument/inlayHint`, `inlayHint/resolve` | Labels, group paths, summaries, and resolved hover content. |
+| `textDocument/codeLens`, `codeLens/resolve` | Message-summary titles. Disabled if the client explicitly cannot resolve the `command` property. |
+| `textDocument/selectionRange` | Structural selection expansion. |
+| `textDocument/documentSymbol` | Nested outline; requires `hierarchicalDocumentSymbolSupport`. |
+| `textDocument/codeAction` | Integrity quick fixes; requires code-action literals and `workspaceEdit.documentChanges`. |
+| `textDocument/semanticTokens/range` | Advertised when the client declares range requests. |
+| `textDocument/semanticTokens/full`, `textDocument/semanticTokens/full/delta` | Advertised instead of range mode when range requests are not declared. |
+| `textDocument/publishDiagnostics` | Server-pushed diagnostics. |
+| `workspace/executeCommand` | The three commands below. |
+| `workspace/configuration`, `workspace/didChangeConfiguration` | Global settings retrieval and refresh. |
+| `workspace/didChangeWorkspaceFolders` | Update project configuration discovery. |
+
+The server negotiates UTF-8 positions when supported and otherwise uses
+UTF-16. It supports the standard initialization/shutdown lifecycle,
+`$/cancelRequest`, `$/setTrace`, and diagnostic work-done progress.
+It requests inlay-hint, code-lens, and semantic-token refreshes only when
+supported by the client.
+
+There is no completion, formatting, rename, definition/reference navigation,
+pull diagnostics, or `source.fixAll`. Despite the `documentLink.url`
+setting name, `textDocument/documentLink` is not a capability: reference
+links are embedded in hover and hint content.
+
+## Custom commands
+
+Commands are invoked through `workspace/executeCommand`. The examples below
+are its `params` objects; document URIs must refer to open documents.
+
+### `fix.decode`
+
+Arguments: `[uri, ranges]`, with a nonempty array of LSP ranges.
+Returns a single string of decoded fields:
+
+```json
+{
+  "command": "fix.decode",
+  "arguments": [
+    "file:///work/example.fix",
+    [
+      {
+        "start": { "line": 0, "character": 15 },
+        "end": { "line": 0, "character": 19 }
+      }
+    ]
+  ]
+}
 ```
 
-The binary is `target/release/fix-lsp`.
+For the Heartbeat example, this selects MsgType(35) and returns
+`35(MsgType)=0(Heartbeat)` with the default label formats.
+Output uses `|` between fields and newlines between lines.
 
-## Run
+Every field touched by a selection is returned in full, even if the selection
+covers only part of its tag or value.
 
-```sh
-fix-lsp --stdio [--log-level <off|error|warn|info|debug|trace>] [--log-file <path>]
-fix-lsp --version
+Ranges are processed independently in the supplied order; overlapping ranges
+repeat output. An empty range selects the field under the cursor. Send
+multiple ranges for rectangular or multicursor selections. The total selected
+line count must fit `limits.rangeLines`; oversized selections fail rather
+than return partial text.
+
+The command uses tag/enum label formats and group-path settings regardless
+of whether the corresponding inlay hints are enabled.
+
+### `fix.useDictionary`
+
+Arguments: one bundled or committed global dictionary name:
+
+```json
+{ "command": "fix.useDictionary", "arguments": ["FIX.4.4"] }
 ```
 
-The server speaks LSP over stdin/stdout (`--stdio`). Attach it from your editor's
-LSP client with `filetypes = ["fix"]`.
+Returns `{name, version, source}` and selects that dictionary for the session,
+below project and modeline selectors. Personal and global LSP definitions are
+available; project-only names and paths are not. The command selects from the
+committed registry without reading or reloading XML.
+
+The choice survives configuration updates while its name remains registered.
+Removing that name clears the selection; adding it back does not restore the
+old choice. Restarting also clears it.
+
+### `fix.describeOverrides`
+
+Arguments: one open document URI:
+
+```json
+{
+  "command": "fix.describeOverrides",
+  "arguments": ["file:///work/example.fix"]
+}
+```
+
+Returns:
+
+| Field | Contents |
+| --- | --- |
+| `effective` | Effective settings under canonical dotted keys, including defaults. |
+| `sources` | Winning layer and source for each key; modelines also include the assignment's LSP range. |
+| `warnings` | Applicable configuration warnings. |
+| `dictionaries` | Available dictionary definitions and their source information. |
+
+It reports the last committed configuration, including while an update is
+pending. A document with no committed configuration returns `RequestFailed`.
+The response can contain canonical filesystem paths, but not document or XML
+contents.
+
+## Semantic tokens
+
+The server emits token types and modifiers; the client chooses their visual
+appearance. BeginString(8) and MsgType(35) have dedicated classifications.
+Other values use a known enum label first, then the dictionary's datatype.
+
+### Standard types
+
+| Type | Applied to |
+| --- | --- |
+| `property` | Tag numbers. |
+| `namespace` | BeginString(8) values. |
+| `keyword` | MsgType(35) values. |
+| `enumMember` | Values resolved to enum labels. |
+| `number` | Numeric values, including lengths, sequence numbers, and group counts. |
+| `string` | Text, character, boolean, raw-data, and otherwise unclassified values. |
+| `comment` | Comment lines and log prefixes. |
+
+### Custom types
+
+| Type | Applied to |
+| --- | --- |
+| `price` | Price values. |
+| `quantity` | Quantity values. |
+| `money` | Amount and price-offset values. |
+| `timestamp` | Date and time values. |
+| `group` | An overlay spanning a repeating-group entry. |
+
+Custom types need client/theme mappings. Do not assume that a theme's standard
+numeric or string styling will automatically apply to them.
+
+### Modifiers and repeating groups
+
+| Modifier | Meaning |
+| --- | --- |
+| `deprecated` | Standard modifier: the dictionary marks the field deprecated. |
+| `header`, `trailer` | Field belongs to the dictionary's session header or trailer. |
+| `session` | Administrative message. |
+| `possDup` | PossDupFlag(43) is `Y`. |
+| `unknown` | Field is absent from the selected dictionary. |
+| `count` | Repeating-group counter, including a zero count. |
+| `group1a`, `group1b` | First nesting level, alternating by entry. |
+| `group2a`, `group2b` | Second nesting level. |
+| `group3a`, `group3b` | Third and deeper nesting levels. |
+
+Every modifier except `deprecated` is custom. Group fields carry their
+entry's modifier on both tag and value tokens. Whole-entry `group` overlays
+are emitted only when the client advertises `overlappingTokenSupport`.
+Style either those overlays or the individual group-modified fields to avoid
+applying the same group background twice.
+
+Group structure comes from message definitions, including expanded components.
+Groups declared only inside a QuickFIX header are not reconstructed as groups,
+although their fields retain header membership.
+
+Range requests above `limits.rangeLines` return empty token data and a log
+message. Full/delta requests cover a bounded prefix, controlled by
+`limits.semanticTokensFullLines`. A range-only client may not provide
+whole-file minimap coloring. `semanticTokens.enabled = false` disables token
+output without reconnecting.
+
+## Diagnostics
+
+Four FIX rules are implemented. All are enabled by default:
+
+| Rule | Default severity | Diagnostic code(s) | Condition |
+| --- | --- | --- | --- |
+| `beginString` | `warning` | `beginString` | Recognized fields without BeginString(8). |
+| `unknownVersion` | `warning` | `unknownVersion` | BeginString(8) cannot select its declared version; decoding uses the fallback. |
+| `dictionaryVersion` | `warning` | `dictionaryVersion` | The selected dictionary is incompatible with the resolved message version. Reported once per mismatching version in a document. |
+| `integrity` | `error` | `bodyLength`, `checkSum` | Missing or incorrect BodyLength(9) or CheckSum(10). |
+
+Each `diagnostics.rules.<rule>` accepts a boolean or an object with
+`enabled` and `severity`. For example:
+
+```toml
+# .fix-lsp.toml
+[diagnostics.rules]
+beginString = false
+
+[diagnostics.rules.integrity]
+enabled = true
+severity = "warning"
+```
+
+Integrity checks require BeginString(8). They normalize separators to wire
+SOH and exclude log prefixes and trailing non-field text from the calculation.
+A quick fix corrects or inserts both dependent values together, preserves the
+line's separator, and uses a versioned edit. Disabling diagnostics or the
+integrity rule also disables its quick fix.
+
+This is not full FIX schema validation: there are no rules for required
+fields, unknown tags or enum values, group-count consistency, or sequence
+gaps. Configuration errors are reported separately from these four rules and
+are not suppressed by `diagnostics.enabled`.
+
+## Bundled dictionary sources
+
+The dictionaries are built from public sources and compiled into the binary:
+
+| Source | Contribution | License |
+| --- | --- | --- |
+| [QuickFIX/J](https://github.com/quickfix-j/quickfixj) | Per-version fields, messages, header/trailer definitions, repeating groups, and declared enum values. | QuickFIX Software License 1.0. |
+| [FIX Trading Community Orchestra](https://github.com/FIXTradingCommunity/orchestrations) | Descriptions, enum labels, lifecycle metadata, and selected missing enum values. | Apache-2.0, © FIX Protocol Ltd. |
+
+QuickFIX/J defines which fields, messages, and groups belong to each version.
+The bundled FIXT 1.1 session definitions are folded into the FIX 5.0 SP2
+tables. Metadata is projected from the FIX Latest Orchestra file; descriptions
+therefore come from that source rather than an exact historical manual for
+every version.
+
+Enum enrichment adds codes from a field's own code set only when Orchestra
+dates them to that version or earlier and does not attribute them to an
+extension pack. Shared code sets only relabel existing values. MsgType(35)
+is never extended beyond the version's message definitions.
+QuickFIX/J values already present remain, even where they reflect a later
+extension pack.
+
+Pinned commits, source hashes, projection rules, and regeneration instructions
+are in [Bundled dictionary data](xml/README.md). Licensing and attribution are
+preserved in [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) and
+[NOTICE](NOTICE). Dictionaries are not downloaded at runtime.
 
 ## Security
 
-`allowDictionaryPath` defaults to false and applies to every external XML load,
-including personal/global definitions and direct project/modeline selectors.
-Bundled dictionaries need no permission. Turning it off removes external
-bindings/selections without reading their files; configured definitions can
-become effective again after a later configuration refresh. The flag does
-not prevent reading configuration TOML itself. Enable it only when the local
-project configuration is trusted; it is a global permission, not a directory
-allowlist or an administrator boundary.
+### Offline analysis and reference links
 
-Dictionary paths are plain strings: no shell, glob, or environment expansion,
-only leading `~/`. Relative paths in personal/project TOML resolve beside that
-file; modeline paths resolve beside the document. Global LSP definitions and
-session command paths use the fixed initialization root (first workspace
-folder, otherwise `rootUri`), never the process working directory. Without a
-usable root, relative URI-less paths are rejected. Network-mounted paths use
-the same filesystem rules and deadline, with no remote transfer protocol.
+The server works entirely offline. Parsing, dictionary lookup, group
+reconstruction, annotations, and diagnostics run in the local process.
+fix-lsp does not upload FIX logs to external services for decoding and makes
+no outbound network requests.
 
-Paths are canonicalized before identity and regular-file checks. XML files
-are bounded by `limits.dictionaryBytes` (16 MiB by default), separately for
-each Repository file; configuration TOML has a fixed 1 MiB ceiling. Bounded
-reads recheck growth beyond those limits. Non-regular files such as FIFOs and
-devices are refused without reading them; XML with DTDs is rejected.
+Hover content and resolved hints can contain a link to the OnixS FIX
+reference. The server constructs the link locally; it does not query OnixS.
+Opening the link through the editor or browser contacts that website.
+The default URL contains only the FIX version and tag number, not message
+values or the log contents.
 
-`documentLink.url` is global-only, defaults to OnixS, and accepts only HTTP(S)
-templates or an empty string to disable links. Tag/version substitutions are
-percent-encoded. A valid update changes hover and resolved hint links without
-invalidating analysis caches; a project/modeline cannot redirect them.
+To remove external reference links while keeping hover information, configure:
 
-## Where the dictionaries come from
+```toml
+# ~/.config/fix-lsp.toml
+[documentLink]
+url = ""
+```
 
-The bundled tables are built from two public sources, and the reason there are
-two is that no single public source has all three of the things a bundled
-dictionary needs: complete data, per-version binding, and a licence that
-permits redistribution.
+Alternatively, set `documentLink.url` to your own HTTP(S) reference template.
+Supported substitutions are `{tag}`, `{version}` (OnixS-style version
+segment), and `{fixVersion}` (the full FIX version). Other URL schemes are
+rejected. Project files and modelines cannot change this global setting.
 
-- The FIX Trading Community's own repository packages are complete and
-  versioned, but the site's terms allow downloads for use inside your
-  organisation and forbid distributing the content, so they cannot ship here.
-- The community's [Orchestra files](https://github.com/FIXTradingCommunity/orchestrations)
-  are Apache-2.0 and complete, but exist per version only for 4.2 and 4.4;
-  4.3 and 5.0–5.0SP2 were never converted.
-- [QuickFIX/J](https://github.com/quickfix-j/quickfixj) covers every version
-  under a redistributable licence, but carries no descriptions at all and
-  omits enum values the protocol had — FIX44.xml lists no values for
-  `PartySubIDType(803)`, which had 26 of them.
+For fully offline operation, keep configuration and dictionary files on local
+storage and disable external reference links. Editor extensions and
+network-mounted filesystems have their own network behavior.
 
-**What each source decides.** The version's QuickFIX/J file alone decides which
-tags, messages and groups that version has: it is the version binding, and
-nothing is added to it. FIX Orchestra supplies what they mean — field and
-message descriptions, value names, the type spelling, when a field was added or
-deprecated, and the extension pack recorded against that, when the source names
-a positive one. This is the project's reproducible join rule, not authoritative
-historical membership: no public source provides that for these versions.
+### Dictionary file access
 
-**How enum values are joined.** A version lists what its QuickFIX/J file
-declares, plus the Orchestra codes that belong to the field's *own* code set,
-that Orchestra dates to that version or earlier, and that no extension pack
-brought in. A code set shared between fields only relabels values the version
-already has — its codes belong to the field it is named after.
-`MsgType(35)` is never extended: its values are the version's own messages.
-Worked example: under FIX.4.4, `PartySubIDType(803)` comes out as exactly 26
-values, `1` through `26`; `28 = MarketMaker` arrived with extension pack 26 and
-appears only from FIX.5.0 on. The restored values per version are 4.0 +0,
-4.1 +4, 4.2 +58, 4.3 +251, 4.4 +139, 5.0 +60, 5.0SP1 +0, 5.0SP2 +0.
+To ignore configuration supplied by a project or log, set
+`overrides.projectConfig = false` and/or `overrides.modeline = false` in
+personal TOML or global LSP settings. These independently disable project TOML
+discovery and modeline overrides. They do not disable personal/global settings
+or replace the separate permission for external XML dictionaries below.
 
-One limit stays: a value some later extension pack added to a base version can
-still appear when the QuickFIX/J file lists it, because that file is taken as
-the version. Prose the historical FIX Repository carried outside field and
-value descriptions — reserved-range notes, for instance — is not reproduced.
+`allowDictionaryPath` defaults to **false**. It gates every external XML
+dictionary load: personal/global definitions, project declarations, and direct
+project/modeline path selectors. Bundled dictionaries need no permission.
 
-Per-file provenance, hashes and the regeneration recipe are in
-[xml/README.md](xml/README.md); the licences are
-[THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt), with the QuickFIX
-acknowledgment under [Licence](#licence).
+Set it to `true` only in personal TOML or global LSP settings when you trust
+the project configuration and document modelines. Project files and modelines
+cannot enable it themselves. The permission is global: it is not a directory
+allowlist or an administrator-enforced sandbox.
 
-## Licence
+Disabling it removes external dictionary bindings and selections without
+reading their XML files. Registered definitions can become effective again
+after a configuration refresh that re-enables access. The setting does not
+prevent reading TOML configuration files.
 
-Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The bundled
-dictionaries are QuickFIX/J files under the QuickFIX Software License 1.0, and
-their descriptions are projected from FIX Orchestra, © FIX Protocol Limited,
-under Apache-2.0; see [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) and
-[xml/README.md](xml/README.md).
+Paths are canonicalized, dictionary input must be a regular file, and DTDs
+are rejected. XML reads are bounded by `limits.dictionaryBytes` per file,
+including each file in a Repository dictionary. Configuration TOML has a
+fixed 1 MiB limit. FIFOs and devices are refused.
+
+### Local logging
+
+Logs go to stderr unless `--log-file` is supplied. New log files are created
+with mode `0600` on Unix. Document text and JSON-RPC bodies are not logged
+below `trace`; treat trace logs as potentially sensitive.
+The client can enable trace logging through `$/setTrace`.
+
+## Contributing
+
+Issues and pull requests are welcome. Include the server/editor versions,
+reproduction steps, expected behavior, and a minimal synthetic sample.
+Discuss substantial changes before implementation.
+
+Protocol behavior, dictionaries, and test cases must come from public
+specifications or independently created synthetic data. Include source links
+for protocol changes; do not submit private logs or dictionaries.
+Keep server behavior independent of editor identity and adapt through
+advertised LSP capabilities.
+
+Run the repository checks before submitting changes:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+python3 -m unittest discover -s tools
+```
+
+Run `cargo deny check` after dependency changes.
+
+## License
+
+[Apache-2.0](LICENSE). See [NOTICE](NOTICE) and
+[THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) for bundled data licenses
+and attribution.
 
 This product includes software developed by quickfixengine.org
-(http://www.quickfixengine.org/).
+(<http://www.quickfixengine.org/>).

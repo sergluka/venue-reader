@@ -1,8 +1,8 @@
+/target
+__pycache__/
+
 /plans/
 /tasks/
-/target
-
-__pycache__/
 
 # Editor-local setup. The server is generic; no editor-specific files here.
 .helix/
