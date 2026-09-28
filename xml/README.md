@@ -4,6 +4,35 @@ Everything under `standard/` is compiled into the binary by `build.rs`. The
 manifest `standard/SHA256SUMS` lists every file; check it from that directory
 with `sha256sum -c SHA256SUMS` (the test suite checks it too).
 
+## Why these two sources
+
+Both carry permissive licences that allow bundling: FIX Orchestra is
+Apache-2.0, QuickFIX/J the BSD-style QuickFIX Software License 1.0.
+
+- **FIX Orchestra** is published by the FIX Trading Community itself, so it is
+  as close to the standard as a machine-readable source gets. But it describes
+  FIX Latest only, with no per-version structure.
+- **QuickFIX/J** is a widely used, long-running FIX engine, so its per-version
+  dictionaries are battle-tested against real sessions.
+
+The per-version FIX Repository (2010 edition) was not used: its package is
+under the proprietary FPL licence, with no Apache statement.
+
+### What is taken from each
+
+| | QuickFIX/J, per version | FIX Orchestra, FIX Latest |
+|---|---|---|
+| Which fields, messages and groups a version has | the whole list; the join adds none | — |
+| Field name | what hover shows for the version | the standard name, where it differs |
+| Datatype | the class used to parse and format | the spelling shown |
+| Description | — (these files carry none) | field, value and message synopses |
+| Enum values | every code the version's file lists | own-set codes dated to that version or earlier (below) |
+| Enum value label | fallback when Orchestra has no such code | when the id and the code match |
+| `added`, `addedEP`, `deprecated` | — | the whole pedigree |
+| Message category | — | taken |
+| What is standard FIX today | — | the witness |
+| What a version had and the standard has since dropped | the only witness | forgets it |
+
 ## QuickFIX/J dictionaries — structure and enum membership
 
 Unmodified copies, so the source and output hashes are equal.
@@ -25,12 +54,11 @@ Unmodified copies, so the source and output hashes are equal.
 | `FIX50SP2.xml` | `quickfixj-messages/quickfixj-messages-fix50sp2/src/main/resources/FIX50SP2.xml` | `019b4bc17898fbf31d43d23d567794eab14275e47161572889d03d5bf6ad1dde` | `019b4bc17898fbf31d43d23d567794eab14275e47161572889d03d5bf6ad1dde` |
 | `FIXT11.xml` | `quickfixj-messages/quickfixj-messages-fixt11/src/main/resources/FIXT11.xml` | `1104d3746ebcfd1e03cc437785acd7c196a36ea43c0692c40c6b5e6eeeb7e4b6` | `1104d3746ebcfd1e03cc437785acd7c196a36ea43c0692c40c6b5e6eeeb7e4b6` |
 
-Each version's file alone decides which fields, enum values, messages and
-groups that version has. `FIXT11.xml`'s header, trailer and session messages
-are folded into FIX.5.0SP2, the tables `8=FIXT.1.1` resolves to; FIX.5.0 and
-FIX.5.0SP1 keep QuickFIX/J's empty session blocks.
+`FIXT11.xml`'s header, trailer and session messages are folded into
+FIX.5.0SP2, the tables `8=FIXT.1.1` resolves to; FIX.5.0 and FIX.5.0SP1 keep
+QuickFIX/J's empty session blocks.
 
-## FIX Orchestra metadata — presentation
+## FIX Orchestra metadata — presentation, and what is standard
 
 `standard/FIXLatest-metadata.xml` is derived: `tools/orchestra_projection.py`
 projects it from the official FIX Latest Orchestra file and refuses any other
@@ -64,13 +92,9 @@ own sets are also used elsewhere (MsgTypeCodeSet, id 35, is referenced by 35, 37
 and 1619), which is why ownership is decided by id and not by how many fields use
 the set.
 
-It is joined on id and never adds a field, message or group — the version's
-QuickFIX file alone decides those. Field names come from that file; enum
-labels and the shown type spelling come from Orchestra when the id matches,
-while the type class stays the version's. MsgType values that name a message
-the version defines keep that message's name. Orchestra describes FIX Latest,
-so `added` is the same in every version and a `deprecated` later than a version
-is dropped from it.
+The join is on id. MsgType values that name a message the version defines keep
+that message's name. Orchestra describes FIX Latest, so `added` is the same in
+every version and a `deprecated` later than a version is dropped from it.
 
 **Enum values are the one thing the join adds.** A version lists what its
 QuickFIX file declares plus the codes of the field's own set (`ownCodeSet`)
@@ -89,6 +113,43 @@ curl -fLo OrchestraFIXLatest.xml \
   'https://raw.githubusercontent.com/FIXTradingCommunity/orchestrations/cd24169a2abd8daba7c360987c7a46ca11873a12/FIX%20Standard/OrchestraFIXLatest.xml'
 tools/orchestra_projection.py OrchestraFIXLatest.xml xml/standard/FIXLatest-metadata.xml
 ```
+
+## Standard status — two witnesses
+
+Hover under a custom dictionary says whether a tag is standard FIX for the
+line's version (`src/dictionary/standard.rs`). Neither witness is the truth on
+its own, so a claim — membership, introduction date, versioned link — is made
+only where both agree or only one could know, and nothing is said where they
+disagree. Where they differ, over the pinned files:
+
+- **Only in FIX Latest: 4,751 tags**, every one added by EP98 or later
+  (NoOrderAttributes(2593) EP222, BatchTotalMessages(50001) EP178). Standard,
+  newer than any bundled dictionary.
+- **Only in QuickFIX/J: 46 tags.** 40 below 5000 are retired standard tags
+  (ExecTransType(20), Rule80A(47), …), which FIX Latest forgets. Six — MDElementName(5450), SimulatedTime(8000), NoNestedUserData(9000),
+  NestedUserDataName(9001), NestedUserDataValue(9002), SpotValueDateForNDF(9995)
+  — sit in the range FIX reserves for users,
+  5000–39999 (<https://www.fixtrading.org/standards/user-defined-fields/>,
+  retrieved 2026-09-20), are declared only in `FIX50.xml`, are used by no
+  message there, and are absent from the `FIX50.xml` of QuickFIX C++ and
+  QuickFIX/n (GitHub, fetched 2026-09-20): not standard. FIX Latest has no tag
+  in that range; from 40000 up tags are standard again.
+- **Dated differently: 59 (version, tag) pairs.** An `addedEP` is read as
+  "applied on top of `added`, shipped in the next release", which holds for 518
+  of the 522 EP-dated bundled tags. RepurchaseTerm(226) and 35 others in
+  220–260 are dated FIX.4.2 but first appear in `FIX43.xml`, and the reference
+  site agrees with QuickFIX/J (`4.3/tagNum_220` exists, `4.2/tagNum_220` does
+  not; probed 2026-09-20). NoUsernames(809) is missing from `FIX44.xml` and `FIX50.xml`; 20
+  session tags from `FIXT11.xml` are missing from `FIX50SP1.xml`, which keeps
+  QuickFIX/J's empty session block; ApplReportType(1426) is in `FIX50SP1.xml`
+  though dated FIX.5.0SP2. 42 tags therefore show no introduction date.
+
+`build.rs` asserts the facts the classification leans on (an empty `added`
+means FIX Latest lacks the tag; nothing FIX Latest-only is dated into a bundled
+release; the user-defined range), and `cargo test dictionary::standard` pins
+the counts above, so a refreshed source that moves them fails the build or the
+tests rather than changing hover silently. Enum values are not classified yet:
+the value masks above already mix the two witnesses.
 
 ## Test fixtures (`custom/`)
 

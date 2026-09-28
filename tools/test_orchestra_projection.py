@@ -51,7 +51,8 @@ class ExtensionPack(unittest.TestCase):
         self.assertNotIn('addedEP="0"', text)
 
     def test_a_positive_pack_survives_to_the_output(self):
-        self.assertIn('value="2" name="Sell" added="FIX.4.2" addedEP="26"', emit(checked(document())))
+        sell = 'value="2" name="Sell" added="FIX.4.2" addedEP="26"'
+        self.assertIn(sell, emit(checked(document())))
 
     def test_rejected_shapes_on_a_field(self):
         for raw in ("0", "-2", "x", "70000"):
@@ -85,7 +86,8 @@ class Ownership(unittest.TestCase):
 
     def test_a_set_named_after_a_field_that_does_not_reference_it_is_refused(self):
         with self.assertRaises(Invalid) as refusal:
-            checked(document(fields=SHARING_FIELD + '\n    <fixr:field id="54" name="Side" type="QtyCodeSet"/>'))
+            side = '\n    <fixr:field id="54" name="Side" type="QtyCodeSet"/>'
+            checked(document(fields=SHARING_FIELD + side))
         self.assertIn("SideCodeSet carries id 54", str(refusal.exception))
 
     def test_a_field_with_no_code_set_is_neither_owner_nor_sharer(self):

@@ -33,6 +33,9 @@ pub struct Snapshot {
     /// Dictionaries, resolution and fingerprint as one value: separate fields
     /// could be paired wrongly, this cannot be.
     pub ctx: Arc<Ctx>,
+    /// What hover calls each bound dictionary, from the registry and selection
+    /// in force — never from `ctx`, which is reused while its fingerprint holds.
+    pub names: Arc<crate::ctx::DictionaryNames>,
     /// The document's count of cached lines, so a task populating on another
     /// thread is counted where the main loop sweeps.
     pub population: Arc<Population>,

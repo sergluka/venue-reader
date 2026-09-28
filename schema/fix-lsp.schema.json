@@ -230,7 +230,7 @@
         "url": {
           "type": "string",
           "default": "https://www.onixs.biz/fix-dictionary/{version}/tagNum_{tag}.html",
-          "description": "Where a tag's reference page lives. `{tag}` is the tag number; `{version}` is the version as the default site spells it (`4.4`, `5.0` — lossy: 5.0SP1, 5.0SP2 and FIXT.1.1 are all `5.0` there); `{fixVersion}` is the line's own version string (`FIX.5.0SP2`, `FIXT.1.1`). A template that avoids `{version}` also works for versions the default site does not publish. Empty removes the link without disabling hover. Global-only; non-empty URLs must use http or https. Substituted values are percent-encoded."
+          "description": "Where a tag's reference page lives. `{tag}` is the tag number; `{version}` is the version as the default site spells it (`4.4`, `5.0`, `5.0.SP1`, `5.0.SP2`; FIXT.1.1 reads its `5.0.SP2` tables); `{fixVersion}` is the line's own version string (`FIX.5.0SP2`, `FIXT.1.1`). A template with `{version}` is linked only for a tag the bundled dictionary of that version defines; any other template links every tag, including a custom dictionary's own. A template that avoids `{version}` also works for versions the default site does not publish. Empty removes the link without disabling hover. Global-only; non-empty URLs must use http or https. Substituted values are percent-encoded."
         }
       },
       "x-fix-lsp-scope": "user-global"

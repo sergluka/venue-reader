@@ -15,28 +15,22 @@ const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 /// How the *default* reference site spells a FIX version in a path, or `None`
 /// when it publishes no dictionary for one.
 ///
-/// Onixs's numbering, not the protocol's, and it is lossy: `FIX.5.0SP1`,
-/// `FIX.5.0SP2` and `FIXT.1.1` are all `5.0` there, because the site keeps one
-/// page for the family. That is why `{fixVersion}` exists beside `{version}` —
-/// a reference that does distinguish them cannot be addressed through this
-/// mapping.
+/// Onixs's trees, probed 2026-09-20: one per release from 4.0 to 5.0.SP2, none
+/// for 2.7 or 3.0. A table rather than a derivation, because the site's
+/// spelling (`5.0.SP1`) is not a function of the protocol's (`FIX.5.0SP1`).
 ///
-/// A table rather than a derivation: the site's own numbering is what this
-/// has to match, and it is not a function of the version string.
-///
-/// `FIXT.1.1` maps to `/5.0/`, which is easy to get wrong in either direction:
-/// the site publishes no FIXT page, and the session layer's fields are
-/// documented under 5.0.
+/// `FIXT.1.1` maps to `5.0.SP2`, the tables it resolves to: that tree documents
+/// the session tags as well, while the site's own `fixt1.1` tree has only them.
 fn segment(version: &str) -> Option<&'static str> {
     Some(match version {
-        "FIX.2.7" => "2.7",
-        "FIX.3.0" => "3.0",
         "FIX.4.0" => "4.0",
         "FIX.4.1" => "4.1",
         "FIX.4.2" => "4.2",
         "FIX.4.3" => "4.3",
         "FIX.4.4" => "4.4",
-        "FIX.5.0" | "FIX.5.0SP1" | "FIX.5.0SP2" | "FIXT.1.1" => "5.0",
+        "FIX.5.0" => "5.0",
+        "FIX.5.0SP1" => "5.0.SP1",
+        "FIX.5.0SP2" | "FIXT.1.1" => "5.0.SP2",
         _ => return None,
     })
 }
@@ -51,6 +45,7 @@ fn segment(version: &str) -> Option<&'static str> {
 pub struct TagUrl {
     template: String,
     valid: bool,
+    versioned: bool,
 }
 
 impl TagUrl {
@@ -81,7 +76,12 @@ impl TagUrl {
     pub fn new(template: impl Into<String>) -> TagUrl {
         let template = template.into();
         let valid = Self::validate(&template).is_ok();
-        TagUrl { template, valid }
+        let versioned = template.contains(VERSION);
+        TagUrl {
+            template,
+            valid,
+            versioned,
+        }
     }
 
     /// What to call the site in a link's text: its host, without `www.`.
@@ -103,6 +103,12 @@ impl TagUrl {
         (!host.is_empty()).then_some(host)
     }
 
+    /// Whether the template names the site's version segment, so that a link
+    /// asserts a page for that version exists.
+    pub fn is_versioned(&self) -> bool {
+        self.versioned
+    }
+
     /// `None` when the template needs a version segment the default site does
     /// not publish, or when the template is empty — which is how a user turns
     /// the link off without turning off hover.
@@ -111,7 +117,7 @@ impl TagUrl {
             return None;
         }
         let mut url = self.template.clone();
-        if url.contains(VERSION) {
+        if self.versioned {
             // Only resolved when the template asks for it. A template built on
             // `{fixVersion}` or on the tag alone answers for any version,
             // including the ones the default site does not publish.
@@ -134,8 +140,7 @@ impl Default for TagUrl {
     }
 }
 
-/// The version as the reference site spells it — lossy, and required by the
-/// default URL.
+/// The version as the reference site spells it; required by the default URL.
 const VERSION: &str = "{version}";
 /// The line's own version string, verbatim. Substituted after `{version}` so
 /// that a template using both gets each in its own form.
@@ -156,30 +161,46 @@ mod tests {
             onixs().of("FIX.4.4", 35).as_deref(),
             Some("https://www.onixs.biz/fix-dictionary/4.4/tagNum_35.html")
         );
-        for version in ["FIX.5.0", "FIX.5.0SP1", "FIX.5.0SP2"] {
+        for (version, segment) in [
+            ("FIX.5.0", "5.0"),
+            ("FIX.5.0SP1", "5.0.SP1"),
+            ("FIX.5.0SP2", "5.0.SP2"),
+        ] {
             assert_eq!(
                 onixs().of(version, 1).as_deref(),
-                Some("https://www.onixs.biz/fix-dictionary/5.0/tagNum_1.html"),
+                Some(
+                    format!("https://www.onixs.biz/fix-dictionary/{segment}/tagNum_1.html")
+                        .as_str()
+                ),
                 "{version}"
             );
         }
     }
 
-    /// FIXT.1.1 links to the 5.0 page — the transport version documents the
-    /// session layer of the same edition. Asserted separately from the 5.0
-    /// family because its table entry is the one that is easy to miss.
+    /// FIXT.1.1 links into the SP2 tree, the tables it reads — the site's own
+    /// FIXT tree lacks application tags. Asserted separately because its table
+    /// entry is the one that is easy to miss.
     #[test]
-    fn fixt_links_to_the_five_oh_page() {
+    fn fixt_links_to_the_tables_it_reads() {
         assert_eq!(
             onixs().of("FIXT.1.1", 8).as_deref(),
-            Some("https://www.onixs.biz/fix-dictionary/5.0/tagNum_8.html")
+            Some("https://www.onixs.biz/fix-dictionary/5.0.SP2/tagNum_8.html")
         );
     }
 
     #[test]
     fn a_version_the_site_does_not_publish_has_no_link() {
-        assert_eq!(onixs().of("FIX.9.9", 35), None);
-        assert_eq!(onixs().of("", 35), None);
+        for version in ["FIX.9.9", "", "FIX.2.7", "FIX.3.0"] {
+            assert_eq!(onixs().of(version, 35), None, "{version:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_template_naming_the_site_segment_is_versioned() {
+        assert!(onixs().is_versioned());
+        assert!(TagUrl::new("https://fix.internal/{version}/{fixVersion}/{tag}").is_versioned());
+        assert!(!TagUrl::new("https://fix.internal/{fixVersion}/{tag}").is_versioned());
+        assert!(!TagUrl::new("https://fix.internal/t{tag}").is_versioned());
     }
 
     #[test]
@@ -202,16 +223,16 @@ mod tests {
         );
     }
 
-    /// The reason `{fixVersion}` exists: Onixs keeps one page for the whole 5.0
-    /// family, so `{version}` cannot tell SP1 from SP2. A reference that does
-    /// distinguish them is unreachable through the site's own numbering.
+    /// Why `{fixVersion}` exists beside `{version}`: the site's spelling sends
+    /// `FIXT.1.1` to the SP2 tree it reads, and names no version the site does
+    /// not publish. The protocol's own spelling keeps both.
     #[test]
-    fn fix_version_keeps_what_the_sites_numbering_loses() {
+    fn fix_version_keeps_what_the_sites_spelling_drops() {
         let onixs = onixs();
         assert_eq!(
-            onixs.of("FIX.5.0SP1", 1),
+            onixs.of("FIXT.1.1", 1),
             onixs.of("FIX.5.0SP2", 1),
-            "the default site collapses them"
+            "the site's spelling reads FIXT as its tables"
         );
 
         let own = TagUrl::new("https://fix.internal/{fixVersion}/{tag}");
@@ -247,7 +268,7 @@ mod tests {
         let both = TagUrl::new("https://fix.internal/{version}/{fixVersion}/{tag}");
         assert_eq!(
             both.of("FIX.5.0SP2", 8).as_deref(),
-            Some("https://fix.internal/5.0/FIX.5.0SP2/8")
+            Some("https://fix.internal/5.0.SP2/FIX.5.0SP2/8")
         );
     }
 

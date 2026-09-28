@@ -1605,3 +1605,43 @@ mod tests {
         );
     }
 }
+
+/// Dictionaries built from a string, for tests across the crate.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use super::{parse_quickfix_bytes, parse_repository_bytes, RepoSources, Source};
+    use crate::dictionary::ParsedDict;
+
+    pub fn source(path: &str, xml: String) -> Source {
+        Source {
+            path: path.into(),
+            bytes: xml.into_bytes(),
+        }
+    }
+
+    /// A QuickFIX dictionary for `version` declaring `fields`.
+    pub fn quickfix(version: &str, fields: &str) -> ParsedDict {
+        let xml = format!("<fix version='{version}'><fields>{fields}</fields></fix>");
+        parse_quickfix_bytes(&source("custom.xml", xml)).unwrap()
+    }
+
+    /// A Repository dictionary, which carries `added` and `deprecated`.
+    pub fn repository(version: &str, fields: &str) -> ParsedDict {
+        parse_repository_bytes(&RepoSources {
+            fields: source(
+                "Fields.xml",
+                format!("<Fields version='{version}'>{fields}</Fields>"),
+            ),
+            enums: source("Enums.xml", format!("<Enums version='{version}'/>")),
+            messages: None,
+            msg_contents: None,
+            components: None,
+        })
+        .unwrap()
+    }
+
+    /// One `<field>` declaration for `quickfix`.
+    pub fn field(tag: u32, name: &str) -> String {
+        format!("<field number='{tag}' name='{name}' type='STRING'/>")
+    }
+}

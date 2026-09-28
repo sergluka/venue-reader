@@ -41,6 +41,8 @@ messages, and groups.
 - **Hover:** field name, number, type, description, enum meaning, and available
   introduction/deprecation metadata. MsgType(35) also shows the message
   description and category. Fields inside repeating groups include their path.
+  Under a custom dictionary, hover also says when a field is not what the
+  version's standard dictionary defines.
 - **Inlay hints:** tag names and enum labels alongside the original text.
   Group paths can identify which entry a field belongs to.
 - **Message summaries:** configurable summaries above each line through code
@@ -169,6 +171,24 @@ For example, hovering over `35=0` (MsgType(35)) in the Heartbeat above displays:
 
 The popup's appearance depends on the editor and theme. Reference links can
 be disabled or redirected through `documentLink.url`.
+
+Under a custom dictionary, hover also says how each field stands against
+standard FIX for the line's version, in one line:
+
+| Field | Note |
+| --- | --- |
+| Standard in this version | *Standard FIX.4.4* |
+| Standard, but added later | *Not in FIX.4.4, introduced in FIX.5.0SP1* |
+| Standard, but spelled differently by the dictionary | *Not in FIX.4.2, introduced in FIX.4.3 as "SecurityListRequestType"* |
+| Retired from the standard | *Not in FIX.4.4, retired after FIX.4.3* |
+| Not standard at all | *Custom field, introduced in "desk"* |
+
+Versions are FIX releases; an extension pack only says how a field reached one.
+A custom field shows no introduction or deprecation dates, and under a "Not in"
+note the dictionary's own dates are left out. Only a field standard in that
+version links into the reference site's pages for it. Where the two sources
+disagree about a field, hover says nothing about it;
+[Standard status](#standard-status) explains how this is decided.
 
 ### Large logs and editor support
 
@@ -488,6 +508,10 @@ Custom dictionaries are standalone, not overlays on bundled dictionaries.
 Fields, enum values, and message or group structures missing from a custom
 dictionary are not inherited from a bundled one. Include the standard
 definitions you need alongside your custom definitions.
+
+Hover compares each field of a custom dictionary with standard FIX for the
+line's version and marks the ones that version does not define; see
+[Hover](#hover).
 
 ### Supported formats
 
@@ -828,6 +852,28 @@ are in [Bundled dictionary data](xml/README.md). Licensing and attribution are
 preserved in [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) and
 [NOTICE](NOTICE). Dictionaries are not downloaded at runtime.
 
+### Standard status
+
+The two sources disagree in places, and neither is always right. FIX Latest
+says what is standard FIX; the QuickFIX/J files say what each version
+contained. Hover states only what both support or what only one could know, and
+says nothing where they disagree:
+
+- 4,751 extension-pack tags are only in FIX Latest: standard, newer than any
+  bundled dictionary.
+- 40 retired tags are only in QuickFIX/J: standard once, removed since.
+- 6 tags in the user-defined range (5000–39999) are only in QuickFIX/J's FIX 5.0
+  file: not standard. They read *Custom field* even under the bundled FIX 5.0
+  dictionary.
+- 59 (version, tag) pairs are dated differently by the two: no claim is made,
+  and 42 tags show no introduction date.
+- Enum values: QuickFIX/J lists them unevenly and the bundled tables complete
+  them from FIX Latest in 114 (version, field) places, so no claim is made about
+  values yet.
+
+Examples and how the counts are pinned are in
+[Bundled dictionary data](xml/README.md#standard-status--two-witnesses).
+
 ## Security
 
 ### Offline analysis and reference links
@@ -853,8 +899,16 @@ url = ""
 
 Alternatively, set `documentLink.url` to your own HTTP(S) reference template.
 Supported substitutions are `{tag}`, `{version}` (OnixS-style version
-segment), and `{fixVersion}` (the full FIX version). Other URL schemes are
-rejected. Project files and modelines cannot change this global setting.
+segment: `4.4`, `5.0`, `5.0.SP1`, `5.0.SP2`), and `{fixVersion}` (the full FIX
+version). Other URL schemes are rejected. Project files and modelines cannot
+change this global setting.
+
+A template that uses `{version}` points into one version's pages, so a tag is
+linked only when the bundled dictionary for that version defines it and FIX
+Latest does not dispute it. Any other template links every tag, including a
+custom dictionary's own. The default site publishes 4.0 to 5.0.SP2. A desk
+whose own template uses `{version}` loses links on its custom tags; use
+`{fixVersion}` for those.
 
 For fully offline operation, keep configuration and dictionary files on local
 storage and disable external reference links. Editor extensions and

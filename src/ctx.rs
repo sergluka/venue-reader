@@ -159,6 +159,76 @@ impl Ctx {
         };
         Ctx::new(&config, Arc::new(Registry::bundled_only()), None)
     }
+
+    /// Bundled tables everywhere except `version`, which `dict` answers for,
+    /// as a selected custom dictionary would.
+    #[cfg(test)]
+    pub fn for_test_with_dict(version: &str, dict: crate::dictionary::ParsedDict) -> Arc<Ctx> {
+        let choice = DictionaryChoice {
+            dict: Dict::Owned(Arc::new(dict)),
+            version: version.to_owned(),
+            source: "test".into(),
+            identity: 123,
+            name: Some("selected".into()),
+        };
+        Ctx::with_choice(
+            &Config::default(),
+            Arc::new(Registry::bundled_only()),
+            Some(choice),
+        )
+    }
+}
+
+/// What hover calls the dictionary bound to each version.
+///
+/// Beside the context rather than inside it, for the reason `render::Options`
+/// is: a name invalidates no analysis, and a context is reused whenever its
+/// fingerprint holds — which a rename must not change. Built from the registry
+/// and choice in force, so a rename is visible at once.
+pub struct DictionaryNames {
+    /// The selected dictionary's version and name, when one is selected.
+    choice: Option<(String, Arc<str>)>,
+    registry: Arc<Registry>,
+}
+
+impl DictionaryNames {
+    pub fn new(registry: Arc<Registry>, choice: Option<&DictionaryChoice>) -> DictionaryNames {
+        DictionaryNames {
+            choice: choice.and_then(|choice| Some((choice.version.clone(), choice_label(choice)?))),
+            registry,
+        }
+    }
+
+    /// The name for the dictionary that answers `version`, `None` for bundled
+    /// tables. Follows `Ctx::with_choice`: a selection wins for the versions it
+    /// is compatible with, otherwise the registry's default for that version.
+    pub fn of(&self, version: &str) -> Option<&str> {
+        if let Some((selected, label)) = &self.choice {
+            if crate::dictionary::versions_compatible(selected, version) {
+                return Some(label);
+            }
+        }
+        self.registry.default_name(version)
+    }
+}
+
+/// A choice's configured name, else the last component of its source path —
+/// never the full path. A Repository resolves to its `Base/` directory, so the
+/// directory holding that is the one named. `None` for a bundled version.
+fn choice_label(choice: &DictionaryChoice) -> Option<Arc<str>> {
+    if choice.dict.is_static() {
+        return None;
+    }
+    if let Some(name) = &choice.name {
+        return Some(Arc::from(name.as_str()));
+    }
+    let path = std::path::Path::new(&choice.source);
+    let path = if path.file_name().is_some_and(|name| name == "Base") {
+        path.parent()?
+    } else {
+        path
+    };
+    path.file_name()?.to_str().map(Arc::from)
 }
 
 /// Decode one line: classify, pick the dictionary from BeginString(8), decode.
@@ -185,25 +255,8 @@ mod tests {
     use super::*;
 
     fn selected_context(version: &str) -> Arc<Ctx> {
-        let xml = format!("<fix version='{version}'><fields><field number='9999' name='Selected' type='STRING'/></fields></fix>");
-        let parsed =
-            crate::dictionary::parse::parse_quickfix_bytes(&crate::dictionary::parse::Source {
-                path: "selected.xml".into(),
-                bytes: xml.into_bytes(),
-            })
-            .unwrap();
-        let choice = DictionaryChoice {
-            dict: Dict::Owned(Arc::new(parsed)),
-            version: version.to_owned(),
-            source: "test".into(),
-            identity: 123,
-            name: Some("selected".into()),
-        };
-        Ctx::with_choice(
-            &Config::default(),
-            Arc::new(Registry::bundled_only()),
-            Some(choice),
-        )
+        use crate::dictionary::parse::fixtures::{field, quickfix};
+        Ctx::for_test_with_dict(version, quickfix(version, &field(9999, "Selected")))
     }
 
     #[test]

@@ -170,6 +170,9 @@ pub(super) struct DocumentConfig {
     pub project: ProjectSnapshot,
     /// Analysis context selected for the document.
     pub ctx: Arc<Ctx>,
+    /// What hover calls each bound dictionary. Beside `ctx` for the reason
+    /// `render` is: a name invalidates no analysis.
+    pub names: Arc<crate::ctx::DictionaryNames>,
     /// Rendering options derived from `resolved`.
     pub render: Arc<Options>,
     /// Diagnostic rules derived from `resolved` and `ctx`.

@@ -422,6 +422,7 @@ impl ServerState {
     fn snapshot_for(&mut self, uri: &Uri) -> Option<Snapshot> {
         let configuration = self.config.documents.get(uri)?;
         let ctx = configuration.ctx.clone();
+        let names = configuration.names.clone();
         let encoding = self.encoding;
         let render = configuration.render.clone();
         let rules = configuration.rules.clone();
@@ -431,6 +432,7 @@ impl ServerState {
             lines: doc.lines.clone(),
             encoding,
             ctx: doc.ctx.clone(),
+            names,
             population: doc.population.clone(),
             render,
             rules,

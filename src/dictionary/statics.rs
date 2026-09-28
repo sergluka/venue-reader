@@ -101,6 +101,17 @@ pub struct StaticDict {
     pub messages: &'static [StaticMessage],
 }
 
+/// A tag FIX Latest defines and no bundled dictionary does. `LATEST_TAGS` is
+/// sorted by tag.
+#[derive(Debug)]
+pub struct LatestTag {
+    pub tag: u32,
+    pub name: &'static str,
+    /// Index into `LATEST_VERSIONS`: a `&str` per row would cost a relocation.
+    pub added: u8,
+    pub added_ep: u16,
+}
+
 impl TagRecord {
     pub fn override_for(&self, bit: u8) -> Option<&'static FieldOverride> {
         self.overrides.iter().find(|o| o.versions.contains(bit))

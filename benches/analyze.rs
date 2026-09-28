@@ -102,7 +102,7 @@ fn throughput(c: &mut Criterion) {
         b.iter(|| {
             let mut length = 0usize;
             for at in 0..message.fields.len() {
-                length += hover(line, message, at, &options).map_or(0, |text| text.len());
+                length += hover(line, message, at, &options, None).map_or(0, |text| text.len());
             }
             length
         })

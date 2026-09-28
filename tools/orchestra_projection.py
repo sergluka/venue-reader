@@ -16,7 +16,8 @@ is given that field's id. `validate` holds the convention to its meaning.
 import hashlib
 import sys
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from xml.sax.saxutils import escape
 
 SOURCE_SHA256 = "1bf82a22423d6504fbb77c4c8c522a4efefb32aec19b630c138860ccddf8228d"

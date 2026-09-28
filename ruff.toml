@@ -1,0 +1,22 @@
+# Lint settings for the Python under tools/ (the crate itself is Rust).
+include = ["tools/**/*.py"]
+line-length = 100
+target-version = "py310"
+
+[lint]
+extend-select = [
+    "E501", # line length: the scripts are read far more than they are run
+    "I",    # import order
+    "B",    # likely bugs (bugbear)
+    "SIM",  # simpler equivalents
+    "UP",   # syntax the target Python already has
+    "PERF", # needless work in loops
+    "RUF",  # ruff's own checks
+]
+ignore = [
+    "RUF001", # the generated markdown uses – … → ≥ on purpose
+    "RUF002",
+    "RUF003",
+    "PERF203", # try/except in a loop re-raises with the item's name; clarity over speed
+    "SIM108",  # a nested conditional expression reads worse than if/else
+]

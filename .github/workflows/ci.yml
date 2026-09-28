@@ -27,6 +27,17 @@ jobs:
       - run: cargo test --all
       - run: python3 -m unittest discover -s tools
 
+  ruff:
+    name: ruff (tools/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned so a ruff release cannot fail CI with rules nobody chose.
+      - uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.16.8"
+          args: check
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

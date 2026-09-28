@@ -272,12 +272,14 @@ pub const DEFAULT_SYMBOL_TEMPLATE: &str = "#{34} {49}→{56} {35:name} ({35})";
 #[serde(default, rename_all = "camelCase")]
 pub struct DocumentLink {
     /// Substituted: `{tag}`; `{version}`, the version as the *default site*
-    /// spells it (`4.4`, `5.0`), which is what makes the default URL correct;
-    /// and `{fixVersion}`, the line's own version string.
+    /// spells it (`4.4`, `5.0.SP1`), which is what makes the default URL
+    /// correct; and `{fixVersion}`, the line's own version string.
     ///
-    /// Both exist because the site's numbering is lossy — `FIX.5.0SP1`,
-    /// `FIX.5.0SP2` and `FIXT.1.1` are one page there — so a reference that
-    /// does distinguish them is unreachable through `{version}`.
+    /// Both exist because the site's spelling reads `FIXT.1.1` as the SP2
+    /// tables and names no version the site does not publish. A template with
+    /// `{version}` points into a version's pages, so hover links it only for a
+    /// tag that version's bundled dictionary defines; any other template links
+    /// every tag.
     pub url: String,
 }
 

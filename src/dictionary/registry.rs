@@ -101,6 +101,8 @@ pub struct DictionaryDefinition {
 #[derive(Clone)]
 pub struct Registry {
     by_version: HashMap<String, Dict>,
+    /// The configured name of each `by_version` dictionary, for hover.
+    default_names: HashMap<String, String>,
     by_name: HashMap<String, Dict>,
     definitions: Vec<DictionaryDefinition>,
     default_version: String,
@@ -136,6 +138,7 @@ impl Registry {
     pub fn bundled_only() -> Registry {
         Registry {
             by_version: HashMap::new(),
+            default_names: HashMap::new(),
             by_name: HashMap::new(),
             definitions: Vec::new(),
             default_version: DEFAULT_VERSION.to_owned(),
@@ -219,6 +222,9 @@ impl DictionaryStore {
                 if spec.default {
                     if defaults.insert(version.clone()) {
                         registry.by_version.insert(version.clone(), dict.clone());
+                        registry
+                            .default_names
+                            .insert(version.clone(), spec.name.clone());
                     } else {
                         events.push(RegistryEvent::DuplicateDefault {
                             version: version.clone(),
@@ -312,6 +318,15 @@ impl Registry {
             .or_else(|| self.by_version.get(Version::resolve_alias_str(version)))
             .cloned()
             .or_else(|| Version::parse(version).map(|version| Dict::Static(bundled(version))))
+    }
+
+    /// The configured name of the dictionary `resolve(version)` answers with,
+    /// `None` for bundled tables.
+    pub fn default_name(&self, version: &str) -> Option<&str> {
+        self.default_names
+            .get(version)
+            .or_else(|| self.default_names.get(Version::resolve_alias_str(version)))
+            .map(String::as_str)
     }
 
     pub fn bindings(&self) -> Vec<(&str, Dict)> {
@@ -1684,5 +1699,89 @@ mod tests {
             .unwrap()
             .ptr_eq(&project_choice.dict));
         assert_eq!(store.parse_count(), 3);
+    }
+
+    // --- the name hover calls a custom dictionary by ----------------------
+
+    fn names(registry: Registry, choice: Option<DictionaryChoice>) -> crate::ctx::DictionaryNames {
+        crate::ctx::DictionaryNames::new(Arc::new(registry), choice.as_ref())
+    }
+
+    /// A selected dictionary answers only the versions it is compatible with:
+    /// a FIX.4.2 line is still decoded by, and named after, the FIX.4.2 default.
+    #[test]
+    fn each_version_names_the_dictionary_that_answers_it() {
+        let directory = tmp();
+        let venue = write(&directory, "venue.xml", QF_44);
+        let desk = write(&directory, "desk.xml", QF_44_OTHER);
+        let venue = named(&versioned(&venue, "FIX.4.2").path, "venue42");
+        let desk = DictionarySpec {
+            default: false,
+            ..named(&desk, "desk")
+        };
+        let (registry, events) = build(&[venue, desk]);
+        assert!(events.is_empty(), "{events:?}");
+        let chosen = registry.choice("desk");
+        let names = names(registry, chosen);
+        assert_eq!(names.of("FIX.4.4"), Some("desk"));
+        assert_eq!(names.of("FIX.4.2"), Some("venue42"));
+        assert_eq!(names.of("FIX.4.0"), None, "bundled tables have no name");
+    }
+
+    /// A custom FIX.5.0SP2 default is what `8=FIXT.1.1` reads, so it names it.
+    #[test]
+    fn the_fixt_alias_is_named_after_the_tables_it_reads() {
+        let directory = tmp();
+        let path = write(&directory, "session.xml", QF_44);
+        let (registry, events) = build(&[named(&versioned(&path, "FIX.5.0SP2").path, "venue")]);
+        assert!(events.is_empty(), "{events:?}");
+        let names = names(registry, None);
+        assert_eq!(names.of("FIXT.1.1"), Some("venue"));
+        assert_eq!(names.of("FIX.5.0SP2"), Some("venue"));
+    }
+
+    /// Both names share one parsed file; each is named as it was selected.
+    #[test]
+    fn one_file_under_two_names_keeps_both_names() {
+        let directory = tmp();
+        let path = write(&directory, "shared.xml", QF_44);
+        let alpha = named(&path, "alpha");
+        let beta = DictionarySpec {
+            default: false,
+            ..named(&path, "beta")
+        };
+        let (registry, events) = build(&[alpha, beta]);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(registry.default_name("FIX.4.4"), Some("alpha"));
+        let beta = registry.choice("beta").expect("defined");
+        assert!(
+            beta.dict.ptr_eq(&registry.resolve("FIX.4.4").unwrap()),
+            "one parse"
+        );
+        // The name a rename shows follows at once: `DictionaryNames` is built
+        // from the selection in force, not from the reusable `Ctx`.
+        assert_eq!(names(registry, Some(beta)).of("FIX.4.4"), Some("beta"));
+    }
+
+    /// A dictionary chosen by path has no name: its last path component
+    /// stands in, and the full path never does.
+    #[test]
+    fn a_path_selection_is_named_by_its_last_component() {
+        let directory = tmp();
+        let file = write(&directory, "desk.xml", QF_44);
+        let (registry, _) = build(&[]);
+        let store = DictionaryStore::default();
+        let choice = store.load_choice(&file, &ctx(None, None)).expect("loads");
+        assert_eq!(
+            names(registry.clone(), Some(choice)).of("FIX.4.4"),
+            Some("desk.xml")
+        );
+
+        let repository =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("xml/custom/synthetic/repository/FIX.4.4");
+        let choice = store
+            .load_choice(&repository.to_string_lossy(), &ctx(None, None))
+            .expect("loads");
+        assert_eq!(names(registry, Some(choice)).of("FIX.4.4"), Some("FIX.4.4"));
     }
 }

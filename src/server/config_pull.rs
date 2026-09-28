@@ -541,10 +541,15 @@ impl ServerState {
                         |previous| previous.rules.clone(),
                     )
             };
+            let names = Arc::new(crate::ctx::DictionaryNames::new(
+                document.project.registry.clone(),
+                document.choice.as_ref(),
+            ));
             let document = Arc::new(DocumentConfig {
                 resolved: document.resolved,
                 project: document.project,
                 ctx,
+                names,
                 render,
                 rules,
             });

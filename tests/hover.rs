@@ -6,7 +6,7 @@
 
 mod harness;
 
-use harness::TestClient;
+use harness::{TestClient, Workspace};
 use serde_json::{json, Value};
 
 const URI: &str = "file:///a.fix";
@@ -198,5 +198,84 @@ fn malformed_params_are_an_error() {
         )
         .expect_err("refused");
     assert_eq!(error, harness::INVALID_PARAMS);
+    client.shutdown();
+}
+
+/// A desk's own FIX.4.4 dictionary: one standard tag, one FIX.5.0 tag, one of
+/// its own. Written by the test, so the shared fixtures stay as they are.
+const DESK_44: &str = "<fix type='FIX' major='4' minor='4' servicepack='0'><fields>\
+<field number='55' name='Symbol' type='STRING'/>\
+<field number='1328' name='RejectText' type='STRING'/>\
+<field number='20001' name='DeskMode' type='INT'><value enum='1' description='ALPHA'/></field>\
+</fields></fix>";
+
+const DESK_LINE: &str = "8=FIX.4.4|35=0|55=X|1328=x|20001=1|";
+
+/// The desk dictionary bound as the default for FIX.4.4, plus `extra` settings.
+/// The workspace is returned so the file outlives the session.
+fn open_desk(extra: Value) -> (TestClient, Workspace) {
+    let workspace = Workspace::new("hover-desk");
+    let mut fix = workspace.desk_dictionary(DESK_44);
+    for (key, value) in extra.as_object().expect("settings object") {
+        fix[key] = value.clone();
+    }
+    let mut client = workspace.client(fix);
+    client.did_open(URI, DESK_LINE, 1);
+    (client, workspace)
+}
+
+fn markdown_at(client: &mut TestClient, field: &str) -> String {
+    let start = DESK_LINE.find(field).expect("the field is there") as u32;
+    at(client, start)["contents"]["value"]
+        .as_str()
+        .expect("markdown")
+        .to_owned()
+}
+
+/// Under a custom dictionary hover says which tags standard FIX does not
+/// define for the line's version, and links only the ones it does.
+#[test]
+fn a_custom_dictionary_is_measured_against_standard_fix() {
+    let (mut client, _workspace) = open_desk(json!({}));
+
+    let custom = markdown_at(&mut client, "20001=");
+    assert!(
+        custom.contains("*Custom field, introduced in \"desk\"*"),
+        "{custom}"
+    );
+    assert!(custom.contains("Value: `1` — **ALPHA**"), "{custom}");
+    assert!(!custom.contains("[FIX Reference"), "{custom}");
+
+    let later = markdown_at(&mut client, "1328=");
+    assert!(
+        later.contains("*Not in FIX.4.4, introduced in FIX.5.0SP1*"),
+        "{later}"
+    );
+    assert!(!later.contains("[FIX Reference"), "{later}");
+
+    let standard = markdown_at(&mut client, "55=");
+    assert!(standard.contains("*Standard FIX.4.4*"), "{standard}");
+    assert!(
+        standard.ends_with("(https://www.onixs.biz/fix-dictionary/4.4/tagNum_55.html)"),
+        "{standard}"
+    );
+    client.shutdown();
+}
+
+/// A template without the site's version segment is the desk's own browser,
+/// which knows the desk's own tags.
+#[test]
+fn a_flat_reference_url_still_links_a_custom_tag() {
+    let (mut client, _workspace) =
+        open_desk(json!({ "documentLink": { "url": "https://fix.internal/t{tag}" } }));
+    let custom = markdown_at(&mut client, "20001=");
+    assert!(
+        custom.contains("*Custom field, introduced in \"desk\"*"),
+        "{custom}"
+    );
+    assert!(
+        custom.ends_with("[FIX Reference: fix.internal](https://fix.internal/t20001)"),
+        "{custom}"
+    );
     client.shutdown();
 }

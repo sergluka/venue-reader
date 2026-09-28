@@ -75,6 +75,16 @@ impl Workspace {
         }))
     }
 
+    /// Settings binding `xml`, written here as `desk.xml`, as the default
+    /// custom dictionary named "desk".
+    pub fn desk_dictionary(&self, xml: &str) -> Value {
+        let path = self.write("desk.xml", xml);
+        json!({
+            "allowDictionaryPath": true,
+            "dictionaries": [{ "path": path, "name": "desk", "default": true }],
+        })
+    }
+
     pub fn client(&self, settings: Value) -> TestClient {
         let mut client = TestClient::start();
         self.initialize(&mut client, settings);

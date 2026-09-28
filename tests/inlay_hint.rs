@@ -6,7 +6,7 @@
 
 mod harness;
 
-use harness::TestClient;
+use harness::{TestClient, Workspace};
 use serde_json::{json, Value};
 
 const URI: &str = "file:///a.fix";
@@ -550,16 +550,48 @@ fn repeated_tags_resolve_to_their_own_field() {
 /// A client that resolves tooltips, which is what makes an unresolved hint
 /// worth testing at all.
 fn resolving_client(text: &str) -> TestClient {
+    resolving_client_with(text, hints_on())
+}
+
+/// As `resolving_client`, with `fix` as the whole settings object.
+fn resolving_client_with(text: &str, fix: Value) -> TestClient {
     let mut client = TestClient::start();
     client.initialize_with(json!({
         "capabilities": {
             "general": { "positionEncodings": ["utf-8"] },
             "textDocument": { "inlayHint": { "resolveSupport": { "properties": ["tooltip"] } } },
         },
-        "initializationOptions": { "fix": hints_on() },
+        "initializationOptions": { "fix": fix },
     }));
     client.did_open(URI, text, 1);
     client
+}
+
+/// The tooltip is hover's markdown, so a custom tag says what hover says.
+#[test]
+fn a_custom_tags_tooltip_says_it_is_not_standard() {
+    let workspace = Workspace::new("hint-desk");
+    let mut fix = workspace.desk_dictionary(
+        "<fix type='FIX' major='4' minor='4' servicepack='0'><fields>\
+         <field number='20001' name='DeskMode' type='INT'/></fields></fix>",
+    );
+    fix["inlayHints"] = hints_on()["inlayHints"].take();
+    let mut client = resolving_client_with("8=FIX.4.4|35=0|20001=1|", fix);
+
+    let hint = over(&mut client, (0, 0), (0, 400))
+        .into_iter()
+        .find(|hint| hint["data"]["tag"] == 20001 && hint["data"]["kind"] == "tag")
+        .expect("the custom tag is labelled");
+    let tooltip = client.request("inlayHint/resolve", hint).expect("answered")["tooltip"]["value"]
+        .as_str()
+        .expect("markdown")
+        .to_owned();
+    assert!(
+        tooltip.contains("*Custom field, introduced in \"desk\"*"),
+        "{tooltip}"
+    );
+    assert!(!tooltip.contains("[FIX Reference"), "{tooltip}");
+    client.shutdown();
 }
 
 /// Only an *edit* must advance the version, and a `didOpen` for an already open

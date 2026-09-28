@@ -799,6 +799,10 @@ mod tests {
         let ctx = Ctx::for_test("FIX.4.4");
         let doc = Document::open(text.as_bytes(), 1, ctx);
         Snapshot {
+            names: Arc::new(crate::ctx::DictionaryNames::new(
+                Arc::new(crate::dictionary::Registry::bundled_only()),
+                None,
+            )),
             lines: doc.lines.clone(),
             encoding: crate::document::PositionEncoding::Utf8,
             ctx: doc.ctx.clone(),

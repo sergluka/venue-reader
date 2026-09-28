@@ -174,6 +174,8 @@ fn answer(params: &InlayHintParams, wanted: &Wanted, snapshot: &Snapshot) -> Han
             continue;
         }
         let columns = Columns::of(line, wants.iter().map(|want| want.byte), snapshot.encoding);
+        // One lookup per line, not per hint: every hint here shares the version.
+        let dictionary = snapshot.names.of(&message.version);
 
         for Want { byte, what } in wants {
             let column = columns.at(byte);
@@ -189,7 +191,8 @@ fn answer(params: &InlayHintParams, wanted: &Wanted, snapshot: &Snapshot) -> Han
             out.push(match what {
                 What::Summary => summary_hint(line, message, snapshot, number, uri),
                 What::Field { kind, at, label } => field_hint(
-                    line, message, at, kind, label, wanted, snapshot, number, column, uri,
+                    line, message, at, kind, label, wanted, snapshot, dictionary, number, column,
+                    uri,
                 ),
             });
         }
@@ -254,6 +257,7 @@ fn field_hint(
     label: String,
     wanted: &Wanted,
     _snapshot: &Snapshot,
+    dictionary: Option<&str>,
     line: LineNo,
     column: Column,
     uri: &str,
@@ -282,7 +286,14 @@ fn field_hint(
     // Eager when the client does not resolve tooltips: sending it a hint whose
     // tooltip will never be filled is an empty popup, not a lazy one.
     if !wanted.defer_tooltips {
-        if let Some(tip) = tooltip(line_text, message, at, _snapshot, &wanted.format) {
+        if let Some(tip) = tooltip(
+            line_text,
+            message,
+            at,
+            _snapshot,
+            dictionary,
+            &wanted.format,
+        ) {
             out["tooltip"] = tip;
         }
     }
@@ -330,14 +341,17 @@ pub(super) fn defers_tooltips(caps: &lsp_types::ClientCapabilities) -> bool {
 }
 
 /// The hover markdown a hint's tooltip carries, under the negotiated format.
+/// `dictionary` is `snapshot.names.of(&message.version)`, passed in so a
+/// line's worth of hints looks it up once.
 pub(super) fn tooltip(
     line: &crate::document::Line,
     message: &crate::codec::MessageAnalysis,
     at: usize,
     snapshot: &Snapshot,
+    dictionary: Option<&str>,
     format: &MarkupKind,
 ) -> Option<Value> {
-    let markdown = crate::render::hover(&line.bytes, message, at, &snapshot.render)?;
+    let markdown = crate::render::hover(&line.bytes, message, at, &snapshot.render, dictionary)?;
     Some(json!({ "kind": format, "value": markdown }))
 }
 
@@ -408,7 +422,8 @@ fn resolve(mut hint: Value, format: &MarkupKind, snapshot: &Snapshot) -> Handler
     if data["tag"].as_u64() != Some(u64::from(message.fields[at].tag)) {
         return Ok(hint);
     }
-    if let Some(tip) = tooltip(line, message, at, snapshot, format) {
+    let dictionary = snapshot.names.of(&message.version);
+    if let Some(tip) = tooltip(line, message, at, snapshot, dictionary, format) {
         hint["tooltip"] = tip;
     }
     Ok(hint)

@@ -1,9 +1,14 @@
 //! Assembles the bundled dictionaries: QuickFIX/J structure per version, the
 //! FIXT.1.1 session layer under its documented alias, and presentation metadata
 //! projected from FIX Orchestra. Shared with `build.rs` via `#[path]`, so this
-//! file may depend only on `std`, `roxmltree`, `super::model` and `super::parse`.
+//! file may depend only on `std`, `roxmltree`, `super::model`, `super::parse`
+//! and `crate::tag`.
+//!
+//! The Orchestra projection is presentation for the version tables, and also
+//! the second witness on what is standard: `standard.rs` weighs it against the
+//! QuickFIX/J files, which stay the first witness on what a version contained.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::model::{EnumDef, FieldDef, GroupDef, ParsedDict};
 use super::parse::{attr, parse_doc, ParseError, Source};
@@ -26,11 +31,33 @@ const VERSION_RANK: [(&str, u8); 12] = [
     ("FIX.Latest", 10),
 ];
 
-fn rank(version: &str) -> Option<u8> {
+pub fn rank(version: &str) -> Option<u8> {
     VERSION_RANK
         .iter()
         .find(|(name, _)| *name == version)
         .map(|(_, rank)| *rank)
+}
+
+/// Tags FIX allocates to users, never to the standard
+/// (fixtrading.org/standards/user-defined-fields, retrieved 2026-09-20). Tags
+/// from 40000 up are standard again.
+pub const USER_DEFINED: std::ops::RangeInclusive<u32> = 5000..=39999;
+
+/// The ranks of the bundled releases, FIX.4.0 to FIX.5.0SP2, are contiguous.
+pub const FIRST_BUNDLED_RANK: u8 = 2;
+pub const LAST_BUNDLED_RANK: u8 = 9;
+
+/// The rank of the first bundled release that should carry an item Orchestra
+/// dates `added` + `added_ep`; `None` for an empty or unknown date.
+///
+/// An extension pack is applied on top of `added` and ships in the next
+/// release — true for 518 of the 522 EP-dated bundled tags. A date before
+/// FIX.4.0 implies FIX.4.0, the first bundled file. Above
+/// [`LAST_BUNDLED_RANK`], no bundled release carries it.
+pub fn implied_first_release(added: &str, added_ep: u16) -> Option<u8> {
+    let dated = rank(added)?;
+    let release = if added_ep > 0 { dated + 1 } else { dated };
+    Some(release.max(FIRST_BUNDLED_RANK))
 }
 
 #[derive(Debug, Default)]
@@ -43,6 +70,7 @@ pub struct CodeMeta {
 
 #[derive(Debug, Default)]
 pub struct FieldMeta {
+    pub name: String,
     pub datatype: String,
     pub added: String,
     pub added_ep: u16,
@@ -59,10 +87,11 @@ pub struct MessageMeta {
     pub synopsis: String,
 }
 
-/// `xml/standard/FIXLatest-metadata.xml`, keyed for joining on id.
+/// `xml/standard/FIXLatest-metadata.xml`, keyed for joining on id. Sorted, so
+/// the tables generated from it do not depend on hashing order.
 #[derive(Debug, Default)]
 pub struct Metadata {
-    pub fields: HashMap<u32, FieldMeta>,
+    pub fields: BTreeMap<u32, FieldMeta>,
     pub messages: HashMap<String, MessageMeta>,
 }
 
@@ -95,6 +124,7 @@ pub fn parse_metadata(src: &Source) -> Result<Metadata, ParseError> {
             })
             .collect();
         let field = FieldMeta {
+            name: attr(node, "name"),
             datatype: attr(node, "type"),
             added: attr(node, "added"),
             added_ep: extension_pack(node),

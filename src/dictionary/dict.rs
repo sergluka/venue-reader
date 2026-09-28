@@ -109,7 +109,7 @@ pub fn bundled(version: Version) -> &'static StaticDict {
 }
 
 /// What the dictionaries say about a tag's life across the bundled versions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Lifecycle<'a> {
     pub added: Option<&'a str>,
     pub deprecated: Option<&'a str>,
@@ -122,6 +122,15 @@ pub struct Lifecycle<'a> {
     /// free. Scoped to the bundled dictionaries: an owned one has no later
     /// version to speak of and gets `None`.
     pub removed_in: Option<&'a str>,
+}
+
+/// Position of a tag's merged row in `TAGS`, the one search every lookup shares.
+pub(super) fn tag_index(tag: u32) -> Option<usize> {
+    TAGS.binary_search_by_key(&tag, |record| record.tag).ok()
+}
+
+pub(super) fn tag_record(tag: u32) -> Option<&'static TagRecord> {
+    tag_index(tag).map(|i| &TAGS[i])
 }
 
 /// The bundled versions in protocol order, by mask ordinal. `FIXT.1.1` is not
@@ -214,7 +223,7 @@ impl Dict {
     pub fn field_idx(&self, tag: u32) -> Option<FieldIdx> {
         let i = match self {
             Dict::Static(d) => {
-                let i = TAGS.binary_search_by_key(&tag, |r| r.tag).ok()?;
+                let i = tag_index(tag)?;
                 TAGS[i].presence.contains(d.mask_bit).then_some(i)?
             }
             Dict::Owned(d) => d.field_index(tag)?,
@@ -227,10 +236,7 @@ impl Dict {
     /// versions define. `None` for an owned dictionary, which spans no versions.
     pub fn record(&self, tag: u32) -> Option<&'static TagRecord> {
         match self {
-            Dict::Static(_) => TAGS
-                .binary_search_by_key(&tag, |r| r.tag)
-                .ok()
-                .map(|i| &TAGS[i]),
+            Dict::Static(_) => tag_record(tag),
             Dict::Owned(_) => None,
         }
     }
