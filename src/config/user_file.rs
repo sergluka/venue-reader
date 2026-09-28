@@ -42,24 +42,41 @@ mod tests {
 
     #[test]
     fn xdg_config_home_replaces_the_home_default() {
+        let config_home = Path::new(if cfg!(windows) { "C:/xdg" } else { "/xdg" });
+        let home_directory = Path::new(if cfg!(windows) {
+            "C:/home/test"
+        } else {
+            "/home/test"
+        });
         assert_eq!(
-            location(Some(Path::new("/xdg")), Some(Path::new("/home/test"))),
-            Some(PathBuf::from("/xdg/fix-lsp.toml"))
+            location(Some(config_home), Some(home_directory)),
+            Some(config_home.join("fix-lsp.toml"))
         );
         assert_eq!(
-            location(None, Some(Path::new("/home/test"))),
-            Some(PathBuf::from("/home/test/.config/fix-lsp.toml"))
+            location(None, Some(home_directory)),
+            Some(home_directory.join(".config").join("fix-lsp.toml"))
         );
         assert_eq!(location(None, None), None);
     }
 
     #[test]
     fn a_relative_or_empty_xdg_config_home_is_ignored() {
+        let home_directory = Path::new(if cfg!(windows) {
+            "C:/home/test"
+        } else {
+            "/home/test"
+        });
         for value in ["relative/config", ""] {
             assert_eq!(
-                location(Some(Path::new(value)), Some(Path::new("/home/test"))),
-                Some(PathBuf::from("/home/test/.config/fix-lsp.toml")),
+                location(Some(Path::new(value)), Some(home_directory)),
+                Some(home_directory.join(".config").join("fix-lsp.toml")),
                 "{value:?}"
+            );
+        }
+        if cfg!(windows) {
+            assert_eq!(
+                location(Some(Path::new("/xdg")), Some(home_directory)),
+                Some(home_directory.join(".config").join("fix-lsp.toml"))
             );
         }
         assert_eq!(location(Some(Path::new("relative/config")), None), None);
