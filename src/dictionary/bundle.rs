@@ -47,17 +47,53 @@ pub const USER_DEFINED: std::ops::RangeInclusive<u32> = 5000..=39999;
 pub const FIRST_BUNDLED_RANK: u8 = 2;
 pub const LAST_BUNDLED_RANK: u8 = 9;
 
+/// The rank of the release an Orchestra date names: `added` itself, or the one
+/// after it when an extension pack is recorded. A pack is applied on top of
+/// `added` and ships in the next release — true for 518 of the 522 EP-dated
+/// bundled tags. `None` for an empty or unknown date.
+///
+/// The rule lives here alone; [`implied_first_release`] and [`release_of`] are
+/// its numeric and display forms.
+fn release_rank(added: &str, added_ep: u16) -> Option<u8> {
+    Some(rank(added)? + u8::from(added_ep > 0))
+}
+
 /// The rank of the first bundled release that should carry an item Orchestra
 /// dates `added` + `added_ep`; `None` for an empty or unknown date.
 ///
-/// An extension pack is applied on top of `added` and ships in the next
-/// release — true for 518 of the 522 EP-dated bundled tags. A date before
-/// FIX.4.0 implies FIX.4.0, the first bundled file. Above
+/// A date before FIX.4.0 implies FIX.4.0, the first bundled file. Above
 /// [`LAST_BUNDLED_RANK`], no bundled release carries it.
 pub fn implied_first_release(added: &str, added_ep: u16) -> Option<u8> {
-    let dated = rank(added)?;
-    let release = if added_ep > 0 { dated + 1 } else { dated };
-    Some(release.max(FIRST_BUNDLED_RANK))
+    release_rank(added, added_ep).map(|release| release.max(FIRST_BUNDLED_RANK))
+}
+
+/// The name of the release an Orchestra date names, for text: a pack number is
+/// never it, since a pack says how an item reached a release and not which.
+///
+/// Display only — nothing maps the answer back to a rank, because "FIX Latest"
+/// is not a [`VERSION_RANK`] spelling. Past the last bundled release every date
+/// is that one name, pack or no pack, so one release cannot reach a reader under
+/// two spellings. Below it and without a pack the date is already a release name
+/// and is returned verbatim, including one no bundled version has: that is what
+/// a custom dictionary's own date may be, and it is the only date such a field
+/// has. A pack on top of a date no rank knows names a release nothing can place,
+/// which is the one case with no answer.
+pub fn release_of(added: &str, added_ep: u16) -> Option<&str> {
+    let Some(release) = release_rank(added, added_ep) else {
+        // A date no rank knows is a custom dictionary's own spelling, the only
+        // date such a field has; a pack on top of it places nothing.
+        return (added_ep == 0 && !added.is_empty()).then_some(added);
+    };
+    if release > LAST_BUNDLED_RANK {
+        return Some("FIX Latest");
+    }
+    if added_ep == 0 {
+        return Some(added);
+    }
+    VERSION_RANK
+        .iter()
+        .find(|(_, rank)| *rank == release)
+        .map(|(name, _)| *name)
 }
 
 #[derive(Debug, Default)]
@@ -603,5 +639,72 @@ mod tests {
         let logon = app.message("A").unwrap();
         assert_eq!(logon.groups, [1]);
         assert_eq!(app.message("D").unwrap().name, "NewOrderSingle");
+    }
+
+    /// A pack is applied on top of its date and ships in the next release, so
+    /// that release is what a reader can look the item up in.
+    #[test]
+    fn a_pack_names_the_release_that_shipped_it() {
+        assert_eq!(release_of("FIX.5.0", 55), Some("FIX.5.0SP1"));
+        assert_eq!(release_of("FIX.4.4", 2), Some("FIX.5.0"));
+        assert_eq!(release_of("FIX.5.0SP1", 142), Some("FIX.5.0SP2"));
+        // FIXT.1.1 ranks with FIX.5.0, and the release after that rank is SP1.
+        assert_eq!(release_of("FIXT.1.1", 16), Some("FIX.5.0SP1"));
+    }
+
+    /// Past the last bundled file every date has one name, and it is the
+    /// protocol's spelling rather than Orchestra's `FIX.Latest`.
+    #[test]
+    fn a_release_after_the_bundled_ones_is_named_fix_latest() {
+        assert_eq!(release_of("FIX.5.0SP2", 178), Some("FIX Latest"));
+        assert_eq!(release_of("FIX.Latest", 222), Some("FIX Latest"));
+        // An absent or `-1` `addedEP` is recorded as 0, so a FIX Latest date
+        // without a pack is a shape the metadata permits.
+        assert_eq!(release_of("FIX.Latest", 0), Some("FIX Latest"));
+    }
+
+    /// Without a pack the date already is a release, including one no bundled
+    /// version has: a custom dictionary's own `added`, which is all it has.
+    #[test]
+    fn a_date_without_a_pack_is_returned_as_it_was_written() {
+        assert_eq!(release_of("FIX.2.7", 0), Some("FIX.2.7"));
+        assert_eq!(release_of("FIX.5.0SP2", 0), Some("FIX.5.0SP2"));
+        assert_eq!(release_of("FIX.9.1", 0), Some("FIX.9.1"));
+        assert_eq!(release_of("", 0), None);
+        // A pack on top of an unplaceable date names a release nothing knows.
+        assert_eq!(release_of("FIX.9.1", 3), None);
+        assert_eq!(release_of("", 7), None);
+    }
+
+    /// One rule, two forms: the numeric one clamps to the first bundled file
+    /// and the display one names the same rank.
+    #[test]
+    fn the_numeric_and_the_named_form_agree_on_every_known_date() {
+        for (version, rank_of_version) in VERSION_RANK {
+            for pack in [0, 42] {
+                let release = release_rank(version, pack).expect("a known date");
+                assert_eq!(release, rank_of_version + u8::from(pack > 0), "{version}");
+                assert_eq!(
+                    implied_first_release(version, pack),
+                    Some(release.max(FIRST_BUNDLED_RANK)),
+                    "{version} EP{pack}"
+                );
+                if pack == 0 {
+                    continue;
+                }
+                let named = release_of(version, pack).expect("a known date is named");
+                let expected = if release > LAST_BUNDLED_RANK {
+                    "FIX Latest"
+                } else {
+                    // The first spelling at that rank: FIX.5.0, never FIXT.1.1.
+                    VERSION_RANK
+                        .iter()
+                        .find(|(_, r)| *r == release)
+                        .map(|(name, _)| *name)
+                        .expect("bundled ranks are contiguous")
+                };
+                assert_eq!(named, expected, "{version} EP{pack}");
+            }
+        }
     }
 }

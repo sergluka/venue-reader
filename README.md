@@ -144,7 +144,10 @@ not reconstruct order lifecycles or correlate session history.
 Hover over a tag or its value to inspect the field's dictionary definition,
 datatype, description, and decoded enum value. Available metadata shows when
 the field or value was introduced, and when the field was deprecated or
-removed. Fields inside repeating groups include their group path;
+removed. A field an extension pack introduced is dated by the release that
+shipped that pack: `FIX.5.0 EP55` reads FIX.5.0SP1. A value's date is the one
+FIX Latest records, which for a value an extension pack added is the release
+the pack applied to. Fields inside repeating groups include their group path;
 MsgType(35) also includes the message description and category.
 
 For example, hovering over `35=0` (MsgType(35)) in the Heartbeat above displays:

@@ -14,7 +14,7 @@
 //! message uses — 36 in `FIX50.xml`, 16 in `FIX43.xml`; FIX Latest has forgotten
 //! them, so they stay [`Standard::InVersion`], unchallenged.
 
-use super::bundle::{implied_first_release, FIRST_BUNDLED_RANK, USER_DEFINED};
+use super::bundle::{implied_first_release, release_of, FIRST_BUNDLED_RANK, USER_DEFINED};
 use super::dict::{tag_record, Version};
 use super::statics::{LatestTag, TagRecord, LATEST_NAMES, LATEST_TAGS, LATEST_VERSIONS};
 
@@ -67,20 +67,17 @@ impl StandardDef {
         self.added.is_empty()
     }
 
-    /// The FIX version that introduced it: the release its date implies, or
+    /// The FIX version that introduced it: the release its date names, or
     /// "FIX Latest" past FIX.5.0SP2. `None` when the files do not bear the
     /// date out. An extension pack is how a tag got into a release, so it is
     /// never the answer: `FIX.5.0 EP55` was introduced in FIX.5.0SP1.
+    ///
+    /// The same `release_of` the lifecycle line uses, so one tag cannot be
+    /// given two dates by two sentences.
     pub fn introduced(&self) -> Option<&'static str> {
-        if !self.date_holds {
-            return None;
-        }
-        let release = implied_first_release(self.added, self.added_ep)?;
-        Some(
-            Version::BUNDLED
-                .get(usize::from(release - FIRST_BUNDLED_RANK))
-                .map_or("FIX Latest", |version| version.as_str()),
-        )
+        self.date_holds
+            .then(|| release_of(self.added, self.added_ep))
+            .flatten()
     }
 }
 
@@ -330,6 +327,26 @@ mod tests {
         assert_eq!(introduced(FIX44, 47), None, "retired: no date");
     }
 
+    /// A date before the first bundled file is its own answer. Unreachable
+    /// through `of_tag` — such a tag is in every bundled file, so it is never
+    /// `OtherVersion` — and pinned because `release_of` stopped clamping it to
+    /// FIX.4.0, which the numeric form still does for the table checks.
+    #[test]
+    fn a_date_older_than_the_bundled_files_is_named_as_written() {
+        let def = StandardDef {
+            name: "T",
+            added: "FIX.2.7",
+            added_ep: 0,
+            date_holds: true,
+            retirement: None,
+        };
+        assert_eq!(def.introduced(), Some("FIX.2.7"));
+        assert_eq!(
+            implied_first_release("FIX.2.7", 0),
+            Some(FIRST_BUNDLED_RANK)
+        );
+    }
+
     /// Rule80A(47) runs unbroken through FIX.4.3. ExecTransType(20) leaves
     /// after FIX.4.3 and `FIX50.xml` declares it again: under FIX.4.4 it is in
     /// a gap, not retired, and once past FIX.5.0 no release can be named.
@@ -506,6 +523,40 @@ mod tests {
                     let release = implied_first_release(def.added, def.added_ep).unwrap();
                     assert!(release > tables, "{} {tag}: {def:?}", version.as_str());
                 }
+            }
+        }
+    }
+
+    /// The lifecycle line and the standing note are one tag's two sentences, so
+    /// the date either reaches both or neither: whatever hover prints for a
+    /// bundled tag whose date holds must imply the first file that declares it.
+    ///
+    /// Read back through the numeric form rather than compared by rank, because
+    /// the 102 tags dated FIX.2.7 or FIX.3.0 are older than every bundled file
+    /// and print it — MsgType(35) says FIX.2.7, which no file contradicts. The
+    /// clamp is what makes those agree, and it lives in one place.
+    #[test]
+    fn the_lifecycle_line_names_the_file_that_first_has_the_tag() {
+        for version in Version::BUNDLED {
+            let dict = Dict::Static(bundled(version));
+            for record in TAGS {
+                let Some(idx) = dict.field_idx(record.tag) else {
+                    continue;
+                };
+                let Some(printed) = dict.field(idx).lifecycle().added else {
+                    continue;
+                };
+                if !date_holds(record.tag) {
+                    // Hover drops these; what the view carries is not printed.
+                    continue;
+                }
+                assert_eq!(
+                    implied_first_release(printed, 0),
+                    first_release(record),
+                    "{} {}: {printed}",
+                    version.as_str(),
+                    record.tag
+                );
             }
         }
     }

@@ -136,7 +136,9 @@ disagree. Where they differ, over the pinned files:
   in that range; from 40000 up tags are standard again.
 - **Dated differently: 59 (version, tag) pairs.** An `addedEP` is read as
   "applied on top of `added`, shipped in the next release", which holds for 518
-  of the 522 EP-dated bundled tags. RepurchaseTerm(226) and 35 others in
+  of the 522 EP-dated bundled tags. Hover dates a field by that release — the
+  standing note and the lifecycle line share one `release_of` — and names
+  neither the pack nor the `added` it was applied to. RepurchaseTerm(226) and 35 others in
   220–260 are dated FIX.4.2 but first appear in `FIX43.xml`, and the reference
   site agrees with QuickFIX/J (`4.3/tagNum_220` exists, `4.2/tagNum_220` does
   not; probed 2026-09-20). NoUsernames(809) is missing from `FIX44.xml` and `FIX50.xml`; 20

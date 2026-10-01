@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use super::bundle::release_of;
 use super::model::{Datatype, EnumDef, FieldDef, GroupDef, MessageDef, ParsedDict};
 use super::statics::{
     EnumOverride, EnumRecord, FieldOverride, StaticDict, StaticGroup, StaticMessage, TagRecord,
@@ -449,10 +450,14 @@ impl<'a> FieldView<'a> {
     /// The renderer phrases this; the mask stays here. A `VersionMask` is a
     /// fact about how the tables were generated, and `render/` reading one
     /// would tie presentation to that layout.
+    ///
+    /// `added` is the release, not the pack's base: `FIX.5.0 EP55` entered the
+    /// protocol in FIX.5.0SP1, which is the file that first has the tag. A date
+    /// the files contradict is hover's to drop, not this method's.
     pub fn lifecycle(&self) -> Lifecycle<'a> {
         let some = |text: &'a str| (!text.is_empty()).then_some(text);
         Lifecycle {
-            added: some(self.added()),
+            added: release_of(self.added(), self.added_ep()),
             deprecated: some(self.deprecated()),
             removed_in: match self {
                 FieldView::Static { rec, bit } => removed_in(rec.presence, *bit),
@@ -862,6 +867,29 @@ mod tests {
             (under_44.added, under_44.deprecated, under_44.removed_in),
             (Some("FIX.4.2"), Some("FIX.4.4"), None)
         );
+    }
+
+    /// An extension pack is applied on top of its date and ships in the next
+    /// release, so the pack's base is a release that does not have the tag:
+    /// RejectText(1328) is `FIX.5.0 EP55` and arrived in FIX.5.0SP1, which is
+    /// also the first file that declares it. The standing note says the same
+    /// release, and one tag may not be given two dates.
+    #[test]
+    fn a_pack_dated_tag_arrived_in_the_release_that_shipped_the_pack() {
+        for version in [Version::Fix50Sp1, Version::Fix50Sp2] {
+            let dict = stat(version);
+            let reject_text = lifecycle_of(&dict, 1328).expect("1328 is in 5.0SP1 on");
+            assert_eq!(reject_text.added, Some("FIX.5.0SP1"), "{version:?}");
+        }
+        // NoStrategyParameters(957) is FIX.4.4 EP2, so FIX.5.0 — the first file
+        // that has it.
+        let fix50 = stat(Version::Fix50);
+        let parameters = lifecycle_of(&fix50, 957).expect("957 is in 5.0");
+        assert_eq!(parameters.added, Some("FIX.5.0"));
+        // MsgType(35) has no pack: the date stands as Orchestra wrote it, older
+        // than any bundled file.
+        let msg_type = lifecycle_of(&fix50, 35).expect("35 is everywhere");
+        assert_eq!(msg_type.added, Some("FIX.2.7"));
     }
 
     /// A tag every version defines has no boundary to report.

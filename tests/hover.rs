@@ -54,6 +54,25 @@ fn a_hover_anywhere_in_a_field_answers_about_that_field() {
     client.shutdown();
 }
 
+/// RejectText(1328) is `FIX.5.0 EP55`: the pack shipped in FIX.5.0SP1, which is
+/// the first dictionary that has the tag. Pinned through the protocol because the
+/// base version the metadata records, FIX.5.0, names a file without it.
+#[test]
+fn a_pack_dated_tag_is_dated_by_its_release_on_the_wire() {
+    const SP2: &str = "8=FIX.5.0SP2|9=57|35=0|1328=x|10=171|";
+    let mut client = open(SP2);
+    let at_1328 = SP2.find("1328=x").expect("the field is there") as u32;
+    let markdown = at(&mut client, at_1328)["contents"]["value"]
+        .as_str()
+        .expect("markdown")
+        .to_owned();
+    assert!(
+        markdown.contains("*Introduced in FIX.5.0SP1*"),
+        "{markdown}"
+    );
+    client.shutdown();
+}
+
 /// A separator belongs to no field. Answering about the neighbour would put a
 /// popup on screen about something the cursor is not on.
 /// The label the dictionary join restores has to survive the whole way out:

@@ -398,6 +398,36 @@ mod tests {
         assert!(hover.contains("*Introduced in FIX.2.7*"), "{hover}");
     }
 
+    /// An extension pack says how a tag reached a release, not which, so the
+    /// line names the release that shipped the pack — the first file that has
+    /// the tag — and never the pack or its base. The standing note under a
+    /// custom dictionary says the same release for the same tag.
+    #[test]
+    fn an_ep_dated_tag_is_dated_by_the_release_that_shipped_it() {
+        // RejectText(1328): FIX.5.0 EP55, first in the FIX.5.0SP1 file.
+        for (line, version) in [
+            ("8=FIX.5.0SP2|9=5|35=0|1328=x|10=0|", "FIX.5.0SP2"),
+            ("8=FIXT.1.1|9=5|35=0|1328=x|10=0|", "FIXT.1.1"),
+        ] {
+            let hover = rendered(line, version, 1328).expect("1328 is in the tables");
+            assert!(hover.contains("*Introduced in FIX.5.0SP1*"), "{hover}");
+        }
+
+        // NoStrategyParameters(957): FIX.4.4 EP2, first in the FIX.5.0 file.
+        let parameters =
+            rendered("8=FIX.5.0|9=5|35=0|957=1|10=0|", "FIX.5.0", 957).expect("957 is in 5.0");
+        assert!(
+            parameters.contains("*Introduced in FIX.5.0*"),
+            "{parameters}"
+        );
+
+        // DefaultApplExtID(1407): EP56, and the files put it in SP2 rather than
+        // the SP1 the pack implies — a date that does not hold is not printed.
+        let ext_id = rendered("8=FIX.5.0SP2|9=5|35=0|1407=x|10=0|", "FIX.5.0SP2", 1407)
+            .expect("1407 is in the SP2 tables");
+        assert!(!ext_id.contains("Introduced in"), "{ext_id}");
+    }
+
     /// A configured URL takes its own label with it; the default's is
     /// `onixs.biz`.
     #[test]
