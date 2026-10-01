@@ -54,6 +54,33 @@ fn a_hover_anywhere_in_a_field_answers_about_that_field() {
     client.shutdown();
 }
 
+/// A tag the line's dictionary does not define is still answered for, about
+/// the field's own range, when standard FIX names it. Pinned through the
+/// protocol because the renderer used to return nothing here.
+#[test]
+fn a_tag_the_dictionary_does_not_define_is_still_hovered() {
+    const LINE: &str = "8=FIX.5.0|9=57|35=0|1328=Bad price|10=171|";
+    let mut client = open(LINE);
+    let start = LINE.find("1328=").expect("the field is there") as u32;
+    let end = start + "1328=Bad price".len() as u32;
+    let answer = at(&mut client, start + 2);
+    let markdown = answer["contents"]["value"].as_str().expect("markdown");
+    assert!(markdown.starts_with("**RejectText** (1328)"), "{markdown}");
+    assert!(
+        markdown.contains("*Not in FIX.5.0, introduced in FIX.5.0SP1*"),
+        "{markdown}"
+    );
+    assert_eq!(
+        answer["range"]["start"],
+        json!({ "line": 0, "character": start })
+    );
+    assert_eq!(
+        answer["range"]["end"],
+        json!({ "line": 0, "character": end })
+    );
+    client.shutdown();
+}
+
 /// RejectText(1328) is `FIX.5.0 EP55`: the pack shipped in FIX.5.0SP1, which is
 /// the first dictionary that has the tag. Pinned through the protocol because the
 /// base version the metadata records, FIX.5.0, names a file without it.
@@ -249,6 +276,25 @@ fn markdown_at(client: &mut TestClient, field: &str) -> String {
         .as_str()
         .expect("markdown")
         .to_owned()
+}
+
+/// The configured dictionary name reaches the "not defined by" line through
+/// the server, not only the renderer's test label.
+#[test]
+fn a_tag_the_desk_dictionary_lacks_names_the_desk() {
+    let (mut client, _workspace) = open_desk(json!({}));
+    const OTHER: &str = "file:///b.fix";
+    const LINE: &str = "8=FIX.4.4|35=0|54=1|";
+    client.did_open(OTHER, LINE, 1);
+    let start = LINE.find("54=").expect("the field is there") as u32;
+    let answer = client.hover(OTHER, 0, start).expect("answered");
+    let markdown = answer["contents"]["value"].as_str().expect("markdown");
+    assert!(markdown.starts_with("**Side** (54)"), "{markdown}");
+    assert!(
+        markdown.contains("*Not defined by \"desk\"*\n\n*Standard FIX.4.4*"),
+        "{markdown}"
+    );
+    client.shutdown();
 }
 
 /// Under a custom dictionary hover says which tags standard FIX does not

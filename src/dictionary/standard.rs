@@ -128,6 +128,23 @@ impl Standard {
     }
 }
 
+/// The name standard FIX gives `tag` where its standing at `version` lets one
+/// be claimed. Hover and the name hint both go through this, so they cannot drift.
+pub fn standard_name(version: Option<Version>, tag: u32) -> Option<&'static str> {
+    name_of(&Standard::of_tag(version, tag), tag)
+}
+
+/// [`standard_name`] for a standing already in hand.
+pub fn name_of(standing: &Standard, tag: u32) -> Option<&'static str> {
+    match standing {
+        Standard::OtherVersion(def) | Standard::Unbundled(def) => Some(def.name),
+        Standard::InVersion => {
+            latest_name(tag).or_else(|| tag_record(tag).map(|record| record.name))
+        }
+        Standard::Disputed | Standard::Nowhere => None,
+    }
+}
+
 /// Whether the bundled files bear out the date FIX Latest gives a bundled tag:
 /// it first appears in the release that date implies. False for a tag FIX
 /// Latest does not date and for one no bundled dictionary has.
@@ -426,6 +443,37 @@ mod tests {
         );
         let upi = def(Standard::of_tag(FIX44, 2891));
         assert_eq!(upi.introduced(), Some("FIX Latest"), "{upi:?}");
+    }
+
+    /// The name hover and the name hint spell an undefined tag with: claimed
+    /// exactly where a standing is, and never where the sources dispute it.
+    #[test]
+    fn the_standard_name_is_claimed_exactly_where_a_standing_is() {
+        assert_eq!(standard_name(FIX50, 1328), Some("RejectText"));
+        assert_eq!(standard_name(FIX44, 50001), Some("BatchTotalMessages"));
+        assert_eq!(standard_name(FIX44, 55), Some("Symbol"));
+        assert_eq!(
+            standard_name(FIX44, 47),
+            Some("Rule80A"),
+            "retired: QuickFIX/J's"
+        );
+        assert_eq!(standard_name(FIX42, 220), None, "disputed");
+        assert_eq!(standard_name(FIX44, 9000), None, "nowhere");
+        assert_eq!(standard_name(None, 1328), Some("RejectText"), "no tables");
+        assert_eq!(standard_name(None, 9000), None);
+        for version in Version::BUNDLED.into_iter().map(Some).chain([None]) {
+            for tag in all_tags() {
+                let claimed = !matches!(
+                    Standard::of_tag(version, tag),
+                    Standard::Disputed | Standard::Nowhere
+                );
+                assert_eq!(
+                    standard_name(version, tag).is_some(),
+                    claimed,
+                    "{version:?} {tag}"
+                );
+            }
+        }
     }
 
     #[test]

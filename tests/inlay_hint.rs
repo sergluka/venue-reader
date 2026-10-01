@@ -124,9 +124,9 @@ fn each_label_is_written_by_its_own_format() {
     client.shutdown();
 }
 
-/// An empty value suppresses the label and its literals, so a tag the
-/// dictionary does not define is passed over while its neighbours are drawn.
-/// The literals are the point: `<>` would be worse than nothing.
+/// An empty value suppresses the label and its literals, so a tag neither the
+/// dictionary nor standard FIX knows is passed over while its neighbours are
+/// drawn. The literals are the point: `<>` would be worse than nothing.
 #[test]
 fn a_tag_the_dictionary_does_not_define_draws_nothing() {
     let mut client = open_with(
@@ -139,6 +139,99 @@ fn a_tag_the_dictionary_does_not_define_draws_nothing() {
         labels(&hints),
         ["<BeginString>", "<MsgType>", "<CheckSum>"],
         "9999 is on the line and has no label"
+    );
+    client.shutdown();
+}
+
+/// A tag the dictionary lacks but standard FIX names is drawn with that name
+/// and a `?`, inside the user's format, where a defined tag's label would go;
+/// its eager tooltip is the hover of the same field, which explains the mark.
+#[test]
+fn a_tag_standard_fix_names_and_the_dictionary_lacks_is_marked() {
+    const LINE: &str = "8=FIX.5.0|35=0|1328=x|10=1|";
+    let mut client = open_with(
+        json!({ "inlayHints": { "tagNames": { "enabled": true, "format": "<{}>" } } }),
+        plain_caps(),
+        LINE,
+    );
+    let hints = over(&mut client, (0, 0), (0, 400));
+    assert_eq!(
+        labels(&hints),
+        ["<BeginString>", "<MsgType>", "<RejectText?>", "<CheckSum>"]
+    );
+    let tag_end = LINE.find("1328=").unwrap() as u32 + 4;
+    let marked = hints
+        .iter()
+        .find(|hint| hint["label"] == "<RejectText?>")
+        .expect("the marked hint");
+    assert_eq!(marked["position"]["character"], tag_end);
+    let tooltip = marked["tooltip"]["value"].as_str().expect("eager markdown");
+    let hover = client.hover(URI, 0, tag_end - 1).expect("answered");
+    assert_eq!(
+        tooltip,
+        hover["contents"]["value"].as_str().expect("markdown")
+    );
+    assert!(tooltip.starts_with("**RejectText** (1328)"), "{tooltip}");
+    client.shutdown();
+}
+
+/// The same hint through `inlayHint/resolve`, when the client defers tooltips.
+#[test]
+fn a_marked_hints_tooltip_resolves_to_the_hover() {
+    const LINE: &str = "8=FIX.5.0|35=0|1328=x|10=1|";
+    let mut client = TestClient::start();
+    client.initialize_with(json!({
+        "capabilities": {
+            "general": { "positionEncodings": ["utf-8"] },
+            "textDocument": { "inlayHint": { "resolveSupport": { "properties": ["tooltip"] } } },
+        },
+        "initializationOptions": { "fix": { "inlayHints": { "tagNames": { "enabled": true } } } },
+    }));
+    client.did_open(URI, LINE, 1);
+    let hints = over(&mut client, (0, 0), (0, 400));
+    let marked = hints
+        .iter()
+        .find(|hint| hint["label"] == "(RejectText?)")
+        .expect("the marked hint")
+        .clone();
+    assert!(marked.get("tooltip").is_none(), "deferred");
+    let resolved = client
+        .request("inlayHint/resolve", marked)
+        .expect("answered");
+    assert!(
+        resolved["tooltip"]["value"]
+            .as_str()
+            .expect("markdown")
+            .starts_with("**RejectText** (1328)"),
+        "{resolved}"
+    );
+    client.shutdown();
+}
+
+/// With paths on, an undefined tag after a group's last member ends the entry
+/// (a bundled dictionary lists no member it does not define), so it has no
+/// path and the mark is what appears — not a digit leaf.
+#[test]
+fn a_marked_tag_inside_a_group_draws_the_mark_not_a_path() {
+    const LINE: &str = "8=FIX.4.4|35=W|55=BTCUSD|268=1|269=0|270=65000.50|1328=x|10=1|";
+    let mut client = open_with(
+        json!({ "inlayHints": { "tagNames": { "enabled": true, "groupPaths": true, "format": "<{}>" } } }),
+        plain_caps(),
+        LINE,
+    );
+    let hints = over(&mut client, (0, 0), (0, 400));
+    assert_eq!(
+        labels(&hints),
+        [
+            "<BeginString>",
+            "<MsgType>",
+            "<Symbol>",
+            "<NoMDEntries>",
+            "<NoMDEntries/1/MDEntryType>",
+            "<NoMDEntries/1/MDEntryPx>",
+            "<RejectText?>",
+            "<CheckSum>",
+        ]
     );
     client.shutdown();
 }

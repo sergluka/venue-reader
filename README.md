@@ -113,6 +113,12 @@ LSP client to advertise hierarchical document-symbol support.
 for the resolved name or label. For example, `"[{}]"` produces `[MsgType]`.
 Write literal braces as `{{` and `}}`. An unresolved placeholder suppresses
 the label; a format containing only literal text applies to every field.
+A tag the selected dictionary does not define, but standard FIX names, is
+labelled with the standard name and a `?` mark — `RejectText?` for
+RejectText(1328) on a FIX.5.0 line — meaning the name is standard FIX's, not
+the dictionary's; the hint's tooltip says which dictionary lacks it and, where
+the version has bundled tables, which version has it. A tag neither knows has
+no label.
 With group paths enabled, a tag name can become
 `NoMDEntries/1/MDEntryType`, identifying entry 1 of NoMDEntries(268) and its
 MDEntryType(269) field.
@@ -192,6 +198,15 @@ note the dictionary's own dates are left out. Only a field standard in that
 version links into the reference site's pages for it. Where the two sources
 disagree about a field, hover says nothing about it;
 [Standard status](#standard-status) explains how this is decided.
+
+A tag the selected dictionary does not define is still named and placed
+against standard FIX when FIX Latest or a bundled version knows it: `1328=…`
+on a FIX.5.0 line reads **RejectText** (1328), *Not in FIX.5.0, introduced in
+FIX.5.0SP1*, and the raw value. Under a custom dictionary a line above the
+note says the dictionary lacks it — *Not defined by "desk"*. Nothing else is
+claimed: no datatype, description or lifecycle line, and a versioned link only
+where the tag is standard in the line's version. A tag neither source knows,
+or one the sources dispute, has no hover.
 
 ### Large logs and editor support
 
@@ -688,7 +703,9 @@ line count must fit `limits.rangeLines`; oversized selections fail rather
 than return partial text.
 
 The command uses tag/enum label formats and group-path settings regardless
-of whether the corresponding inlay hints are enabled.
+of whether the corresponding inlay hints are enabled. A tag the dictionary
+does not define but standard FIX names carries the same marked name the hint
+draws: `1328(RejectText?)=…`.
 
 ### `fix.useDictionary`
 

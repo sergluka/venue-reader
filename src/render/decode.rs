@@ -66,7 +66,11 @@ mod tests {
 55=BTCUSD|268=2|269=0|270=65000.50|271=1.5|269=1|270=65001.00|271=2.0|10=145|";
 
     fn message_of(line: &[u8]) -> MessageAnalysis {
-        match analyze(line, &Ctx::for_test("FIX.4.4")) {
+        message_under(line, "FIX.4.4")
+    }
+
+    fn message_under(line: &[u8], version: &str) -> MessageAnalysis {
+        match analyze(line, &Ctx::for_test(version)) {
             LineAnalysis::Message(message) => message,
             other => panic!("expected a message, got {:?}", other.kind()),
         }
@@ -119,6 +123,15 @@ mod tests {
     fn an_unknown_tag_keeps_its_digits_and_its_value() {
         let decoded = whole(b"8=FIX.4.4|35=0|9999=whatever|10=171|");
         assert!(decoded.contains("|9999=whatever|"), "{decoded}");
+    }
+
+    /// The same marked name the hint draws, through the same `tag_label`.
+    #[test]
+    fn a_tag_standard_fix_names_and_the_dictionary_lacks_is_marked() {
+        let bytes = b"8=FIX.5.0|35=0|1328=x|10=171|";
+        let message = message_under(bytes, "FIX.5.0");
+        let decoded = line(&message, bytes, message.fields.iter(), &Options::default());
+        assert!(decoded.contains("|1328(RejectText?)=x|"), "{decoded}");
     }
 
     #[test]

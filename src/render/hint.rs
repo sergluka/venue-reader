@@ -6,6 +6,7 @@
 
 use crate::codec::{Field, MessageAnalysis};
 use crate::config::InlayHints;
+use crate::dictionary::{standard::standard_name, Version};
 
 use super::Options;
 
@@ -26,12 +27,22 @@ pub fn tag_label(
         .group_paths
         .then(|| analysis.group_path(field, line))
         .flatten();
-    let name = match &path {
-        Some(path) => Some(path.as_str()),
-        None => analysis.field_name(field),
+    let own = analysis.field_name(field);
+    // The mark is part of the name, so the user's wrapper is kept.
+    let foreign = (path.is_none() && own.is_none())
+        .then(|| standard_name(Version::parse(&analysis.version), field.tag))
+        .flatten()
+        .map(|name| format!("{name}{FOREIGN_MARK}"));
+    let name = match (&path, &foreign) {
+        (Some(path), _) => Some(path.as_str()),
+        (None, Some(foreign)) => Some(foreign.as_str()),
+        (None, None) => own,
     };
     options.tag_format.render(name)
 }
+
+/// Appended to a standard name the bound dictionary does not have.
+const FOREIGN_MARK: &str = "?";
 
 /// How a field's value is spelled. Switch-free for the reason [`tag_label`] is.
 pub fn value_label(analysis: &MessageAnalysis, field: &Field, options: &Options) -> Option<String> {
@@ -42,8 +53,8 @@ pub fn value_label(analysis: &MessageAnalysis, field: &Field, options: &Options)
 ///
 /// `tag_names` is the gate. What is drawn is the format's, and what goes in
 /// its hole is resolved above: `group_paths` chooses between the path and the
-/// name, and finding neither suppresses the label the way an undefined tag
-/// always did.
+/// name, a tag only standard FIX names gets that name marked, and finding
+/// none suppresses the label.
 pub fn tag(
     analysis: &MessageAnalysis,
     at: usize,
@@ -120,11 +131,26 @@ mod tests {
     }
 
     fn one(line: &str) -> (Vec<u8>, MessageAnalysis) {
+        one_in(line, &Ctx::for_test("FIX.4.4"))
+    }
+
+    fn one_in(line: &str, ctx: &Ctx) -> (Vec<u8>, MessageAnalysis) {
         let bytes = line.as_bytes().to_vec();
-        let LineAnalysis::Message(message) = analyze(&bytes, &Ctx::for_test("FIX.4.4")) else {
+        let LineAnalysis::Message(message) = analyze(&bytes, ctx) else {
             panic!("a message");
         };
         (bytes, message)
+    }
+
+    /// The tag label of `tag` on a one-field line of `version`, decoded by a
+    /// custom dictionary that declares only Text(58) — so never `tag`.
+    fn marked_under(version: &str, tag: u32) -> Option<String> {
+        use crate::dictionary::parse::fixtures::{field, quickfix};
+        let line = format!("8={version}|35=0|{tag}=x|");
+        let ctx = Ctx::for_test_with_dict(version, quickfix(version, &field(58, "Text")));
+        let (bytes, analysis) = one_in(&line, &ctx);
+        let index = at(&analysis, tag);
+        self::tag(&analysis, index, &all_on(), &bytes, &Options::default())
     }
 
     fn at(analysis: &MessageAnalysis, tag: u32) -> usize {
@@ -244,6 +270,7 @@ mod tests {
         );
     }
 
+    /// A tag neither the dictionary nor standard FIX knows has no name to draw.
     #[test]
     fn a_tag_the_dictionary_does_not_know_is_not_labelled() {
         let (bytes, analysis) = one("8=FIX.4.4|9=57|35=0|9999=x|10=171|");
@@ -252,6 +279,65 @@ mod tests {
             tag(&analysis, index, &all_on(), &bytes, &Options::default()),
             None
         );
+    }
+
+    /// A tag standard FIX names and the dictionary lacks is drawn with the
+    /// standard name and a mark, inside whatever shape the format gives — the
+    /// mark is part of the name, so the user's wrapper is untouched.
+    #[test]
+    fn a_tag_standard_fix_names_and_the_dictionary_lacks_is_marked() {
+        let (bytes, analysis) = one_in(
+            "8=FIX.5.0|9=57|35=0|1328=x|10=171|",
+            &Ctx::for_test("FIX.5.0"),
+        );
+        let index = at(&analysis, 1328);
+        assert_eq!(
+            tag(&analysis, index, &all_on(), &bytes, &Options::default()).as_deref(),
+            Some("(RejectText?)")
+        );
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "inlayHints": { "tagNames": { "enabled": true, "format": "<{}>" } }
+        }))
+        .expect("config");
+        assert_eq!(
+            tag(
+                &analysis,
+                index,
+                &config.inlay_hints,
+                &bytes,
+                &Options::from_config(&config).0
+            )
+            .as_deref(),
+            Some("<RejectText?>")
+        );
+    }
+
+    /// Where hover would name nothing, the hint draws nothing: the sources
+    /// dispute BenchmarkCurveCurrency(220) in FIX.4.2.
+    #[test]
+    fn a_disputed_tag_is_not_labelled() {
+        let (bytes, analysis) = one_in(
+            "8=FIX.4.2|9=57|35=0|220=USD|10=171|",
+            &Ctx::for_test("FIX.4.2"),
+        );
+        let index = at(&analysis, 220);
+        assert_eq!(
+            tag(&analysis, index, &all_on(), &bytes, &Options::default()),
+            None
+        );
+    }
+
+    /// Under a custom dictionary the mark says "not in yours", whether the tag
+    /// is standard in the version or the version has no tables to say.
+    #[test]
+    fn a_custom_dictionarys_missing_tag_is_marked_with_the_standard_name() {
+        assert_eq!(marked_under("FIX.4.4", 55).as_deref(), Some("(Symbol?)"));
+        assert_eq!(
+            marked_under("FIX.4.4", 1328).as_deref(),
+            Some("(RejectText?)")
+        );
+        assert_eq!(marked_under("FIX.9.1", 55).as_deref(), Some("(Symbol?)"));
+        assert_eq!(marked_under("FIX.4.4", 9000), None);
     }
 
     /// LSP forbids an empty label part, and the template is the user's to

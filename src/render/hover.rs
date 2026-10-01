@@ -1,15 +1,16 @@
-//! What the dictionary knows about one field, as markdown.
+//! What the dictionary — or, failing it, standard FIX — knows about one field, as markdown.
 
 use std::fmt::Write as _;
 
-use crate::codec::MessageAnalysis;
-use crate::dictionary::{bundled, standard, Lifecycle, Retirement, Standard, Version};
+use crate::codec::{Field, MessageAnalysis};
+use crate::dictionary::{bundled, standard, FieldIdx, Lifecycle, Retirement, Standard, Version};
 use crate::tag;
 
 use super::Options;
 
-/// The field at `at`, or `None` when the dictionary does not know its tag.
-/// `label` names the custom dictionary that decoded the line, if it has one.
+/// The field at `at`, or `None` when neither the dictionary nor standard FIX
+/// can name its tag. `label` names the custom dictionary that decoded the
+/// line, if it has one.
 ///
 /// No `Dict` argument: a `FieldIdx`/`EnumIdx` means nothing except against the
 /// dictionary that produced it, which the analysis pins as `analysis.dict`.
@@ -22,14 +23,29 @@ pub fn hover(
     label: Option<&str>,
 ) -> Option<String> {
     let field = analysis.fields.get(at)?;
+    match field.def() {
+        Some(idx) => Some(defined(line, analysis, field, idx, options, label)),
+        None => undefined(line, analysis, field, options, label),
+    }
+}
+
+/// A field the bound dictionary defines: everything it knows, then how the
+/// tag stands against standard FIX.
+fn defined(
+    line: &[u8],
+    analysis: &MessageAnalysis,
+    field: &Field,
+    idx: FieldIdx,
+    options: &Options,
+    label: Option<&str>,
+) -> String {
     let dict = &analysis.dict;
-    let idx = field.def()?;
     let def = dict.field(idx);
     let version = Version::parse(&analysis.version);
     let standing = Standard::of_tag(version, field.tag);
     let custom = !dict.is_static();
     // Bundled tables carry no label, so `label` alone says "custom" here.
-    let note = standing_note(version, &standing, def.name(), label, custom);
+    let note = standing_note(version, &standing, Some(def.name()), label, custom);
 
     let mut about = format!("**{}** ({})", def.name(), field.tag);
     if !def.datatype().is_empty() {
@@ -58,9 +74,7 @@ pub fn hover(
     let mut value = Vec::new();
     let raw = field.value(line);
     if !raw.is_empty() {
-        // Backticks keep markdown metacharacters in a raw value inert. A value
-        // containing a backtick itself breaks the span — an accepted edge.
-        let mut line_ = format!("Value: `{}`", String::from_utf8_lossy(raw));
+        let mut line_ = value_line(raw);
         let label = field.enum_value().map(|at| dict.enum_at(idx, at));
         if let Some(label) = &label {
             line_.push_str(" — **");
@@ -98,23 +112,81 @@ pub fn hover(
         }
     }
 
-    // The label names whatever site the URL points at, so a desk that redirects
-    // `documentLink.url` at its own browser does not get a link still claiming
-    // to be Onixs. A link into a version's pages asserts the tag is there.
-    let link = (!options.tag_url.is_versioned() || standing == Standard::InVersion)
-        .then(|| options.tag_url.of(&analysis.version, field.tag))
+    let link = link(options, &analysis.version, field.tag, &standing);
+    sections(about, value, link)
+}
+
+/// A field the bound dictionary lacks: what the two witnesses support and
+/// nothing more — standard FIX's name and standing, the raw value, the group
+/// it sits in. No datatype, description or life: the dictionary has none, and
+/// FIX Latest's would speak for a version that lacks the tag. `None` where no
+/// name can be claimed (`Disputed`, `Nowhere`).
+fn undefined(
+    line: &[u8],
+    analysis: &MessageAnalysis,
+    field: &Field,
+    options: &Options,
+    label: Option<&str>,
+) -> Option<String> {
+    let version = Version::parse(&analysis.version);
+    let standing = Standard::of_tag(version, field.tag);
+    let name = standard::name_of(&standing, field.tag)?;
+    let custom = !analysis.dict.is_static();
+
+    let mut about = vec![format!("**{name}** ({})", field.tag)];
+    // What tells this apart from a tag the desk's dictionary defines, whose
+    // note reads the same. A bundled binding's note already names the version.
+    if custom {
+        about.push(match label {
+            Some(label) => format!("*Not defined by \"{label}\"*"),
+            None => "*Not defined by this dictionary*".to_owned(),
+        });
+    }
+    // No bound name: nothing for the standard one to differ from.
+    about.extend(standing_note(version, &standing, None, label, custom));
+
+    let mut value = Vec::new();
+    let raw = field.value(line);
+    if !raw.is_empty() {
+        value.push(value_line(raw));
+    }
+    // A Repository dictionary can list a member it never declares; the codec
+    // still places it in its entry, and the hint already draws the path.
+    if let Some(path) = analysis.group_path(field, line) {
+        value.push(format!("Group: `{path}`"));
+    }
+
+    let link = link(options, &analysis.version, field.tag, &standing);
+    Some(sections(about, value, link))
+}
+
+/// Backticks keep markdown metacharacters in a raw value inert. A value
+/// containing a backtick itself breaks the span — an accepted edge.
+fn value_line(raw: &[u8]) -> String {
+    format!("Value: `{}`", String::from_utf8_lossy(raw))
+}
+
+/// The reference link, when the template may point at the tag. The label
+/// names whatever site the URL points at, so a desk that redirects
+/// `documentLink.url` at its own browser does not get a link still claiming
+/// to be Onixs. A link into a version's pages asserts the tag is there.
+fn link(options: &Options, version: &str, tag: u32, standing: &Standard) -> Option<String> {
+    (!options.tag_url.is_versioned() || *standing == Standard::InVersion)
+        .then(|| options.tag_url.of(version, tag))
         .flatten()
         .map(|url| match options.tag_url.host() {
             Some(host) => format!("[FIX Reference: {host}]({url})"),
             None => format!("[FIX Reference]({url})"),
-        });
+        })
+}
 
-    let sections = [about.join("\n\n"), value.join("\n\n")]
+fn sections(about: Vec<String>, value: Vec<String>, link: Option<String>) -> String {
+    [about.join("\n\n"), value.join("\n\n")]
         .into_iter()
         .chain(link)
         .filter(|section| !section.is_empty())
-        .collect::<Vec<_>>();
-    Some(sections.join("\n\n---\n\n"))
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
 }
 
 /// How standard FIX sees the tag, as one italic line; nothing where the
@@ -125,7 +197,7 @@ pub fn hover(
 fn standing_note(
     version: Option<Version>,
     standing: &Standard,
-    bound_name: &str,
+    bound_name: Option<&str>,
     label: Option<&str>,
     custom: bool,
 ) -> Option<String> {
@@ -156,7 +228,7 @@ fn standing_note(
             None => {}
         }
     }
-    if def.name != bound_name {
+    if bound_name.is_some_and(|bound| bound != def.name) {
         let _ = write!(note, " as \"{}\"", def.name);
     }
     note.push('*');
@@ -350,8 +422,8 @@ mod tests {
     }
 
     /// Version-exact, which is the whole point: the same tag under two versions
-    /// gives two different answers, and under a third gives none at all because
-    /// the field does not exist there.
+    /// gives two different answers, and under a third, which lacks the field,
+    /// says only what standard FIX knows.
     ///
     /// RepurchaseTerm(226) is dated FIX.4.2 by FIX Latest but first appears in
     /// the FIX.4.3 file, so no introduction is claimed under either version.
@@ -371,11 +443,73 @@ mod tests {
         let under_42 =
             rendered("8=FIX.4.2|9=57|35=D|47=A|10=171|", "FIX.4.2", 47).expect("Rule80A is in 4.2");
         assert!(under_42.contains("*Removed in FIX.4.4*"), "{under_42}");
-        // Not "a different lifecycle line": 4.4 has no such field, so there is
-        // nothing to hover at all.
+        // Not "a different lifecycle line": 4.4 has no such field, so the
+        // dictionary has no life to tell; what is said is standard FIX's.
         assert_eq!(
-            rendered("8=FIX.4.4|9=57|35=D|47=A|10=171|", "FIX.4.4", 47),
-            None
+            rendered("8=FIX.4.4|9=57|35=D|47=A|10=171|", "FIX.4.4", 47).as_deref(),
+            Some(
+                "**Rule80A** (47)\n\n*Not in FIX.4.4, retired after FIX.4.3*\n\n---\n\nValue: `A`"
+            )
+        );
+    }
+
+    // --- a tag the bound dictionary does not define ----------------------
+
+    /// The whole answer, as for a defined field: name and standing from the
+    /// two witnesses, the raw value, and nothing the bound dictionary could
+    /// not have said — no datatype, no description, no life, no link.
+    #[test]
+    fn an_undefined_tag_is_named_and_placed_by_standard_fix() {
+        assert_eq!(
+            rendered("8=FIX.5.0|9=57|35=0|1328=x|10=171|", "FIX.5.0", 1328).as_deref(),
+            Some(
+                "**RejectText** (1328)\n\n\
+                 *Not in FIX.5.0, introduced in FIX.5.0SP1*\n\n\
+                 ---\n\n\
+                 Value: `x`"
+            )
+        );
+    }
+
+    #[test]
+    fn an_undefined_tag_only_fix_latest_knows_is_dated_fix_latest() {
+        assert_eq!(
+            rendered("8=FIX.4.4|9=57|35=0|2891=x|10=171|", "FIX.4.4", 2891).as_deref(),
+            Some("**UPICode** (2891)\n\n*Not in FIX.4.4, introduced in FIX Latest*\n\n---\n\nValue: `x`")
+        );
+    }
+
+    /// With no bound name there is nothing for the standard name to differ
+    /// from, so the `as "…"` clause of the note never fires.
+    #[test]
+    fn an_undefined_tag_has_no_bound_name_to_differ_from() {
+        let shown = rendered("8=FIX.4.4|9=57|35=0|1008=x|10=171|", "FIX.4.4", 1008)
+            .expect("FIX Latest names it");
+        assert!(shown.starts_with("**SideTrdSubType** (1008)"), "{shown}");
+        assert!(!shown.contains(" as \""), "{shown}");
+    }
+
+    /// Where the sources dispute the tag, nothing is named; where neither
+    /// knows it, there is nothing to name. Both stay `None`, as before.
+    #[test]
+    fn a_disputed_or_unknown_undefined_tag_has_no_hover() {
+        assert_eq!(
+            rendered("8=FIX.4.2|9=57|35=0|220=USD|10=171|", "FIX.4.2", 220),
+            None,
+            "disputed"
+        );
+        assert_eq!(
+            rendered("8=FIX.4.4|9=57|35=0|9000=x|10=171|", "FIX.4.4", 9000),
+            None,
+            "nowhere"
+        );
+    }
+
+    #[test]
+    fn an_undefined_tag_with_no_value_has_no_value_section() {
+        assert_eq!(
+            rendered("8=FIX.5.0|9=57|35=0|1328=|10=171|", "FIX.5.0", 1328).as_deref(),
+            Some("**RejectText** (1328)\n\n*Not in FIX.5.0, introduced in FIX.5.0SP1*")
         );
     }
 
@@ -474,8 +608,12 @@ mod tests {
     fn under(version: &str, dict: ParsedDict, tag: u32, options: &Options) -> String {
         let line = format!("8={version}|35=0|{tag}=x|");
         let (bytes, message, at) = at_tag_in(&Ctx::for_test_with_dict(version, dict), &line, tag);
-        hover(&bytes, &message, at, options, Some("selected"))
-            .expect("the dictionary knows the tag")
+        hover(&bytes, &message, at, options, Some("selected")).expect("something to hover")
+    }
+
+    /// `under` for a custom dictionary of `version` that does *not* declare `tag`.
+    fn missing_from(version: &str, tag: u32, options: &Options) -> String {
+        under(version, quickfix(version, &field(58, "Text")), tag, options)
     }
 
     /// `under` for a custom dictionary of `version` declaring only `tag`.
@@ -716,6 +854,114 @@ mod tests {
         assert!(fixt(1328, "RejectText").contains("*Standard FIX.5.0SP2*"));
         assert!(fixt(20001, "DeskMode").contains("*Custom field, introduced in \"selected\"*"));
         assert!(fixt(47, "Rule80A").contains("*Not in FIX.5.0SP2, retired after FIX.4.3*"));
+    }
+
+    /// The one fact that tells this apart from a tag the desk's dictionary
+    /// defines: `*Standard FIX.4.4*` alone would read the same for both.
+    #[test]
+    fn an_undefined_tag_under_a_custom_dictionary_says_which_dictionary_lacks_it() {
+        assert_eq!(
+            missing_from("FIX.4.4", 55, &Options::default()),
+            "**Symbol** (55)\n\n\
+             *Not defined by \"selected\"*\n\n\
+             *Standard FIX.4.4*\n\n\
+             ---\n\n\
+             Value: `x`\n\n\
+             ---\n\n\
+             [FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/4.4/tagNum_55.html)"
+        );
+        let elsewhere = missing_from("FIX.4.4", 1328, &Options::default());
+        assert!(
+            elsewhere.starts_with("**RejectText** (1328)"),
+            "{elsewhere}"
+        );
+        assert!(
+            elsewhere.contains(
+                "*Not defined by \"selected\"*\n\n*Not in FIX.4.4, introduced in FIX.5.0SP1*"
+            ),
+            "{elsewhere}"
+        );
+        assert!(!elsewhere.contains("[FIX Reference"), "{elsewhere}");
+        let flat = missing_from("FIX.4.4", 1328, &with_url("https://fix.internal/t{tag}"));
+        assert!(flat.ends_with("(https://fix.internal/t1328)"), "{flat}");
+    }
+
+    /// No tables means no standing note — not no hover: the name and the
+    /// dictionary's silence are still known.
+    #[test]
+    fn an_undefined_tag_under_a_version_without_tables_keeps_its_name() {
+        assert_eq!(
+            missing_from("FIX.9.1", 55, &Options::default()),
+            "**Symbol** (55)\n\n*Not defined by \"selected\"*\n\n---\n\nValue: `x`"
+        );
+        let flat = missing_from("FIX.9.1", 55, &with_url("https://fix.internal/t{tag}"));
+        assert!(flat.ends_with("(https://fix.internal/t55)"), "{flat}");
+    }
+
+    /// A custom dictionary the session gave no name to is still named as the
+    /// one that lacks the tag.
+    #[test]
+    fn an_unnamed_custom_dictionary_is_still_said_to_lack_the_tag() {
+        let line = "8=FIX.4.4|35=0|55=x|";
+        let ctx = Ctx::for_test_with_dict("FIX.4.4", quickfix("FIX.4.4", &field(58, "Text")));
+        let (bytes, message, at) = at_tag_in(&ctx, line, 55);
+        let shown = hover(
+            &bytes,
+            &message,
+            at,
+            &with_url("https://fix.internal/t{tag}"),
+            None,
+        );
+        assert_eq!(
+            shown.as_deref(),
+            Some(
+                "**Symbol** (55)\n\n*Not defined by this dictionary*\n\n*Standard FIX.4.4*\n\n---\n\n\
+                 Value: `x`\n\n---\n\n[FIX Reference: fix.internal](https://fix.internal/t55)"
+            )
+        );
+    }
+
+    /// A repository-format dictionary may list a group member it never
+    /// declares as a field (QuickFIX drops such a name; Repository keeps the
+    /// number). The codec still places the field in its entry, so hover says
+    /// so, as it does for a defined member — the hint already draws the path.
+    #[test]
+    fn an_undefined_group_member_keeps_its_group_path() {
+        use crate::dictionary::parse::{fixtures::source, parse_repository_bytes, RepoSources};
+        let dict = parse_repository_bytes(&RepoSources {
+            fields: source(
+                "Fields.xml",
+                "<Fields version='FIX.4.4'>\
+                 <Field added='FIX.4.4'><Tag>268</Tag><Name>NoMDEntries</Name><Type>NumInGroup</Type></Field>\
+                 <Field added='FIX.4.4'><Tag>269</Tag><Name>MDEntryType</Name><Type>char</Type></Field>\
+                 </Fields>"
+                    .to_owned(),
+            ),
+            enums: source("Enums.xml", "<Enums version='FIX.4.4'/>".to_owned()),
+            messages: Some(source(
+                "Messages.xml",
+                "<Messages><Message><ComponentID>1</ComponentID><MsgType>W</MsgType><Name>MarketData</Name><CategoryID>T</CategoryID></Message></Messages>".to_owned(),
+            )),
+            msg_contents: Some(source(
+                "MsgContents.xml",
+                "<MsgContents>\
+                 <MsgContent><ComponentID>1</ComponentID><TagText>268</TagText><Indent>0</Indent><Position>1</Position></MsgContent>\
+                 <MsgContent><ComponentID>1</ComponentID><TagText>269</TagText><Indent>1</Indent><Position>2</Position></MsgContent>\
+                 <MsgContent><ComponentID>1</ComponentID><TagText>1328</TagText><Indent>1</Indent><Position>3</Position></MsgContent>\
+                 </MsgContents>"
+                    .to_owned(),
+            )),
+            components: Some(source("Components.xml", "<Components/>".to_owned())),
+        })
+        .expect("a dictionary with one group");
+        let line = "8=FIX.4.4|35=W|268=1|269=0|1328=x|";
+        let (bytes, message, at) = at_tag_in(&Ctx::for_test_with_dict("FIX.4.4", dict), line, 1328);
+        let shown = hover(&bytes, &message, at, &Options::default(), Some("selected"))
+            .expect("standard FIX names it");
+        assert!(
+            shown.ends_with("Value: `x`\n\nGroup: `NoMDEntries/1/1328`"),
+            "{shown}"
+        );
     }
 
     /// No bundled tables to check "Not in" against, and no site page to link.
