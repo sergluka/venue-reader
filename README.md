@@ -208,8 +208,9 @@ claimed: no datatype, description or lifecycle line, and a versioned link only
 where the tag is standard in the line's version. A tag neither source knows,
 or one the sources dispute, has no hover.
 
-For a tag no line carries, [`fix.describeTag`](#fixdescribetag) answers the
-same text from the version that defines it.
+For a tag no line carries, [`fix.describeTag`](#fixdescribetag) answers from
+the newest version that defines it, with that tag's lifespan in place of a
+note about any one version.
 
 ### Large logs and editor support
 
@@ -727,21 +728,27 @@ start the server, send `initialize` and `initialized`, and ask. In Neovim,
 `vim.lsp.start(config, { attach = false })` starts such a client and
 `client:exec_cmd()` sends the command.
 
-The search starts at the session's selected dictionary version, else
-`fix.defaultVersion`, and a tag that version lacks is answered from the newest
-bundled version that defines it, then from FIX Latest — the question is what
-the tag means, not whether this log may carry it. The answer opens with the
-version that answered, `*Under FIX.5.0SP2*`, and when that is not the start it
-carries hover's standing note for the start, `*Not in FIX.4.4, introduced in
-FIX.5.0SP1*`. Only bundled tables are read: a custom dictionary contributes
-its declared version as the start, never its own definitions. With a value,
-hover's value paragraph for it follows: the enum label, its description and
-date, and for MsgType the message it names.
+The command names no version, because the question is what a tag means rather
+than whether some version has it. The newest bundled version that defines the
+tag answers — the current meaning, and the fullest code set — and the answer
+carries that tag's own lifespan: when it entered the protocol, when it was
+deprecated, and for a tag the protocol dropped, the version that removed it.
+Hover's "not in this version" note belongs to a line and is not shown here.
+Neither the session's dictionary selection nor `fix.defaultVersion` is
+consulted, and only bundled tables are read, so a custom dictionary's own
+definitions never answer. The reference link points at the pages of the version
+that answered.
+
+With a value, hover's value paragraph for it follows: the enum label, its
+description and date, and for MsgType the message it names. A tag no bundled
+version defines but FIX Latest knows is answered with its name and when it
+arrived, which is all that source carries.
 
 A tag no bundled version and not FIX Latest defines fails with
-`fix.describeTag: no dictionary defines tag N`. Until the first configuration
-answer has committed the command fails with `configuration is not ready,
-retry later`; a client that fires it on `initialized` retries.
+`fix.describeTag: no dictionary defines tag N`. Until the client's
+configuration has been answered and committed the command fails with
+`configuration is not ready, retry later`, because the reference link is
+configurable; a client that fires it on `initialized` retries.
 
 ### `fix.useDictionary`
 

@@ -167,10 +167,7 @@ fn a_tag_is_described_with_no_document_open() {
     client.initialize_caps(TestClient::caps_with_pull());
     client.answer_base_pull();
     let text = client.wait_base_ready();
-    assert!(
-        text.starts_with("*Under FIX.5.0SP2*\n\n**RejectText** (1328)"),
-        "{text}"
-    );
+    assert!(text.starts_with("**RejectText** (1328) — String"), "{text}");
     let valued = client
         .request(
             "workspace/executeCommand",
@@ -187,9 +184,9 @@ fn a_tag_is_described_with_no_document_open() {
     client.shutdown();
 }
 
-/// Until the configuration answer commits, the start version is a guess the
-/// command declines to answer under; the pull it is waiting on is still there
-/// to answer afterwards.
+/// Until the configuration answer commits, the reference-link template is a
+/// guess the command declines to answer under; the pull it is waiting on is
+/// still there to answer afterwards.
 #[test]
 fn a_description_before_the_configuration_answer_is_refused() {
     let mut client = TestClient::start();

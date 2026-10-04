@@ -136,8 +136,8 @@ impl ServerState {
     /// A pull batch keeps its `input` until the client replies (`submit_batch`
     /// takes it), which is what tells it from the push-mode batch `initialize`
     /// starts and submits at once. An answer that is still coming can change
-    /// `defaultVersion` and `tagUrl`, so a document-less request waits for it
-    /// rather than answer under a layer it knows is missing.
+    /// `tagUrl`, so a document-less request waits for it rather than answer
+    /// with a reference link it knows may be the wrong one.
     pub(super) fn base_configuration_ready(&self) -> bool {
         self.config.committed
             && self

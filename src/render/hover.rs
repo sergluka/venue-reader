@@ -48,18 +48,16 @@ pub fn hover(
     Some(sections(paragraphs, value, link))
 }
 
-/// What `fix.describeTag` says about `tag` searched from `start`, or `None`
-/// when no bundled version and not FIX Latest defines it.
-pub fn describe(
-    start: Option<Version>,
-    tag: u32,
-    value: Option<&str>,
-    options: &Options,
-) -> Option<String> {
-    let start = start.map(Version::resolve_alias);
-    let answering = start
-        .filter(|version| Dict::Static(bundled(*version)).field_idx(tag).is_some())
-        .or_else(|| newest_defining(tag));
+/// What `fix.describeTag` says about `tag`, or `None` when neither a bundled
+/// edition nor FIX Latest defines it.
+///
+/// No version to measure against: the question is what the tag means, not
+/// whether some edition has it. So the newest edition that defines it answers —
+/// the current meaning, and the fullest code set — and the tag's own lifespan
+/// says when it arrived and, where it left, when it left. Hover's "not in this
+/// version" note has no subject here and is not printed.
+pub fn describe(tag: u32, value: Option<&str>, options: &Options) -> Option<String> {
+    let answering = newest_defining(tag);
     // Bound here rather than in the `match`: a `Dict` built inside an arm is
     // dropped at its end, and `Source` borrows it.
     let dict = answering.map(|version| Dict::Static(bundled(version)));
@@ -71,12 +69,16 @@ pub fn describe(
         _ => Source::Standard,
     };
 
-    let About { paragraphs, .. } = about(source, tag, start, None, false)?;
-    let mut text = vec![match answering {
-        Some(version) => format!("*Under {}*", version.as_str()),
-        None => "*Under FIX Latest*".to_owned(),
-    }];
-    text.extend(paragraphs);
+    let About { mut paragraphs, .. } = about(source, tag, None, None, false)?;
+    // When it arrived is the one fact FIX Latest alone can vouch for. Not in
+    // `about`, which hover also calls without a version — for a line whose
+    // version has no bundled tables — and which must not grow a line there.
+    if let Standard::Unbundled(def) = Standard::of_tag(None, tag) {
+        paragraphs.extend(lifecycle(&Lifecycle {
+            added: def.introduced(),
+            ..Lifecycle::default()
+        }));
+    }
 
     let label = match source {
         Source::Defined(dict, idx) => value.and_then(|value| dict.enum_idx(idx, value)),
@@ -88,9 +90,8 @@ pub fn describe(
         value.map(str::as_bytes).unwrap_or_default(),
         label,
     );
-    // Gated on the answering version's own standing, not the start's: the note
-    // asks whether the tag is in the version asked about, the link whether the
-    // tag is on the pages of the version that answered.
+    // Gated on the answering edition's own standing: a link asks whether the
+    // tag is on that edition's pages, and only a bundled edition has pages.
     let link = answering.and_then(|version| {
         link(
             options,
@@ -99,7 +100,7 @@ pub fn describe(
             &Standard::of_tag(Some(version), tag),
         )
     });
-    Some(sections(text, value, link))
+    Some(sections(paragraphs, value, link))
 }
 
 /// Where a field's facts come from: the dictionary that defines its tag, or
@@ -360,144 +361,173 @@ mod tests {
     const HEARTBEAT: &str =
         "8=FIX.4.4|9=57|35=0|34=1|49=CLIENT1|56=BROKER1|52=20251026-09:02:00.000|10=171|";
 
-    /// Hover's answer with its value section cut out: what a description has
-    /// to say when there is no line to take a value from.
-    fn without_value(hover: &str) -> String {
-        let mut sections: Vec<&str> = hover.split("\n\n---\n\n").collect();
-        assert_eq!(sections.len(), 3, "about, value, link: {hover}");
-        sections.remove(1);
-        sections.join("\n\n---\n\n")
+    fn described(tag: u32) -> Option<String> {
+        describe(tag, None, &Options::default())
     }
 
-    fn described(start: Option<Version>, tag: u32) -> Option<String> {
-        describe(start, tag, None, &Options::default())
-    }
-
-    /// With a value, the whole hover: the value paragraph is the same function.
+    /// The point of one renderer, as an equality: a description *is* the hover
+    /// for that tag on a line of the newest edition that defines it. No version
+    /// is asked about, so the two can differ in nothing — not the header, not
+    /// the lifespan, not the link.
     #[test]
-    fn a_description_with_a_value_is_the_whole_hover() {
-        let hover = rendered("8=FIX.4.4|35=D|54=1|10=0|", "FIX.4.4", 54).expect("hover");
-        assert!(hover.contains("Value: `1` — **Buy**"), "{hover}");
+    fn a_description_is_the_hover_under_the_newest_edition_that_defines_the_tag() {
+        for (tag, value) in [
+            (49u32, "CLIENT1"),
+            (54, "1"),
+            (108, "30"),
+            (368, "1"),
+            (803, "1"),
+            (1328, "x"),
+            (1407, "x"),
+            (47, "A"),   // newest edition FIX.4.3, retired after it
+            (9000, "1"), // QuickFIX-only: *Custom field*, and no link either side
+        ] {
+            let version = newest_defining(tag).expect("a bundled edition defines it");
+            let version = version.as_str();
+            let line = format!("8={version}|9=5|35=0|{tag}={value}|10=0|");
+            let (bytes, analysis, at) = at_tag(&line, version, tag);
+            let hovered = hover(&bytes, &analysis, at, &Options::default(), None).expect("hover");
+            assert_eq!(
+                describe(tag, Some(value), &Options::default()).as_deref(),
+                Some(hovered.as_str()),
+                "tag {tag} under {version}"
+            );
+
+            // And without a value: an empty one leaves hover no value section,
+            // which is the shape a description with no value argument has.
+            let bare = format!("8={version}|9=5|35=0|{tag}=|10=0|");
+            let (bytes, analysis, at) = at_tag(&bare, version, tag);
+            let hovered = hover(&bytes, &analysis, at, &Options::default(), None).expect("hover");
+            assert_eq!(
+                described(tag).as_deref(),
+                Some(hovered.as_str()),
+                "tag {tag} under {version}, no value"
+            );
+        }
+    }
+
+    /// MsgType(35) has to be the line's own, so it cannot join the table above;
+    /// the message description and category come through the same paragraph.
+    #[test]
+    fn a_description_of_msg_type_is_its_hover_too() {
+        let line = "8=FIX.5.0SP2|9=5|35=D|10=0|";
+        let (bytes, analysis, at) = at_tag(line, "FIX.5.0SP2", tag::MSG_TYPE);
+        let hovered = hover(&bytes, &analysis, at, &Options::default(), None).expect("hover");
+        assert!(hovered.contains("**NewOrderSingle**"), "{hovered}");
         assert_eq!(
-            describe(Some(Version::Fix44), 54, Some("1"), &Options::default()).as_deref(),
-            Some(format!("*Under FIX.4.4*\n\n{hover}").as_str())
+            describe(tag::MSG_TYPE, Some("D"), &Options::default()).as_deref(),
+            Some(hovered.as_str())
         );
     }
 
-    /// A tag the start lacks is answered from the newest version that has it,
-    /// with the start's standing note and no lifecycle line beside it.
+    /// A description is asked about a tag, not about a version, so it names
+    /// none it was not asked about: no opener, and never hover's "not in".
     #[test]
-    fn a_later_tag_is_described_from_the_newest_version_that_defines_it() {
-        let text = described(Some(Version::Fix44), 1328).expect("described");
+    fn a_description_names_no_version_it_was_not_asked_about() {
+        for tag in [49u32, 54, 108, 1328, 47, 2891, 9000] {
+            let text = described(tag).expect("described");
+            assert!(!text.contains("*Under "), "tag {tag}: {text}");
+            assert!(!text.contains("Not in "), "tag {tag}: {text}");
+        }
+    }
+
+    /// A tag the newest edition lacks is described from the edition that has
+    /// it, with its lifespan — the fact a person asking about a tag wants, and
+    /// the one hover's note used to crowd out.
+    #[test]
+    fn a_tag_is_described_by_the_newest_edition_that_defines_it() {
+        let text = described(1328).expect("described");
         assert!(
-            text.starts_with("*Under FIX.5.0SP2*\n\n**RejectText** (1328) — String\n\n"),
+            text.starts_with("**RejectText** (1328) — String\n\n"),
             "{text}"
         );
-        assert!(
-            text.contains("\n\n*Not in FIX.4.4, introduced in FIX.5.0SP1*\n\n---\n\n"),
-            "{text}"
-        );
-        assert!(
-            !text.contains("Introduced in"),
-            "no lifecycle beside the note: {text}"
-        );
+        assert!(text.contains("*Introduced in FIX.5.0SP1*"), "{text}");
         assert!(
             text.ends_with("/fix-dictionary/5.0.SP2/tagNum_1328.html)"),
             "{text}"
         );
     }
 
+    /// A tag the protocol dropped: when it went is as much of its life as when
+    /// it came, and the link points at the edition that still had it.
     #[test]
-    fn a_retired_tag_is_described_from_the_last_version_that_had_it() {
-        let text = described(Some(Version::Fix44), 47).expect("described");
+    fn a_retired_tag_is_described_with_the_edition_it_left() {
+        let text = described(47).expect("described");
+        assert!(text.starts_with("**Rule80A** (47) — CHAR\n\n"), "{text}");
+        assert!(text.contains("*Removed in FIX.4.4*"), "{text}");
         assert!(
-            text.starts_with("*Under FIX.4.3*\n\n**Rule80A** (47) — CHAR\n\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("*Not in FIX.4.4, retired after FIX.4.3*"),
+            text.ends_with("/fix-dictionary/4.3/tagNum_47.html)"),
             "{text}"
         );
     }
 
-    /// A tag only FIX Latest knows: its name and standing, nothing a bundled
-    /// file could vouch for, no link.
+    /// A tag only FIX Latest knows: no bundled file vouches for a datatype or a
+    /// description, but when it entered is still known, and is said.
     #[test]
-    fn a_tag_only_fix_latest_knows_is_described_by_name_and_standing() {
+    fn a_tag_only_fix_latest_knows_is_described_by_name_and_arrival() {
         assert_eq!(
-            described(Some(Version::Fix44), 2891).as_deref(),
-            Some("*Under FIX Latest*\n\n**UPICode** (2891)\n\n*Not in FIX.4.4, introduced in FIX Latest*")
+            described(2891).as_deref(),
+            Some("**UPICode** (2891)\n\n*Introduced in FIX Latest*")
         );
         assert_eq!(
-            describe(Some(Version::Fix44), 2891, Some("x"), &Options::default()).as_deref(),
-            Some("*Under FIX Latest*\n\n**UPICode** (2891)\n\n*Not in FIX.4.4, introduced in FIX Latest*\n\n---\n\nValue: `x`")
+            describe(2891, Some("x"), &Options::default()).as_deref(),
+            Some("**UPICode** (2891)\n\n*Introduced in FIX Latest*\n\n---\n\nValue: `x`")
         );
     }
 
-    /// A disputed start says nothing about the tag; the answering version's
-    /// own lifecycle shows instead.
+    /// Where the two sources disagree about some edition, nothing is said about
+    /// that edition — but the tag's own life is not in doubt.
     #[test]
-    fn a_disputed_start_is_described_from_the_newest_version_with_its_lifecycle() {
-        let text = described(Some(Version::Fix50Sp1), 108).expect("described");
-        assert!(
-            text.starts_with("*Under FIX.5.0SP2*\n\n**HeartBtInt** (108) — int\n\n"),
-            "{text}"
-        );
-        assert!(!text.contains("Not in"), "{text}");
+    fn a_tag_the_sources_dispute_somewhere_still_has_its_lifespan() {
+        let text = described(108).expect("described");
+        assert!(text.starts_with("**HeartBtInt** (108) — int\n\n"), "{text}");
         assert!(text.contains("*Introduced in FIX.3.0*"), "{text}");
     }
 
     /// The six QuickFIX-only tags live in the FIX.5.0 file alone and are
-    /// standard nowhere: hover's `*Custom field*` line, no link.
+    /// standard nowhere: hover's `*Custom field*` line, and no life to claim.
     #[test]
-    fn a_quickfix_only_tag_is_described_from_fix50_as_a_custom_field() {
+    fn a_quickfix_only_tag_is_described_as_a_custom_field() {
         assert_eq!(
-            described(Some(Version::Fix44), 9000).as_deref(),
-            Some("*Under FIX.5.0*\n\n**NoNestedUserData** (9000) — INT\n\n*Custom field*")
+            described(9000).as_deref(),
+            Some("**NoNestedUserData** (9000) — INT\n\n*Custom field*")
         );
     }
 
-    /// No start: no standing to compare against, the answering version's
-    /// lifecycle as hover trims it.
+    /// The link needs a version to be built from, which only a bundled edition
+    /// supplies: under a flat template a QuickFIX-only tag links as hover links
+    /// it, while a tag only FIX Latest knows cannot.
     #[test]
-    fn without_a_start_the_newest_version_answers_with_no_note() {
-        let text = described(None, 1328).expect("described");
+    fn a_description_links_what_a_bundled_edition_answers_for() {
+        let flat = with_url("https://fix.internal/t{tag}");
         assert!(
-            text.starts_with("*Under FIX.5.0SP2*\n\n**RejectText** (1328) — String\n\n"),
-            "{text}"
+            describe(9000, None, &flat)
+                .expect("described")
+                .ends_with("[FIX Reference: fix.internal](https://fix.internal/t9000)"),
+            "a flat template needs no version"
         );
-        assert!(!text.contains("Not in"), "{text}");
-        assert!(text.contains("*Introduced in FIX.5.0SP1*"), "{text}");
-    }
+        assert!(
+            !describe(2891, None, &flat)
+                .expect("described")
+                .contains("[FIX Reference"),
+            "no bundled edition answers, so there is no version to link"
+        );
 
-    /// The session layer's name is an alias; the tables, the opener and the
-    /// link all say which version they are.
-    #[test]
-    fn a_fixt_start_is_described_as_the_tables_it_reads() {
-        let text = described(Some(Version::Fixt11), 1328).expect("described");
-        assert!(text.starts_with("*Under FIX.5.0SP2*"), "{text}");
-        assert!(!text.contains("FIXT"), "{text}");
-        assert!(
-            text.ends_with("/fix-dictionary/5.0.SP2/tagNum_1328.html)"),
-            "{text}"
-        );
+        let off = with_url("");
+        for tag in [9000u32, 2891, 1328] {
+            assert!(
+                !describe(tag, None, &off)
+                    .expect("described")
+                    .contains("[FIX Reference"),
+                "links are off: tag {tag}"
+            );
+        }
     }
 
     #[test]
     fn a_tag_in_no_table_has_no_description() {
-        assert_eq!(described(Some(Version::Fix44), 9999), None);
-        assert_eq!(described(None, 20001), None);
-    }
-
-    /// The lift changed nothing: described under the version that defines
-    /// it, a tag reads as its hover does, under an opener naming the version.
-    #[test]
-    fn a_description_under_the_start_version_is_the_hover_without_a_value() {
-        let hover = rendered(HEARTBEAT, "FIX.4.4", 49).expect("hover");
-        assert_eq!(
-            describe(Some(Version::Fix44), 49, None, &Options::default()).as_deref(),
-            Some(format!("*Under FIX.4.4*\n\n{}", without_value(&hover)).as_str())
-        );
+        assert_eq!(described(9999), None);
+        assert_eq!(described(20001), None);
     }
 
     /// The whole answer for one plain field, asserted in full rather than in

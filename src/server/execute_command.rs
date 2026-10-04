@@ -21,11 +21,12 @@
 //! but a yank is a one-shot gesture and nothing re-reads these lines.
 //!
 //! `fix.describeTag` is hover for a tag no line carries: `[tag]` or
-//! `[tag, value]`, no document, so it works with none open. The configured
-//! version is where the search starts, and a tag it lacks is answered from
-//! the newest bundled version that has it — the question is what the tag
-//! means, not whether this log may carry it. Bundled tables only: a custom
-//! session selection lends its version, never its definitions.
+//! `[tag, value]`, no document, so it works with none open. It names no version
+//! either — the question is what the tag means, not whether some edition has
+//! it — so the newest bundled edition that defines the tag answers, and the
+//! tag's own lifespan says when it arrived and when it left. Neither the
+//! session selection nor `defaultVersion` is consulted; only `tagUrl` is, for
+//! the reference link, which is what the readiness check below protects.
 
 use lsp_server::ResponseError;
 use lsp_types::{ExecuteCommandParams, Range, Uri};
@@ -34,7 +35,6 @@ use serde_json::{json, Value};
 use super::dispatch::{Dispatched, HandlerResult, Notices, RequestTask, Snapshot};
 use super::ServerState;
 use crate::codec::{ByteOffset, Field};
-use crate::dictionary::Version;
 use crate::document::{Column, LineNo, Offsets};
 use crate::render::{decode, hover};
 
@@ -174,15 +174,7 @@ impl ServerState {
                 "configuration is not ready, retry later",
             ));
         }
-        // The selection's version when it names a bundled one, else the
-        // configured default; a custom file may declare a string no table has.
-        let start = self
-            .config
-            .session_choice
-            .as_ref()
-            .and_then(|choice| Version::parse(&choice.version))
-            .or_else(|| Version::parse(&self.config.base.default_version));
-        match hover::describe(start, tag, value, &self.render) {
+        match hover::describe(tag, value, &self.render) {
             Some(text) => Ok(json!(text)),
             None => Err(super::config_pull::request_failed(&format!(
                 "{DESCRIBE_TAG}: no dictionary defines tag {tag}"
@@ -571,18 +563,18 @@ mod tests {
         describe(state, arguments).expect_err("refused")
     }
 
-    /// The configured default version is where the search starts; a tag it
-    /// lacks is still answered, from the version that has it.
+    /// A description is about a tag, so the configured version has no say in
+    /// it: the newest edition that defines the tag answers, and the answer
+    /// names no version it was not asked about.
     #[test]
-    fn a_tag_is_described_from_the_default_version_or_the_one_that_has_it() {
+    fn a_tag_is_described_without_consulting_the_configured_version() {
         let (mut state, _) = state_with(HEARTBEAT);
-        assert!(described(&mut state, json!([49])).starts_with("*Under FIX.4.4*"));
+        let plain = described(&mut state, json!([49]));
+        assert!(plain.starts_with("**SenderCompID** (49)"), "{plain}");
         let later = described(&mut state, json!([1328]));
-        assert!(later.starts_with("*Under FIX.5.0SP2*"), "{later}");
-        assert!(
-            later.contains("*Not in FIX.4.4, introduced in FIX.5.0SP1*"),
-            "{later}"
-        );
+        assert!(later.starts_with("**RejectText** (1328)"), "{later}");
+        assert!(later.contains("*Introduced in FIX.5.0SP1*"), "{later}");
+        assert!(!later.contains("Not in"), "{later}");
     }
 
     #[test]
@@ -623,8 +615,8 @@ mod tests {
         }
     }
 
-    /// Before the first configuration commit the start version is a guess, so
-    /// the command says to come back rather than answer under defaults.
+    /// Before the first configuration commit the reference-link template is a
+    /// guess, so the command says to come back rather than answer under it.
     #[test]
     fn a_description_before_the_first_commit_is_refused() {
         let (sender, _receiver) = crossbeam_channel::unbounded::<lsp_server::Message>();
@@ -650,12 +642,12 @@ mod tests {
         );
         super::super::testing::reconfigure(&mut state);
         assert!(!state.config.rejected);
-        assert!(described(&mut state, json!([49])).starts_with("*Under FIX.4.4*"));
+        assert!(described(&mut state, json!([49])).starts_with("**SenderCompID** (49)"));
     }
 
     /// A committed configuration is not the whole story: while the client has
-    /// been asked for its settings and has not answered, the start version and
-    /// the link template are still the ones without that layer.
+    /// been asked for its settings and has not answered, the link template is
+    /// still the one without that layer.
     #[test]
     fn a_description_while_a_pull_is_unanswered_is_refused() {
         let (mut state, _) = state_with(HEARTBEAT);
@@ -668,16 +660,29 @@ mod tests {
         let generation = state.config.global_generation;
         state.on_base_reply(generation, Ok(json!([null])));
         super::super::testing::settle(&mut state);
-        assert!(described(&mut state, json!([49])).starts_with("*Under FIX.4.4*"));
+        assert!(described(&mut state, json!([49])).starts_with("**SenderCompID** (49)"));
     }
 
-    /// A custom session selection lends its version as the start and nothing
-    /// else: its own definitions are not where a description comes from.
+    /// Neither a session selection nor `defaultVersion` reaches a description.
+    /// SenderCompID(49) is the tag that can tell: every edition defines it, so
+    /// a configured start would answer from that edition and link to its pages,
+    /// where the newest edition's link is FIX.5.0SP2's. A later tag like 1328
+    /// could not discriminate — it reaches SP2 from either start.
     #[test]
-    fn a_custom_session_selection_contributes_only_its_version() {
+    fn a_session_selection_and_a_default_version_contribute_nothing() {
         use crate::dictionary::parse::fixtures::{field, quickfix};
         use crate::dictionary::{Dict, DictionaryChoice};
         let (mut state, _) = state_with(HEARTBEAT);
+        let plain = described(&mut state, json!([49]));
+        assert!(
+            plain.ends_with("/fix-dictionary/5.0.SP2/tagNum_49.html)"),
+            "{plain}"
+        );
+
+        state.config.base.default_version = "FIX.4.2".into();
+        super::super::testing::reconfigure(&mut state);
+        assert_eq!(described(&mut state, json!([49])), plain);
+
         state.config.session_choice = Some(DictionaryChoice {
             dict: Dict::Owned(std::sync::Arc::new(quickfix(
                 "FIX.4.2",
@@ -688,11 +693,9 @@ mod tests {
             identity: 7,
             name: Some("desk".into()),
         });
-        let text = described(&mut state, json!([1328]));
-        assert!(
-            text.contains("*Not in FIX.4.2, introduced in FIX.5.0SP1*"),
-            "{text}"
-        );
+        assert_eq!(described(&mut state, json!([49])), plain);
+        // And a dictionary only the desk has is still no dictionary to a
+        // description: bundled editions are all it reads.
         let error = refused_description(&mut state, json!([9999]));
         assert_eq!(
             error.message,
