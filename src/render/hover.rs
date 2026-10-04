@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use crate::codec::{Field, MessageAnalysis};
+use crate::codec::MessageAnalysis;
 use crate::dictionary::{
     bundled, newest_defining, standard, Dict, EnumIdx, FieldIdx, Lifecycle, Retirement, Standard,
     Version,
@@ -26,10 +26,26 @@ pub fn hover(
     label: Option<&str>,
 ) -> Option<String> {
     let field = analysis.fields.get(at)?;
-    match field.def() {
-        Some(idx) => Some(defined(line, analysis, field, idx, options, label)),
-        None => undefined(line, analysis, field, options, label),
+    let dict = &analysis.dict;
+    let against = Version::parse(&analysis.version);
+    let source = match field.def() {
+        Some(idx) => Source::Defined(dict, idx),
+        None => Source::Standard,
+    };
+    let About {
+        paragraphs,
+        standing,
+    } = about(source, field.tag, against, label, !dict.is_static())?;
+
+    let mut value = value_paragraph(source, field.tag, field.value(line), field.enum_value());
+    // A Repository dictionary can list a member it never declares; the codec
+    // still places it in its entry, and the hint already draws the path.
+    if let Some(path) = analysis.group_path(field, line) {
+        value.push(format!("Group: `{path}`"));
     }
+
+    let link = link(options, &analysis.version, field.tag, &standing);
+    Some(sections(paragraphs, value, link))
 }
 
 /// What `fix.describeTag` says about `tag` searched from `start`, or `None`
@@ -41,128 +57,149 @@ pub fn describe(
     options: &Options,
 ) -> Option<String> {
     let start = start.map(Version::resolve_alias);
-    let raw = value.map(str::as_bytes).unwrap_or_default();
     let answering = start
         .filter(|version| Dict::Static(bundled(*version)).field_idx(tag).is_some())
         .or_else(|| newest_defining(tag));
-    let Some(answering) = answering else {
-        // Only FIX Latest: a name and a standing, nothing a bundled file vouches for.
-        let standing = Standard::of_tag(start, tag);
-        let Standard::Unbundled(def) = standing else {
-            return None;
-        };
-        let mut text = vec![
-            "*Under FIX Latest*".to_owned(),
-            format!("**{}** ({tag})", def.name),
-        ];
-        text.extend(standing_note(start, &standing, None, None, false));
-        let value = (!raw.is_empty()).then(|| value_line(raw));
-        return Some(sections(text, value.into_iter().collect(), None));
+    // Bound here rather than in the `match`: a `Dict` built inside an arm is
+    // dropped at its end, and `Source` borrows it.
+    let dict = answering.map(|version| Dict::Static(bundled(version)));
+    let idx = dict.as_ref().and_then(|dict| dict.field_idx(tag));
+    let source = match (&dict, idx) {
+        (Some(dict), Some(idx)) => Source::Defined(dict, idx),
+        // Only FIX Latest knows the tag: a name, and nothing a dictionary
+        // would vouch for.
+        _ => Source::Standard,
     };
-    let dict = Dict::Static(bundled(answering));
-    let idx = dict.field_idx(tag)?;
-    let mut text = vec![format!("*Under {}*", answering.as_str())];
-    text.extend(about(&dict, start, idx, None).paragraphs);
-    let label = value.and_then(|value| dict.enum_idx(idx, value));
-    let value = value_paragraph(&dict, idx, tag, raw, label);
-    // Gated by the answering version's own standing, as hover gates it: a
-    // QuickFIX-only tag has no reference page to point at.
-    let link = link(
-        options,
-        answering.as_str(),
+
+    let About { paragraphs, .. } = about(source, tag, start, None, false)?;
+    let mut text = vec![match answering {
+        Some(version) => format!("*Under {}*", version.as_str()),
+        None => "*Under FIX Latest*".to_owned(),
+    }];
+    text.extend(paragraphs);
+
+    let label = match source {
+        Source::Defined(dict, idx) => value.and_then(|value| dict.enum_idx(idx, value)),
+        Source::Standard => None,
+    };
+    let value = value_paragraph(
+        source,
         tag,
-        &Standard::of_tag(Some(answering), tag),
+        value.map(str::as_bytes).unwrap_or_default(),
+        label,
     );
+    // Gated on the answering version's own standing, not the start's: the note
+    // asks whether the tag is in the version asked about, the link whether the
+    // tag is on the pages of the version that answered.
+    let link = answering.and_then(|version| {
+        link(
+            options,
+            version.as_str(),
+            tag,
+            &Standard::of_tag(Some(version), tag),
+        )
+    });
     Some(sections(text, value, link))
 }
 
-/// The dictionary half of a hover: what `dict` knows about the field at `idx`,
-/// then how its tag stands against standard FIX at `version`.
+/// Where a field's facts come from: the dictionary that defines its tag, or
+/// standard FIX alone, which gives a name and nothing a dictionary would
+/// vouch for.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Defined(&'a Dict, FieldIdx),
+    Standard,
+}
+
+/// The dictionary half of an answer, and the standing its caller needs for the
+/// reference link.
 struct About {
     paragraphs: Vec<String>,
     standing: Standard,
 }
 
-fn about(dict: &Dict, version: Option<Version>, idx: FieldIdx, label: Option<&str>) -> About {
-    let def = dict.field(idx);
-    let tag = def.tag();
-    let standing = Standard::of_tag(version, tag);
-    let custom = !dict.is_static();
-    // Bundled tables carry no label, so `label` alone says "custom" here.
-    let note = standing_note(version, &standing, Some(def.name()), label, custom);
-
-    let mut header = format!("**{}** ({tag})", def.name());
-    if !def.datatype().is_empty() {
-        header.push_str(" — ");
-        header.push_str(def.datatype());
-    }
-    let mut paragraphs = vec![header];
-    // Trimmed: the XML descriptions carry a trailing newline, which would show
-    // as a blank line before the section rule.
-    let description = def.description().trim_end();
-    if !description.is_empty() {
-        paragraphs.push(description.to_owned());
-    }
-    let mut facts = def.lifecycle();
-    // A custom tag has no standard life, and under a "Not in" note the
-    // dictionary's own dates could contradict the standard's: neither shows
-    // one. A bundled date its own files contradict is not repeated.
-    if note.is_some() && standing != Standard::InVersion {
-        facts = Lifecycle::default();
-    } else if !custom && !standard::date_holds(tag) {
-        facts.added = None;
-    }
-    paragraphs.extend(note);
-    paragraphs.extend(lifecycle(&facts));
-    About {
-        paragraphs,
-        standing,
-    }
-}
-
-/// A field the bound dictionary defines: everything it knows, then how the
-/// tag stands against standard FIX.
-fn defined(
-    line: &[u8],
-    analysis: &MessageAnalysis,
-    field: &Field,
-    idx: FieldIdx,
-    options: &Options,
+/// What is known about one tag, and how it stands against standard FIX at
+/// `against`. `None` where no name can be claimed (`Disputed`, `Nowhere`).
+///
+/// `custom` is a fact about the *binding*, not about `source`: it is what makes
+/// `*Standard FIX.4.4*` and `*Not defined by "desk"*` sayable at all. A
+/// description passes `false`, so it can print neither.
+fn about(
+    source: Source,
+    tag: u32,
+    against: Option<Version>,
     label: Option<&str>,
-) -> String {
-    let dict = &analysis.dict;
-    let version = Version::parse(&analysis.version);
-    let About {
-        paragraphs: about,
-        standing,
-    } = about(dict, version, idx, label);
+    custom: bool,
+) -> Option<About> {
+    let standing = Standard::of_tag(against, tag);
+    let mut paragraphs = Vec::new();
+    match source {
+        Source::Defined(dict, idx) => {
+            let def = dict.field(idx);
+            let note = standing_note(against, &standing, Some(def.name()), label, custom);
 
-    let raw = field.value(line);
-    let mut value = value_paragraph(dict, idx, field.tag, raw, field.enum_value());
-    // Inside the non-empty-value case, where it has always been.
-    if !raw.is_empty() {
-        if let Some(path) = analysis.group_path(field, line) {
-            value.push(format!("Group: `{path}`"));
+            let mut header = format!("**{}** ({tag})", def.name());
+            if !def.datatype().is_empty() {
+                header.push_str(" — ");
+                header.push_str(def.datatype());
+            }
+            paragraphs.push(header);
+            // Trimmed: the XML descriptions carry a trailing newline, which
+            // would show as a blank line before the section rule.
+            let description = def.description().trim_end();
+            if !description.is_empty() {
+                paragraphs.push(description.to_owned());
+            }
+            let mut facts = def.lifecycle();
+            // A custom tag has no standard life, and under a "Not in" note the
+            // dictionary's own dates could contradict the standard's: neither
+            // shows one. A bundled date its own files contradict is not repeated.
+            if note.is_some() && standing != Standard::InVersion {
+                facts = Lifecycle::default();
+            } else if !custom && !standard::date_holds(tag) {
+                facts.added = None;
+            }
+            paragraphs.extend(note);
+            paragraphs.extend(lifecycle(&facts));
+        }
+        Source::Standard => {
+            paragraphs.push(format!(
+                "**{}** ({tag})",
+                standard::name_of(&standing, tag)?
+            ));
+            // What tells this apart from a tag the desk's dictionary defines,
+            // whose note reads the same. A bundled binding's note already names
+            // the version.
+            if custom {
+                paragraphs.push(match label {
+                    Some(label) => format!("*Not defined by \"{label}\"*"),
+                    None => "*Not defined by this dictionary*".to_owned(),
+                });
+            }
+            // No bound name: nothing for the standard one to differ from.
+            paragraphs.extend(standing_note(against, &standing, None, label, custom));
         }
     }
-
-    let link = link(options, &analysis.version, field.tag, &standing);
-    sections(about, value, link)
+    Some(About {
+        paragraphs,
+        standing,
+    })
 }
 
-/// The value half of a hover: the raw value, its enum label where `label`
+/// The value half of an answer: the raw value, its enum label where `label`
 /// names one, and for MsgType the message it names. Empty for an empty value.
-fn value_paragraph(
-    dict: &Dict,
-    idx: FieldIdx,
-    tag: u32,
-    raw: &[u8],
-    label: Option<EnumIdx>,
-) -> Vec<String> {
-    let mut value = Vec::new();
+///
+/// Standard FIX names a tag and says nothing about the values of one, so a
+/// `Standard` source renders the value alone.
+fn value_paragraph(source: Source, tag: u32, raw: &[u8], label: Option<EnumIdx>) -> Vec<String> {
     if raw.is_empty() {
-        return value;
+        return Vec::new();
     }
+    let Source::Defined(dict, idx) = source else {
+        return vec![value_line(raw)];
+    };
+
+    let mut value = Vec::new();
     let mut line_ = value_line(raw);
     let label = label.map(|at| dict.enum_at(idx, at));
     if let Some(label) = &label {
@@ -197,50 +234,6 @@ fn value_paragraph(
         }
     }
     value
-}
-
-/// A field the bound dictionary lacks: what the two witnesses support and
-/// nothing more — standard FIX's name and standing, the raw value, the group
-/// it sits in. No datatype, description or life: the dictionary has none, and
-/// FIX Latest's would speak for a version that lacks the tag. `None` where no
-/// name can be claimed (`Disputed`, `Nowhere`).
-fn undefined(
-    line: &[u8],
-    analysis: &MessageAnalysis,
-    field: &Field,
-    options: &Options,
-    label: Option<&str>,
-) -> Option<String> {
-    let version = Version::parse(&analysis.version);
-    let standing = Standard::of_tag(version, field.tag);
-    let name = standard::name_of(&standing, field.tag)?;
-    let custom = !analysis.dict.is_static();
-
-    let mut about = vec![format!("**{name}** ({})", field.tag)];
-    // What tells this apart from a tag the desk's dictionary defines, whose
-    // note reads the same. A bundled binding's note already names the version.
-    if custom {
-        about.push(match label {
-            Some(label) => format!("*Not defined by \"{label}\"*"),
-            None => "*Not defined by this dictionary*".to_owned(),
-        });
-    }
-    // No bound name: nothing for the standard one to differ from.
-    about.extend(standing_note(version, &standing, None, label, custom));
-
-    let mut value = Vec::new();
-    let raw = field.value(line);
-    if !raw.is_empty() {
-        value.push(value_line(raw));
-    }
-    // A Repository dictionary can list a member it never declares; the codec
-    // still places it in its entry, and the hint already draws the path.
-    if let Some(path) = analysis.group_path(field, line) {
-        value.push(format!("Group: `{path}`"));
-    }
-
-    let link = link(options, &analysis.version, field.tag, &standing);
-    Some(sections(about, value, link))
 }
 
 /// Backticks keep markdown metacharacters in a raw value inert. A value
@@ -562,6 +555,22 @@ mod tests {
                 "Value: `0` — **Bid**\n\n*Introduced in FIX.4.2*\n\nGroup: `NoMDEntries/1/MDEntryType`"
             ),
             "{hover}"
+        );
+    }
+
+    /// The one corner the merge changes: the group line used to sit inside the
+    /// non-empty-value branch here, while the undefined path always drew it
+    /// unconditionally. Unified on the latter — a group member sits in its
+    /// entry whether or not it carries a value.
+    #[test]
+    fn a_group_member_with_an_empty_value_still_names_its_group() {
+        let line = "8=FIX.4.4|9=124|35=W|34=3|49=EXCHANGE|56=CLIENT|52=20251026-09:05:00.000|\
+55=BTCUSD|268=1|269=|270=65000.50|271=1.5|10=145|";
+        let hover = rendered(line, "FIX.4.4", 269).expect("269 is known");
+        assert!(!hover.contains("Value:"), "{hover}");
+        assert!(
+            hover.contains("\n\n---\n\nGroup: `NoMDEntries/1/MDEntryType`\n\n---\n\n"),
+            "the group line is the whole value section: {hover}"
         );
     }
 
