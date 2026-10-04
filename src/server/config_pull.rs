@@ -51,9 +51,10 @@ pub struct ConfigState {
     pub(super) next_lifetime: u64,
     /// Whether invalid client configuration blocks incremental batches.
     pub(super) rejected: bool,
-    /// Whether any batch has committed: before that the base configuration is
-    /// `Config::default()`, which a document-less answer must not pass off as
-    /// the configured one.
+    /// Whether any batch has committed. `initialize` starts one from
+    /// `initializationOptions` before the client is ever asked, so this alone
+    /// does not mean the client's settings are in; see
+    /// [`ServerState::base_configuration_ready`].
     pub(super) committed: bool,
     /// Committed session-level dictionary selector.
     pub(super) session: Option<String>,
@@ -127,6 +128,23 @@ impl ServerState {
             .documents
             .get(uri)
             .map(|document| &document.resolved.config)
+    }
+
+    /// Whether the committed base configuration is the client's last word: a
+    /// batch has committed and no answer is outstanding.
+    ///
+    /// A pull batch keeps its `input` until the client replies (`submit_batch`
+    /// takes it), which is what tells it from the push-mode batch `initialize`
+    /// starts and submits at once. An answer that is still coming can change
+    /// `defaultVersion` and `tagUrl`, so a document-less request waits for it
+    /// rather than answer under a layer it knows is missing.
+    pub(super) fn base_configuration_ready(&self) -> bool {
+        self.config.committed
+            && self
+                .config
+                .pending
+                .as_ref()
+                .is_none_or(|batch| batch.input.is_none())
     }
 
     /// Duration until the configuration deadline, or a long idle interval.

@@ -169,7 +169,7 @@ impl ServerState {
                 "configuration is not ready; send a valid configuration update",
             ));
         }
-        if !self.config.committed {
+        if !self.base_configuration_ready() {
             return Err(super::config_pull::request_failed(
                 "configuration is not ready, retry later",
             ));
@@ -650,6 +650,24 @@ mod tests {
         );
         super::super::testing::reconfigure(&mut state);
         assert!(!state.config.rejected);
+        assert!(described(&mut state, json!([49])).starts_with("*Under FIX.4.4*"));
+    }
+
+    /// A committed configuration is not the whole story: while the client has
+    /// been asked for its settings and has not answered, the start version and
+    /// the link template are still the ones without that layer.
+    #[test]
+    fn a_description_while_a_pull_is_unanswered_is_refused() {
+        let (mut state, _) = state_with(HEARTBEAT);
+        state.client.configuration = true;
+        state.pull_base_config();
+
+        let error = refused_description(&mut state, json!([49]));
+        assert_eq!(error.message, "configuration is not ready, retry later");
+
+        let generation = state.config.global_generation;
+        state.on_base_reply(generation, Ok(json!([null])));
+        super::super::testing::settle(&mut state);
         assert!(described(&mut state, json!([49])).starts_with("*Under FIX.4.4*"));
     }
 
