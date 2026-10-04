@@ -340,6 +340,25 @@ impl TestClient {
         }
     }
 
+    /// Wait until the base configuration has committed, through the one
+    /// request that needs no document: `fix.describeTag` is refused until then.
+    pub fn wait_base_ready(&mut self) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let asked = self.request(
+                "workspace/executeCommand",
+                json!({"command": "fix.describeTag", "arguments": [1328]}),
+            );
+            match asked {
+                Ok(text) => return text.as_str().expect("a string").to_owned(),
+                Err(REQUEST_FAILED) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1))
+                }
+                error => panic!("the base configuration did not commit: {error:?}"),
+            }
+        }
+    }
+
     pub fn wait_for_exit(&mut self) -> fix_lsp::server::ServerExit {
         self.completed
             .recv_timeout(Duration::from_secs(5))

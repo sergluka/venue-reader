@@ -51,6 +51,10 @@ pub struct ConfigState {
     pub(super) next_lifetime: u64,
     /// Whether invalid client configuration blocks incremental batches.
     pub(super) rejected: bool,
+    /// Whether any batch has committed: before that the base configuration is
+    /// `Config::default()`, which a document-less answer must not pass off as
+    /// the configured one.
+    pub(super) committed: bool,
     /// Committed session-level dictionary selector.
     pub(super) session: Option<String>,
     /// Initialization settings consumed by the first global pull.
@@ -82,6 +86,7 @@ impl Default for ConfigState {
             queued_global: None,
             next_lifetime: 0,
             rejected: false,
+            committed: false,
             session: None,
             initial_client: None,
             session_choice: None,
@@ -448,6 +453,7 @@ impl ServerState {
             }
         }
         self.config.base_resolved = prepared.base;
+        self.config.committed = true;
         let candidate = Ctx::new(&self.config.base, self.registry.clone(), None);
         if candidate.fingerprint() != self.ctx.fingerprint() {
             self.ctx = candidate;

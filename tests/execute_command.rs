@@ -45,7 +45,12 @@ fn the_command_is_advertised_by_name() {
     let result = client.initialize(&["utf-8"]);
     assert_eq!(
         result["capabilities"]["executeCommandProvider"]["commands"],
-        json!(["fix.decode", "fix.useDictionary", "fix.describeOverrides"]),
+        json!([
+            "fix.decode",
+            "fix.useDictionary",
+            "fix.describeOverrides",
+            "fix.describeTag"
+        ]),
         "{result}"
     );
     client.shutdown();
@@ -151,5 +156,60 @@ fn a_selection_past_the_bound_is_refused_and_says_which_setting() {
     client.did_open(URI, &[HEARTBEAT; 5].join("\n"), 1);
     let code = decode(&mut client, json!([range(0, 0, 4, 0)])).expect_err("refused");
     assert_eq!(code, REQUEST_FAILED, "well-formed arguments, too much work");
+    client.shutdown();
+}
+
+/// `fix.describeTag` is a workspace command: `initialize`, `initialized`, the
+/// configuration answer, and no `didOpen` anywhere.
+#[test]
+fn a_tag_is_described_with_no_document_open() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    let text = client.wait_base_ready();
+    assert!(
+        text.starts_with("*Under FIX.5.0SP2*\n\n**RejectText** (1328)"),
+        "{text}"
+    );
+    let valued = client
+        .request(
+            "workspace/executeCommand",
+            json!({"command": "fix.describeTag", "arguments": [54, "1"]}),
+        )
+        .expect("described");
+    assert!(
+        valued
+            .as_str()
+            .expect("a string")
+            .contains("Value: `1` — **Buy**"),
+        "{valued}"
+    );
+    client.shutdown();
+}
+
+/// Until the configuration answer commits, the start version is a guess the
+/// command declines to answer under; the pull it is waiting on is still there
+/// to answer afterwards.
+#[test]
+fn a_description_before_the_configuration_answer_is_refused() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    let early = client.request(
+        "workspace/executeCommand",
+        json!({"command": "fix.describeTag", "arguments": [1328]}),
+    );
+    assert_eq!(early, Err(REQUEST_FAILED));
+    client.answer_base_pull();
+    client.wait_base_ready();
+    client.shutdown();
+}
+
+/// A client that offers no `workspace/configuration` still commits a base
+/// configuration, so the command becomes answerable without any pull.
+#[test]
+fn a_client_without_configuration_support_still_gets_a_description() {
+    let mut client = TestClient::start();
+    client.initialize(&["utf-8"]);
+    client.wait_base_ready();
     client.shutdown();
 }

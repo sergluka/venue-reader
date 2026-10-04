@@ -196,6 +196,7 @@ pub fn initialize_result(encoding: PositionEncoding, caps: &ClientCapabilities) 
                     super::execute_command::DECODE.to_owned(),
                     super::execute_command::USE_DICTIONARY.to_owned(),
                     super::execute_command::DESCRIBE_OVERRIDES.to_owned(),
+                    super::execute_command::DESCRIBE_TAG.to_owned(),
                 ],
                 ..Default::default()
             }),
@@ -230,7 +231,12 @@ mod tests {
         let result = initialize_result(PositionEncoding::Utf8, &ClientCapabilities::default());
         assert_eq!(
             result["capabilities"]["executeCommandProvider"]["commands"],
-            json!(["fix.decode", "fix.useDictionary", "fix.describeOverrides",])
+            json!([
+                "fix.decode",
+                "fix.useDictionary",
+                "fix.describeOverrides",
+                "fix.describeTag"
+            ])
         );
         assert_eq!(
             result["capabilities"]["workspace"]["workspaceFolders"],

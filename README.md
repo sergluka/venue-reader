@@ -208,6 +208,9 @@ claimed: no datatype, description or lifecycle line, and a versioned link only
 where the tag is standard in the line's version. A tag neither source knows,
 or one the sources dispute, has no hover.
 
+For a tag no line carries, [`fix.describeTag`](#fixdescribetag) answers the
+same text from the version that defines it.
+
 ### Large logs and editor support
 
 Requests are bounded to keep large logs usable. The default limits are listed
@@ -231,7 +234,9 @@ editor's theme configuration.
 The project has recorded a Helix compatibility limitation: unavailable code
 lens and clipped line-start inlay summaries, while tag and enum hints remained
 usable. Recheck summary display against the installed Helix version; the server
-has no editor-specific workaround.
+has no editor-specific workaround. Helix 25.07 also discards the result of a
+`workspace/executeCommand`, so `fix.decode` and `fix.describeTag` have no
+visible output there — an accepted limitation.
 
 ## Installation
 
@@ -649,7 +654,7 @@ Paths refer to the server's filesystem.
 | `textDocument/semanticTokens/range` | Advertised when the client declares range requests. |
 | `textDocument/semanticTokens/full`, `textDocument/semanticTokens/full/delta` | Advertised instead of range mode when range requests are not declared. |
 | `textDocument/publishDiagnostics` | Server-pushed diagnostics. |
-| `workspace/executeCommand` | The three commands below. |
+| `workspace/executeCommand` | The four commands below. |
 | `workspace/configuration`, `workspace/didChangeConfiguration` | Global settings retrieval and refresh. |
 | `workspace/didChangeWorkspaceFolders` | Update project configuration discovery. |
 
@@ -706,6 +711,37 @@ The command uses tag/enum label formats and group-path settings regardless
 of whether the corresponding inlay hints are enabled. A tag the dictionary
 does not define but standard FIX names carries the same marked name the hint
 draws: `1328(RejectText?)=…`.
+
+### `fix.describeTag`
+
+Arguments: `[tag]` or `[tag, value]` — a tag number, and optionally one value
+of it as a string. Returns the text hover would show for that tag, as one
+markdown string:
+
+```json
+{ "command": "fix.describeTag", "arguments": [150, "F"] }
+```
+
+No document is involved, so the command works with none open: a client may
+start the server, send `initialize` and `initialized`, and ask. In Neovim,
+`vim.lsp.start(config, { attach = false })` starts such a client and
+`client:exec_cmd()` sends the command.
+
+The search starts at the session's selected dictionary version, else
+`fix.defaultVersion`, and a tag that version lacks is answered from the newest
+bundled version that defines it, then from FIX Latest — the question is what
+the tag means, not whether this log may carry it. The answer opens with the
+version that answered, `*Under FIX.5.0SP2*`, and when that is not the start it
+carries hover's standing note for the start, `*Not in FIX.4.4, introduced in
+FIX.5.0SP1*`. Only bundled tables are read: a custom dictionary contributes
+its declared version as the start, never its own definitions. With a value,
+hover's value paragraph for it follows: the enum label, its description and
+date, and for MsgType the message it names.
+
+A tag no bundled version and not FIX Latest defines fails with
+`fix.describeTag: no dictionary defines tag N`. Until the first configuration
+answer has committed the command fails with `configuration is not ready,
+retry later`; a client that fires it on `initialized` retries.
 
 ### `fix.useDictionary`
 

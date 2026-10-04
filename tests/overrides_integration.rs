@@ -415,7 +415,12 @@ fn all_layers_merge_sparsely_and_describe_reports_effective_values() {
     let initialized = fixture.initialize(&mut client, json!({"hover":{"enabled":true}}));
     assert_eq!(
         initialized["capabilities"]["executeCommandProvider"]["commands"],
-        json!(["fix.decode", "fix.useDictionary", "fix.describeOverrides"])
+        json!([
+            "fix.decode",
+            "fix.useDictionary",
+            "fix.describeOverrides",
+            "fix.describeTag"
+        ])
     );
     client.did_open(&first, &format!("# fix: hover.enabled=true\n{MESSAGE}"), 1);
     client.did_open(&second, MESSAGE, 1);

@@ -3,7 +3,10 @@
 use std::fmt::Write as _;
 
 use crate::codec::{Field, MessageAnalysis};
-use crate::dictionary::{bundled, standard, FieldIdx, Lifecycle, Retirement, Standard, Version};
+use crate::dictionary::{
+    bundled, newest_defining, standard, Dict, EnumIdx, FieldIdx, Lifecycle, Retirement, Standard,
+    Version,
+};
 use crate::tag;
 
 use super::Options;
@@ -29,6 +32,94 @@ pub fn hover(
     }
 }
 
+/// What `fix.describeTag` says about `tag` searched from `start`, or `None`
+/// when no bundled version and not FIX Latest defines it.
+pub fn describe(
+    start: Option<Version>,
+    tag: u32,
+    value: Option<&str>,
+    options: &Options,
+) -> Option<String> {
+    let start = start.map(Version::resolve_alias);
+    let raw = value.map(str::as_bytes).unwrap_or_default();
+    let answering = start
+        .filter(|version| Dict::Static(bundled(*version)).field_idx(tag).is_some())
+        .or_else(|| newest_defining(tag));
+    let Some(answering) = answering else {
+        // Only FIX Latest: a name and a standing, nothing a bundled file vouches for.
+        let standing = Standard::of_tag(start, tag);
+        let Standard::Unbundled(def) = standing else {
+            return None;
+        };
+        let mut text = vec![
+            "*Under FIX Latest*".to_owned(),
+            format!("**{}** ({tag})", def.name),
+        ];
+        text.extend(standing_note(start, &standing, None, None, false));
+        let value = (!raw.is_empty()).then(|| value_line(raw));
+        return Some(sections(text, value.into_iter().collect(), None));
+    };
+    let dict = Dict::Static(bundled(answering));
+    let idx = dict.field_idx(tag)?;
+    let mut text = vec![format!("*Under {}*", answering.as_str())];
+    text.extend(about(&dict, start, idx, None).paragraphs);
+    let label = value.and_then(|value| dict.enum_idx(idx, value));
+    let value = value_paragraph(&dict, idx, tag, raw, label);
+    // Gated by the answering version's own standing, as hover gates it: a
+    // QuickFIX-only tag has no reference page to point at.
+    let link = link(
+        options,
+        answering.as_str(),
+        tag,
+        &Standard::of_tag(Some(answering), tag),
+    );
+    Some(sections(text, value, link))
+}
+
+/// The dictionary half of a hover: what `dict` knows about the field at `idx`,
+/// then how its tag stands against standard FIX at `version`.
+struct About {
+    paragraphs: Vec<String>,
+    standing: Standard,
+}
+
+fn about(dict: &Dict, version: Option<Version>, idx: FieldIdx, label: Option<&str>) -> About {
+    let def = dict.field(idx);
+    let tag = def.tag();
+    let standing = Standard::of_tag(version, tag);
+    let custom = !dict.is_static();
+    // Bundled tables carry no label, so `label` alone says "custom" here.
+    let note = standing_note(version, &standing, Some(def.name()), label, custom);
+
+    let mut header = format!("**{}** ({tag})", def.name());
+    if !def.datatype().is_empty() {
+        header.push_str(" — ");
+        header.push_str(def.datatype());
+    }
+    let mut paragraphs = vec![header];
+    // Trimmed: the XML descriptions carry a trailing newline, which would show
+    // as a blank line before the section rule.
+    let description = def.description().trim_end();
+    if !description.is_empty() {
+        paragraphs.push(description.to_owned());
+    }
+    let mut facts = def.lifecycle();
+    // A custom tag has no standard life, and under a "Not in" note the
+    // dictionary's own dates could contradict the standard's: neither shows
+    // one. A bundled date its own files contradict is not repeated.
+    if note.is_some() && standing != Standard::InVersion {
+        facts = Lifecycle::default();
+    } else if !custom && !standard::date_holds(tag) {
+        facts.added = None;
+    }
+    paragraphs.extend(note);
+    paragraphs.extend(lifecycle(&facts));
+    About {
+        paragraphs,
+        standing,
+    }
+}
+
 /// A field the bound dictionary defines: everything it knows, then how the
 /// tag stands against standard FIX.
 fn defined(
@@ -40,73 +131,16 @@ fn defined(
     label: Option<&str>,
 ) -> String {
     let dict = &analysis.dict;
-    let def = dict.field(idx);
     let version = Version::parse(&analysis.version);
-    let standing = Standard::of_tag(version, field.tag);
-    let custom = !dict.is_static();
-    // Bundled tables carry no label, so `label` alone says "custom" here.
-    let note = standing_note(version, &standing, Some(def.name()), label, custom);
+    let About {
+        paragraphs: about,
+        standing,
+    } = about(dict, version, idx, label);
 
-    let mut about = format!("**{}** ({})", def.name(), field.tag);
-    if !def.datatype().is_empty() {
-        about.push_str(" — ");
-        about.push_str(def.datatype());
-    }
-    let mut about = vec![about];
-    // Trimmed: the XML descriptions carry a trailing newline, which would show
-    // as a blank line before the section rule.
-    let description = def.description().trim_end();
-    if !description.is_empty() {
-        about.push(description.to_owned());
-    }
-    let mut facts = def.lifecycle();
-    // A custom tag has no standard life, and under a "Not in" note the
-    // dictionary's own dates could contradict the standard's: neither shows
-    // one. A bundled date its own files contradict is not repeated.
-    if note.is_some() && standing != Standard::InVersion {
-        facts = Lifecycle::default();
-    } else if !custom && !standard::date_holds(field.tag) {
-        facts.added = None;
-    }
-    about.extend(note);
-    about.extend(lifecycle(&facts));
-
-    let mut value = Vec::new();
     let raw = field.value(line);
+    let mut value = value_paragraph(dict, idx, field.tag, raw, field.enum_value());
+    // Inside the non-empty-value case, where it has always been.
     if !raw.is_empty() {
-        let mut line_ = value_line(raw);
-        let label = field.enum_value().map(|at| dict.enum_at(idx, at));
-        if let Some(label) = &label {
-            line_.push_str(" — **");
-            line_.push_str(label.name());
-            line_.push_str("**");
-        }
-        value.push(line_);
-        if let Some(label) = &label {
-            // Only when it says something the name did not.
-            if !label.description().is_empty() && label.description() != label.name() {
-                value.push(label.description().to_owned());
-            }
-            value.extend(lifecycle(&Lifecycle {
-                added: (!label.added().is_empty()).then_some(label.added()),
-                deprecated: None,
-                removed_in: None,
-            }));
-        }
-        if field.tag == tag::MSG_TYPE {
-            if let Some(message) = field
-                .text(line)
-                .and_then(|value| dict.message_idx(value))
-                .map(|at| dict.message(at))
-            {
-                if !message.description().is_empty() {
-                    value.push(message.description().to_owned());
-                }
-                if !message.category().is_empty() {
-                    value.push(format!("*Category: {}*", message.category()));
-                }
-            }
-        }
         if let Some(path) = analysis.group_path(field, line) {
             value.push(format!("Group: `{path}`"));
         }
@@ -114,6 +148,55 @@ fn defined(
 
     let link = link(options, &analysis.version, field.tag, &standing);
     sections(about, value, link)
+}
+
+/// The value half of a hover: the raw value, its enum label where `label`
+/// names one, and for MsgType the message it names. Empty for an empty value.
+fn value_paragraph(
+    dict: &Dict,
+    idx: FieldIdx,
+    tag: u32,
+    raw: &[u8],
+    label: Option<EnumIdx>,
+) -> Vec<String> {
+    let mut value = Vec::new();
+    if raw.is_empty() {
+        return value;
+    }
+    let mut line_ = value_line(raw);
+    let label = label.map(|at| dict.enum_at(idx, at));
+    if let Some(label) = &label {
+        line_.push_str(" — **");
+        line_.push_str(label.name());
+        line_.push_str("**");
+    }
+    value.push(line_);
+    if let Some(label) = &label {
+        // Only when it says something the name did not.
+        if !label.description().is_empty() && label.description() != label.name() {
+            value.push(label.description().to_owned());
+        }
+        value.extend(lifecycle(&Lifecycle {
+            added: (!label.added().is_empty()).then_some(label.added()),
+            deprecated: None,
+            removed_in: None,
+        }));
+    }
+    if tag == tag::MSG_TYPE {
+        if let Some(message) = std::str::from_utf8(raw)
+            .ok()
+            .and_then(|value| dict.message_idx(value))
+            .map(|at| dict.message(at))
+        {
+            if !message.description().is_empty() {
+                value.push(message.description().to_owned());
+            }
+            if !message.category().is_empty() {
+                value.push(format!("*Category: {}*", message.category()));
+            }
+        }
+    }
+    value
 }
 
 /// A field the bound dictionary lacks: what the two witnesses support and
@@ -283,6 +366,146 @@ mod tests {
 
     const HEARTBEAT: &str =
         "8=FIX.4.4|9=57|35=0|34=1|49=CLIENT1|56=BROKER1|52=20251026-09:02:00.000|10=171|";
+
+    /// Hover's answer with its value section cut out: what a description has
+    /// to say when there is no line to take a value from.
+    fn without_value(hover: &str) -> String {
+        let mut sections: Vec<&str> = hover.split("\n\n---\n\n").collect();
+        assert_eq!(sections.len(), 3, "about, value, link: {hover}");
+        sections.remove(1);
+        sections.join("\n\n---\n\n")
+    }
+
+    fn described(start: Option<Version>, tag: u32) -> Option<String> {
+        describe(start, tag, None, &Options::default())
+    }
+
+    /// With a value, the whole hover: the value paragraph is the same function.
+    #[test]
+    fn a_description_with_a_value_is_the_whole_hover() {
+        let hover = rendered("8=FIX.4.4|35=D|54=1|10=0|", "FIX.4.4", 54).expect("hover");
+        assert!(hover.contains("Value: `1` — **Buy**"), "{hover}");
+        assert_eq!(
+            describe(Some(Version::Fix44), 54, Some("1"), &Options::default()).as_deref(),
+            Some(format!("*Under FIX.4.4*\n\n{hover}").as_str())
+        );
+    }
+
+    /// A tag the start lacks is answered from the newest version that has it,
+    /// with the start's standing note and no lifecycle line beside it.
+    #[test]
+    fn a_later_tag_is_described_from_the_newest_version_that_defines_it() {
+        let text = described(Some(Version::Fix44), 1328).expect("described");
+        assert!(
+            text.starts_with("*Under FIX.5.0SP2*\n\n**RejectText** (1328) — String\n\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n\n*Not in FIX.4.4, introduced in FIX.5.0SP1*\n\n---\n\n"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Introduced in"),
+            "no lifecycle beside the note: {text}"
+        );
+        assert!(
+            text.ends_with("/fix-dictionary/5.0.SP2/tagNum_1328.html)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_retired_tag_is_described_from_the_last_version_that_had_it() {
+        let text = described(Some(Version::Fix44), 47).expect("described");
+        assert!(
+            text.starts_with("*Under FIX.4.3*\n\n**Rule80A** (47) — CHAR\n\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("*Not in FIX.4.4, retired after FIX.4.3*"),
+            "{text}"
+        );
+    }
+
+    /// A tag only FIX Latest knows: its name and standing, nothing a bundled
+    /// file could vouch for, no link.
+    #[test]
+    fn a_tag_only_fix_latest_knows_is_described_by_name_and_standing() {
+        assert_eq!(
+            described(Some(Version::Fix44), 2891).as_deref(),
+            Some("*Under FIX Latest*\n\n**UPICode** (2891)\n\n*Not in FIX.4.4, introduced in FIX Latest*")
+        );
+        assert_eq!(
+            describe(Some(Version::Fix44), 2891, Some("x"), &Options::default()).as_deref(),
+            Some("*Under FIX Latest*\n\n**UPICode** (2891)\n\n*Not in FIX.4.4, introduced in FIX Latest*\n\n---\n\nValue: `x`")
+        );
+    }
+
+    /// A disputed start says nothing about the tag; the answering version's
+    /// own lifecycle shows instead.
+    #[test]
+    fn a_disputed_start_is_described_from_the_newest_version_with_its_lifecycle() {
+        let text = described(Some(Version::Fix50Sp1), 108).expect("described");
+        assert!(
+            text.starts_with("*Under FIX.5.0SP2*\n\n**HeartBtInt** (108) — int\n\n"),
+            "{text}"
+        );
+        assert!(!text.contains("Not in"), "{text}");
+        assert!(text.contains("*Introduced in FIX.3.0*"), "{text}");
+    }
+
+    /// The six QuickFIX-only tags live in the FIX.5.0 file alone and are
+    /// standard nowhere: hover's `*Custom field*` line, no link.
+    #[test]
+    fn a_quickfix_only_tag_is_described_from_fix50_as_a_custom_field() {
+        assert_eq!(
+            described(Some(Version::Fix44), 9000).as_deref(),
+            Some("*Under FIX.5.0*\n\n**NoNestedUserData** (9000) — INT\n\n*Custom field*")
+        );
+    }
+
+    /// No start: no standing to compare against, the answering version's
+    /// lifecycle as hover trims it.
+    #[test]
+    fn without_a_start_the_newest_version_answers_with_no_note() {
+        let text = described(None, 1328).expect("described");
+        assert!(
+            text.starts_with("*Under FIX.5.0SP2*\n\n**RejectText** (1328) — String\n\n"),
+            "{text}"
+        );
+        assert!(!text.contains("Not in"), "{text}");
+        assert!(text.contains("*Introduced in FIX.5.0SP1*"), "{text}");
+    }
+
+    /// The session layer's name is an alias; the tables, the opener and the
+    /// link all say which version they are.
+    #[test]
+    fn a_fixt_start_is_described_as_the_tables_it_reads() {
+        let text = described(Some(Version::Fixt11), 1328).expect("described");
+        assert!(text.starts_with("*Under FIX.5.0SP2*"), "{text}");
+        assert!(!text.contains("FIXT"), "{text}");
+        assert!(
+            text.ends_with("/fix-dictionary/5.0.SP2/tagNum_1328.html)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_tag_in_no_table_has_no_description() {
+        assert_eq!(described(Some(Version::Fix44), 9999), None);
+        assert_eq!(described(None, 20001), None);
+    }
+
+    /// The lift changed nothing: described under the version that defines
+    /// it, a tag reads as its hover does, under an opener naming the version.
+    #[test]
+    fn a_description_under_the_start_version_is_the_hover_without_a_value() {
+        let hover = rendered(HEARTBEAT, "FIX.4.4", 49).expect("hover");
+        assert_eq!(
+            describe(Some(Version::Fix44), 49, None, &Options::default()).as_deref(),
+            Some(format!("*Under FIX.4.4*\n\n{}", without_value(&hover)).as_str())
+        );
+    }
 
     /// The whole answer for one plain field, asserted in full rather than in
     /// fragments: the order of the paragraphs is as much the contract as their

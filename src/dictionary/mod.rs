@@ -14,8 +14,8 @@ pub mod standard;
 pub mod statics;
 
 pub use dict::{
-    bundled, Dict, EnumIdx, EnumView, FieldIdx, FieldView, GroupIdx, GroupView, Lifecycle,
-    MessageView, MsgIdx, Version, DEFAULT_VERSION,
+    bundled, newest_defining, Dict, EnumIdx, EnumView, FieldIdx, FieldView, GroupIdx, GroupView,
+    Lifecycle, MessageView, MsgIdx, Version, DEFAULT_VERSION,
 };
 pub use model::{Datatype, EnumDef, FieldDef, GroupDef, MessageDef, ParsedDict};
 pub use parse::{parse_quickfix, parse_repository, ParseError, MAX_ITEMS};

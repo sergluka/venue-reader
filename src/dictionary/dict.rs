@@ -97,6 +97,14 @@ impl Version {
     }
 }
 
+/// The newest bundled version whose tables define `tag`.
+pub fn newest_defining(tag: u32) -> Option<Version> {
+    Version::BUNDLED
+        .into_iter()
+        .rev()
+        .find(|version| Dict::Static(bundled(*version)).field_idx(tag).is_some())
+}
+
 /// The bundled dictionary for a version (total: the alias resolves `FIXT.1.1`).
 /// Looked up by name in the generated table, so the mask ordinal has exactly
 /// one source — `build.rs`.

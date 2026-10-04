@@ -1,6 +1,7 @@
-//! `workspace/executeCommand` — `fix.decode`, and so far nothing else.
+//! `workspace/executeCommand` — `fix.decode`, `fix.useDictionary`,
+//! `fix.describeOverrides` and `fix.describeTag`.
 //!
-//! The decoded text has no home among the standard requests: hover answers one
+//! `fix.decode` first. The decoded text has no home among the standard requests: hover answers one
 //! position, a code lens one line, and nothing takes a selection and gives back
 //! a string. A command does exactly that, and what the client does with the
 //! string — a register, a clipboard, a scratch buffer — is the client's.
@@ -18,6 +19,13 @@
 //!
 //! Not a cache populator. The range is bounded, so caching would be permitted,
 //! but a yank is a one-shot gesture and nothing re-reads these lines.
+//!
+//! `fix.describeTag` is hover for a tag no line carries: `[tag]` or
+//! `[tag, value]`, no document, so it works with none open. The configured
+//! version is where the search starts, and a tag it lacks is answered from
+//! the newest bundled version that has it — the question is what the tag
+//! means, not whether this log may carry it. Bundled tables only: a custom
+//! session selection lends its version, never its definitions.
 
 use lsp_server::ResponseError;
 use lsp_types::{ExecuteCommandParams, Range, Uri};
@@ -26,14 +34,15 @@ use serde_json::{json, Value};
 use super::dispatch::{Dispatched, HandlerResult, Notices, RequestTask, Snapshot};
 use super::ServerState;
 use crate::codec::{ByteOffset, Field};
+use crate::dictionary::Version;
 use crate::document::{Column, LineNo, Offsets};
-use crate::render::decode;
+use crate::render::{decode, hover};
 
-/// The only command. Public so `capabilities` advertises this string rather
-/// than a copy of it.
+/// Public so `capabilities` advertises these strings rather than copies.
 pub const DECODE: &str = "fix.decode";
 pub const USE_DICTIONARY: &str = "fix.useDictionary";
 pub const DESCRIBE_OVERRIDES: &str = "fix.describeOverrides";
+pub const DESCRIBE_TAG: &str = "fix.describeTag";
 
 impl ServerState {
     pub(super) fn execute_command_task(&mut self, params: &Value) -> Dispatched {
@@ -58,9 +67,13 @@ impl ServerState {
             };
             return Dispatched::Now(self.select_dictionary(raw.to_owned()));
         }
+        if params.command == DESCRIBE_TAG {
+            return Dispatched::Now(self.describe_tag(&params));
+        }
         if params.command != DECODE {
             return Dispatched::Now(Err(invalid(format!(
-                "unknown command `{}`; this server offers `{DECODE}`",
+                "unknown command `{}`; this server offers `{DECODE}`, `{USE_DICTIONARY}`, \
+                 `{DESCRIBE_OVERRIDES}` and `{DESCRIBE_TAG}`",
                 params.command
             ))));
         }
@@ -147,6 +160,36 @@ impl ServerState {
         )
     }
 
+    fn describe_tag(&self, params: &ExecuteCommandParams) -> HandlerResult {
+        let (tag, value) = describe_arguments(params)?;
+        // Rejection first: a rejected first pull never commits, and "retry
+        // later" would then be wrong forever.
+        if self.config.rejected {
+            return Err(super::config_pull::request_failed(
+                "configuration is not ready; send a valid configuration update",
+            ));
+        }
+        if !self.config.committed {
+            return Err(super::config_pull::request_failed(
+                "configuration is not ready, retry later",
+            ));
+        }
+        // The selection's version when it names a bundled one, else the
+        // configured default; a custom file may declare a string no table has.
+        let start = self
+            .config
+            .session_choice
+            .as_ref()
+            .and_then(|choice| Version::parse(&choice.version))
+            .or_else(|| Version::parse(&self.config.base.default_version));
+        match hover::describe(start, tag, value, &self.render) {
+            Some(text) => Ok(json!(text)),
+            None => Err(super::config_pull::request_failed(&format!(
+                "{DESCRIBE_TAG}: no dictionary defines tag {tag}"
+            ))),
+        }
+    }
+
     fn public_origin(&self, uri: &Uri, origin: &crate::overrides::Origin) -> Value {
         let mut result = json!({"layer":origin.layer,"source":origin.source});
         if origin.layer == crate::overrides::SourceKind::Modeline {
@@ -188,6 +231,23 @@ fn arguments(params: &ExecuteCommandParams) -> Result<(Uri, Vec<Range>), Respons
         return Err(invalid(format!("{DECODE}: no ranges to decode")));
     }
     Ok((uri, ranges.into_iter().map(ordered).collect()))
+}
+
+/// `[tag]` or `[tag, value]`, typed: a positive tag number, an optional string.
+fn describe_arguments(params: &ExecuteCommandParams) -> Result<(u32, Option<&str>), ResponseError> {
+    let shape = || invalid(format!("{DESCRIBE_TAG} takes [tag] or [tag, value]"));
+    let args = params.arguments.as_deref().unwrap_or_default();
+    let (tag, value) = match args {
+        [tag] => (tag, None),
+        [tag, value] => (tag, Some(value.as_str().ok_or_else(shape)?)),
+        _ => return Err(shape()),
+    };
+    let tag = tag
+        .as_u64()
+        .and_then(|tag| u32::try_from(tag).ok())
+        .filter(|tag| *tag > 0)
+        .ok_or_else(shape)?;
+    Ok((tag, value))
 }
 
 /// LSP requires a range's start to precede its end, but nothing on the wire
@@ -470,6 +530,9 @@ mod tests {
         };
         assert_eq!(unknown.code, lsp_server::ErrorCode::InvalidParams as i32);
         assert!(unknown.message.contains("fix.somethingElse"), "{unknown:?}");
+        for offered in [DECODE, USE_DICTIONARY, DESCRIBE_OVERRIDES, DESCRIBE_TAG] {
+            assert!(unknown.message.contains(offered), "{unknown:?}");
+        }
 
         let short = match state.execute_command_task(&json!({
             "command": DECODE,
@@ -482,6 +545,141 @@ mod tests {
 
         let empty = refused(&mut state, &uri, json!([]));
         assert_eq!(empty.code, lsp_server::ErrorCode::InvalidParams as i32);
+    }
+
+    fn describe(state: &mut ServerState, arguments: Value) -> Result<Value, ResponseError> {
+        match state.execute_command_task(&json!({
+            "command": DESCRIBE_TAG,
+            "arguments": arguments,
+        })) {
+            Dispatched::Now(result) => result,
+            Dispatched::Task(..) | Dispatched::Lazy(..) => {
+                panic!("a description needs no document")
+            }
+        }
+    }
+
+    fn described(state: &mut ServerState, arguments: Value) -> String {
+        describe(state, arguments)
+            .expect("described")
+            .as_str()
+            .expect("a string")
+            .to_owned()
+    }
+
+    fn refused_description(state: &mut ServerState, arguments: Value) -> ResponseError {
+        describe(state, arguments).expect_err("refused")
+    }
+
+    /// The configured default version is where the search starts; a tag it
+    /// lacks is still answered, from the version that has it.
+    #[test]
+    fn a_tag_is_described_from_the_default_version_or_the_one_that_has_it() {
+        let (mut state, _) = state_with(HEARTBEAT);
+        assert!(described(&mut state, json!([49])).starts_with("*Under FIX.4.4*"));
+        let later = described(&mut state, json!([1328]));
+        assert!(later.starts_with("*Under FIX.5.0SP2*"), "{later}");
+        assert!(
+            later.contains("*Not in FIX.4.4, introduced in FIX.5.0SP1*"),
+            "{later}"
+        );
+    }
+
+    #[test]
+    fn a_value_argument_adds_the_value_paragraph() {
+        let (mut state, _) = state_with(HEARTBEAT);
+        assert!(described(&mut state, json!([54, "1"])).contains("Value: `1` — **Buy**"));
+    }
+
+    #[test]
+    fn a_tag_no_source_defines_is_refused_by_name() {
+        let (mut state, _) = state_with(HEARTBEAT);
+        let error = refused_description(&mut state, json!([9999]));
+        assert_eq!(error.code, lsp_server::ErrorCode::RequestFailed as i32);
+        assert_eq!(
+            error.message,
+            "fix.describeTag: no dictionary defines tag 9999"
+        );
+    }
+
+    #[test]
+    fn a_malformed_description_request_is_invalid_params() {
+        let (mut state, _) = state_with(HEARTBEAT);
+        for arguments in [
+            json!(["1328"]),
+            json!([0]),
+            json!([]),
+            json!([1328, 5]),
+            json!([1328, "1", 2]),
+        ] {
+            let error = refused_description(&mut state, arguments.clone());
+            assert_eq!(
+                error.code,
+                lsp_server::ErrorCode::InvalidParams as i32,
+                "{arguments}: {}",
+                error.message
+            );
+            assert!(error.message.contains("[tag]"), "{}", error.message);
+        }
+    }
+
+    /// Before the first configuration commit the start version is a guess, so
+    /// the command says to come back rather than answer under defaults.
+    #[test]
+    fn a_description_before_the_first_commit_is_refused() {
+        let (sender, _receiver) = crossbeam_channel::unbounded::<lsp_server::Message>();
+        let mut state = ServerState::new(sender);
+        let error = refused_description(&mut state, json!([49]));
+        assert_eq!(error.code, lsp_server::ErrorCode::RequestFailed as i32);
+        assert_eq!(error.message, "configuration is not ready, retry later");
+    }
+
+    /// A rejected first configuration never commits, so "retry later" would
+    /// be wrong forever: the rejection is what is reported, and a valid update
+    /// after it answers.
+    #[test]
+    fn a_rejected_first_configuration_is_reported_as_such_until_a_valid_one_lands() {
+        let (sender, _receiver) = crossbeam_channel::unbounded::<lsp_server::Message>();
+        let mut state = ServerState::new(sender);
+        state.config.rejected = true;
+        let error = refused_description(&mut state, json!([49]));
+        assert!(
+            error.message.contains("send a valid configuration update"),
+            "{}",
+            error.message
+        );
+        super::super::testing::reconfigure(&mut state);
+        assert!(!state.config.rejected);
+        assert!(described(&mut state, json!([49])).starts_with("*Under FIX.4.4*"));
+    }
+
+    /// A custom session selection lends its version as the start and nothing
+    /// else: its own definitions are not where a description comes from.
+    #[test]
+    fn a_custom_session_selection_contributes_only_its_version() {
+        use crate::dictionary::parse::fixtures::{field, quickfix};
+        use crate::dictionary::{Dict, DictionaryChoice};
+        let (mut state, _) = state_with(HEARTBEAT);
+        state.config.session_choice = Some(DictionaryChoice {
+            dict: Dict::Owned(std::sync::Arc::new(quickfix(
+                "FIX.4.2",
+                &field(9999, "DeskOnly"),
+            ))),
+            version: "FIX.4.2".into(),
+            source: "desk.xml".into(),
+            identity: 7,
+            name: Some("desk".into()),
+        });
+        let text = described(&mut state, json!([1328]));
+        assert!(
+            text.contains("*Not in FIX.4.2, introduced in FIX.5.0SP1*"),
+            "{text}"
+        );
+        let error = refused_description(&mut state, json!([9999]));
+        assert_eq!(
+            error.message,
+            "fix.describeTag: no dictionary defines tag 9999"
+        );
     }
 
     /// A yank is one-shot: the contract permits it to cache and it declines.
