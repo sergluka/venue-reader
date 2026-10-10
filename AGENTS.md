@@ -100,7 +100,9 @@ follows is what is easy to get wrong here and not visible from any one file.
   still open and the generation still current, then sends. This is what makes a
   publish orderable against `didClose` — and against a configuration change,
   where the stale and fresh sets carry the same document version and a client
-  cannot tell them apart.
+  cannot tell them apart. An edit made while a batch that includes its document
+  is in flight is held and walked once at the commit, so no walk runs under
+  rules the batch is about to replace.
 
 ## Naming a tag
 

@@ -144,10 +144,12 @@ impl ServerState {
         if let Some(digest) = self.tokens.get_mut(&uri) {
             digest.edited = digest.edited.then(edited);
         }
-        if rescan {
-            self.configure_edited_document(&uri);
+        let reconfiguring = rescan && self.configure_edited_document(&uri);
+        if reconfiguring || self.awaits_configuration(&uri) {
+            self.hold_diagnostics(&uri);
+        } else {
+            self.schedule_diagnostics(&uri, version);
         }
-        self.schedule_diagnostics(&uri, version);
     }
 
     pub(super) fn on_did_close(&mut self, params: Value) {
@@ -166,6 +168,7 @@ impl ServerState {
         self.config.revisions.remove(&uri);
         self.config.modelines.remove(&uri);
         self.config.waiting.remove(&uri);
+        self.config.held_edits.remove(&uri);
         self.tokens.remove(&uri);
     }
 }

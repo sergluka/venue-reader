@@ -41,6 +41,9 @@ pub struct ConfigState {
     pub(super) modelines: HashMap<Uri, SettingsLayer>,
     /// Documents requiring preparation after the active batch finishes.
     pub(super) waiting: HashSet<Uri>,
+    /// Edited documents whose walk waits for the batch that decides their
+    /// rules, so the client never sees a set the old rules produced.
+    pub(super) held_edits: HashSet<Uri>,
     /// Whether the next document batch must reread project files.
     waiting_projects: bool,
     /// The batch waiting for client input or worker output.
@@ -82,6 +85,7 @@ impl Default for ConfigState {
             revisions: HashMap::new(),
             modelines: HashMap::new(),
             waiting: HashSet::new(),
+            held_edits: HashSet::new(),
             waiting_projects: false,
             pending: None,
             queued_global: None,
@@ -105,6 +109,9 @@ pub(super) struct Batch {
     pub started: Instant,
     /// Present until an optional client pull completes and the job is submitted.
     input: Option<Input>,
+    /// The documents captured for it, so an edit made during the round trip
+    /// can wait for its rules.
+    documents: HashSet<Uri>,
     /// Client-validity revision that authorized clearing the rejected state,
     /// when a successful commit may clear it at all.
     clears_rejected_at: Option<u64>,
@@ -276,6 +283,10 @@ impl ServerState {
         };
         self.config.waiting.clear();
         self.config.waiting_projects = false;
+        let captured = documents
+            .iter()
+            .map(|document| document.uri.clone())
+            .collect();
         let input = Input {
             generation,
             user_settings: self.config.user.clone(),
@@ -298,6 +309,7 @@ impl ServerState {
             generation,
             started,
             input: Some(input),
+            documents: captured,
             clears_rejected_at,
         });
         if pull {
@@ -438,6 +450,7 @@ impl ServerState {
         let mut lenses = false;
         let mut tokens = false;
         let mut diagnostics = Vec::new();
+        let mut held_edits = Vec::new();
         let base_unchanged = self.config.base == prepared.base.config;
         self.config.user = prepared.user;
         self.config.client = prepared.client;
@@ -497,6 +510,9 @@ impl ServerState {
                 self.config.waiting.insert(input.uri);
                 continue;
             }
+            // This batch is the one the edit waited for, whether or not the
+            // configuration it carries differs from the committed one.
+            let held = self.config.held_edits.remove(&input.uri);
             self.config
                 .modelines
                 .insert(input.uri.clone(), input.modeline);
@@ -605,7 +621,9 @@ impl ServerState {
             if token_changed {
                 self.tokens.remove(&input.uri);
             }
-            if interpretation
+            if held {
+                held_edits.push(input.uri.clone());
+            } else if interpretation
                 || renamed
                 || previous.is_none_or(|previous| {
                     previous.resolved.config.diagnostics != config.diagnostics
@@ -646,6 +664,9 @@ impl ServerState {
         self.report_config_messages(messages);
         for uri in diagnostics {
             self.diagnostics_changed_for(&uri);
+        }
+        for uri in held_edits {
+            self.walk_held_edit(&uri);
         }
         self.refresh_configuration(hints, lenses, tokens);
     }
@@ -727,10 +748,23 @@ impl ServerState {
         true
     }
 
+    /// Whether a batch that is in flight, or the one queued behind it, will
+    /// deliver this document's configuration: a walk now would use rules
+    /// about to be replaced.
+    pub(super) fn awaits_configuration(&self, uri: &Uri) -> bool {
+        self.config
+            .pending
+            .as_ref()
+            .is_some_and(|batch| batch.documents.contains(uri) || self.config.waiting.contains(uri))
+    }
+
     /// Schedule reconfiguration when an edit changes effective modeline input.
-    pub(super) fn configure_edited_document(&mut self, uri: &Uri) {
+    ///
+    /// True when a batch now in flight will deliver this document's
+    /// configuration; the edit's walk can wait for it.
+    pub(super) fn configure_edited_document(&mut self, uri: &Uri) -> bool {
         if !self.rescan_modeline(uri) {
-            return;
+            return false;
         }
         if self.config.base.overrides.modeline || self.config.pending.is_some() {
             self.config.waiting.insert(uri.clone());
@@ -738,6 +772,7 @@ impl ServerState {
                 self.begin_batch(Refresh::Documents);
             }
         }
+        self.config.pending.is_some()
     }
 
     /// Apply workspace-folder changes and reread project configuration.
@@ -796,6 +831,13 @@ impl ServerState {
         if !self.config.waiting.is_empty() && !self.config.rejected {
             // `begin_batch` folds in `waiting_projects`.
             self.begin_batch(Refresh::Documents);
+        }
+        if self.config.pending.is_none() {
+            // No batch will decide these edits' rules now (rejected, or a
+            // commit that left them out), so the committed rules walk them.
+            for uri in std::mem::take(&mut self.config.held_edits) {
+                self.walk_held_edit(&uri);
+            }
         }
     }
 

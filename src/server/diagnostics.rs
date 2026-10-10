@@ -506,6 +506,34 @@ impl ServerState {
         self.diagnostics.mark_dirty(uri, version);
     }
 
+    /// An edit whose rules a configuration batch in flight will decide: its
+    /// walk waits for that batch, so the old rules never publish for it.
+    pub(super) fn hold_diagnostics(&mut self, uri: &Uri) {
+        self.diagnostics.cancel(uri);
+        self.diagnostics.dirty.remove(uri);
+        self.config.held_edits.insert(uri.clone());
+    }
+
+    /// The hold on an edit ended; walk it like any other edit, with the old
+    /// set in view until the walk replaces it. A document nothing walks is
+    /// cleared instead, or the old set would stay for good.
+    pub(super) fn walk_held_edit(&mut self, uri: &Uri) {
+        let walks = self
+            .config
+            .documents
+            .get(uri)
+            .is_some_and(|configuration| !configuration.rules.is_empty());
+        let Some(version) = self.docs.get(uri).map(|doc| doc.version) else {
+            return;
+        };
+        if walks {
+            self.diagnostics.cancel(uri);
+            self.diagnostics.mark_dirty(uri, version);
+        } else {
+            self.diagnostics_changed_for(uri);
+        }
+    }
+
     /// Forget a document and tell the client so. Its marks would otherwise
     /// outlive it.
     pub(super) fn clear_diagnostics(&mut self, uri: &Uri, version: i32) {
@@ -872,6 +900,89 @@ mod tests {
             panic!("notification");
         };
         assert_eq!(cleared.params["diagnostics"], json!([fix]));
+    }
+
+    /// A modeline edit waits for the batch that decides its rules. The walk is
+    /// marked when that batch commits, and when it is rejected and the
+    /// committed rules stand.
+    #[test]
+    fn a_modeline_edit_is_walked_once_its_batch_settles() {
+        for accepted in [true, false] {
+            let (mut state, uri) =
+                super::super::testing::state_with(super::super::testing::HEARTBEAT);
+            state.client.configuration = true;
+            state.pull_base_config();
+            let generation = state.config.pending.as_ref().unwrap().generation;
+            state.on_did_change(json!({
+                "textDocument": { "uri": uri.as_str(), "version": 2 },
+                "contentChanges": [{
+                    "text": format!("# fix: hover.enabled=false\n{}", super::super::testing::HEARTBEAT)
+                }]
+            }));
+            assert!(state.diagnostics.dirty.is_empty(), "held, not scheduled");
+            assert!(state.config.held_edits.contains(&uri));
+
+            let reply = if accepted {
+                json!([{}])
+            } else {
+                json!([{ "hover": { "enabled": "invalid" } }])
+            };
+            state.on_base_reply(generation, Ok(reply));
+            super::super::testing::settle(&mut state);
+            assert!(state.config.pending.is_none());
+            assert!(!state.config.held_edits.contains(&uri), "{accepted}");
+            assert_eq!(
+                state
+                    .diagnostics
+                    .dirty
+                    .get(&uri)
+                    .map(|(version, _)| *version),
+                Some(2),
+                "walked at the edit's version, accepted={accepted}"
+            );
+            assert_eq!(
+                state.effective_config(&uri).unwrap().hover.enabled,
+                !accepted,
+                "the modeline is in before the walk only when its batch committed"
+            );
+        }
+    }
+
+    /// A body edit to a document in a pending batch waits too: the batch's
+    /// rules may differ, and its commit walks the latest text once.
+    #[test]
+    fn a_body_edit_during_a_pending_batch_is_walked_at_its_commit() {
+        let (mut state, uri) = super::super::testing::state_with(super::super::testing::HEARTBEAT);
+        state.client.configuration = true;
+        state.pull_base_config();
+        let generation = state.config.pending.as_ref().unwrap().generation;
+        let revision = state.config.revisions[&uri];
+        state.on_did_change(json!({
+            "textDocument": { "uri": uri.as_str(), "version": 2 },
+            "contentChanges": [{ "text": "8=FIX.4.4|35=1|" }]
+        }));
+        assert_eq!(state.config.revisions[&uri], revision, "no modeline moved");
+        assert!(state.diagnostics.dirty.is_empty(), "held, not scheduled");
+        assert!(state.config.held_edits.contains(&uri));
+
+        state.on_base_reply(generation, Ok(json!([{ "hover": { "enabled": false } }])));
+        let report = state
+            .loader
+            .reports
+            .recv_timeout(Duration::from_secs(2))
+            .expect("loader report");
+        state.on_configuration_report(report);
+        assert!(state.config.pending.is_none(), "that one batch walked it");
+        assert!(!state.config.held_edits.contains(&uri));
+        assert_eq!(
+            state
+                .diagnostics
+                .dirty
+                .get(&uri)
+                .map(|(version, _)| *version),
+            Some(2)
+        );
+        assert!(!state.effective_config(&uri).unwrap().hover.enabled);
     }
 
     #[test]

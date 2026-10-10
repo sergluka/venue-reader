@@ -574,6 +574,80 @@ fn a_modeline_toggles_and_regrades_each_rule_apart() {
     client.shutdown();
 }
 
+/// An edit that changes the modeline is walked once, under the configuration
+/// the modeline asks for: a client never sees a set the old rules produced.
+#[test]
+fn a_modeline_edit_publishes_once_and_fresh() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    client.did_open(URI, VENUE_LINE, 1);
+    let _ = client.wait_for("textDocument/publishDiagnostics");
+
+    let text = format!("# fix: diagnostics.rules.unknownTag=false\n{VENUE_LINE}");
+    client.did_change_full(URI, &text, 2);
+    let notes = client.drain_notifications(QUIET);
+    let at_two: Vec<&Value> = notes
+        .iter()
+        .filter(|(method, params)| {
+            method == "textDocument/publishDiagnostics"
+                && params["uri"] == URI
+                && params["version"] == 2
+        })
+        .map(|(_, params)| params)
+        .collect();
+    assert_eq!(at_two.len(), 1, "one publish for the edit: {at_two:#?}");
+    assert_eq!(
+        unknown_findings(at_two[0]),
+        [finding("unknownMsgType", 3)],
+        "the first and only set already follows the modeline"
+    );
+    client.shutdown();
+}
+
+/// An edit made while the document's configuration is being pulled waits for
+/// the answer: the latest text is walked once, under the rules it brings.
+#[test]
+fn an_edit_during_a_pull_waits_for_its_rules() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    client.did_open(URI, VENUE_LINE, 1);
+    let _ = client.wait_for("textDocument/publishDiagnostics");
+
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": null }),
+    );
+    let (pull, method, _) = client.recv_server_request();
+    assert_eq!(method, "workspace/configuration");
+    client.did_change_full(URI, &format!("{VENUE_LINE}9000=y|"), 2);
+    let notes = client.drain_notifications(Duration::from_millis(200));
+    assert_eq!(
+        last_publish(&notes, URI),
+        None,
+        "nothing is walked under rules a pull is about to replace"
+    );
+
+    client.reply(
+        pull,
+        json!([{ "diagnostics": { "rules": { "unknownTag": false } } }]),
+    );
+    let notes = client.drain_notifications(QUIET);
+    let at_two: Vec<&Value> = notes
+        .iter()
+        .filter(|(method, params)| {
+            method == "textDocument/publishDiagnostics"
+                && params["uri"] == URI
+                && params["version"] == 2
+        })
+        .map(|(_, params)| params)
+        .collect();
+    assert_eq!(at_two.len(), 1, "one publish for the edit: {at_two:#?}");
+    assert_eq!(unknown_findings(at_two[0]), [finding("unknownMsgType", 3)]);
+    client.shutdown();
+}
+
 /// Hover and the diagnostic say the same thing about one tag.
 #[test]
 fn the_diagnostic_and_hover_agree_on_a_tag() {
