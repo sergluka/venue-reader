@@ -46,8 +46,7 @@ pub fn parse(text: &str, path: &Path) -> Result<ProjectFile, String> {
 }
 
 pub fn parse_toml(text: &str, path: &Path, kind: SourceKind) -> Result<ProjectFile, String> {
-    let parsed: toml::Value =
-        toml::from_str(text).map_err(|error| format!("{}: {error}", path.display()))?;
+    let parsed: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
     let mut value = serde_json::to_value(parsed).map_err(|error| error.to_string())?;
     let files = if kind == SourceKind::Project {
         value
@@ -178,7 +177,7 @@ fn rejected(origin: Origin, severity: Severity, message: &str) -> LoadedFile {
     };
     LoadedFile::Rejected(Warning {
         key: key.into(),
-        message: format!("{}: {message}", origin.source),
+        message: message.into(),
         origin,
         severity,
     })

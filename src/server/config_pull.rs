@@ -639,7 +639,7 @@ impl ServerState {
                     } else {
                         MessageType::Warning
                     },
-                    warning.message.clone(),
+                    format!("{}: {}", warning.origin.source, warning.message),
                 )
             })
             .collect();
