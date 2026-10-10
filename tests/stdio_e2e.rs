@@ -208,9 +208,18 @@ fn without_xdg_config_home_the_personal_file_comes_from_the_home_default() {
         client.stderr()
     );
 
-    let personal_file = client.personal_file().display().to_string();
+    // The server names the file by the URI of its canonical path. Windows can
+    // hand the test an 8.3 short name for the temp directory, so the path the
+    // test wrote to is not always the one the server prints.
+    let canonical = client
+        .personal_file()
+        .canonicalize()
+        .expect("personal file exists");
+    let expected = lsp_types::Uri::from_file_path(canonical)
+        .expect("file URI")
+        .to_string();
     let stderr = client.stderr();
-    assert!(stderr.contains(&personal_file), "{stderr}");
+    assert!(stderr.contains(&expected), "{stderr}");
 }
 
 fn replace_marker_with_raw_byte(body: &mut Vec<u8>, marker: &[u8], byte: u8) {
