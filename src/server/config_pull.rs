@@ -852,8 +852,11 @@ impl ServerState {
 ///
 /// The merge applies the enable setting, so a batch that enables modelines must
 /// already carry the parsed layer rather than require a second pass.
+/// Only a file document carries modelines. The scheme decides, not whether the
+/// path converts: `file:///a.fix` has no drive letter, so on Windows it
+/// converts to nothing, yet its text is as much a file as any other.
 fn modeline_layer(document: &crate::document::Document, uri: &Uri) -> SettingsLayer {
-    if uri.to_file_path().is_err() {
+    if uri.scheme() != "file" {
         return SettingsLayer::new(overrides::Origin::new(SourceKind::Modeline, uri.as_str()));
     }
     let count = document.content_lines();
@@ -935,4 +938,30 @@ fn configuration_diagnostics(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ctx::Ctx;
+    use crate::document::Document;
+
+    /// `file:///a.fix` has no drive letter, so on Windows it converts to no
+    /// path; its modeline is read all the same, and a non-file scheme's is not.
+    #[test]
+    fn a_file_document_without_a_drive_letter_keeps_its_modeline() {
+        let document = Document::open(
+            b"# fix: hover.enabled=false\n8=FIX.4.4|35=0|",
+            1,
+            Ctx::for_test("FIX.4.4"),
+        );
+        let file = Uri::parse("file:///a.fix").unwrap();
+        assert!(modeline_layer(&document, &file)
+            .get("hover.enabled")
+            .is_some());
+        let untitled = Uri::parse("untitled:a.fix").unwrap();
+        assert!(modeline_layer(&document, &untitled)
+            .get("hover.enabled")
+            .is_none());
+    }
 }

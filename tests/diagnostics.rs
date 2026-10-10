@@ -447,6 +447,26 @@ fn unknown_findings(publish: &Value) -> Vec<(String, u64, String)> {
     found
 }
 
+/// Every notification in arrival order, compact enough for an assertion
+/// message: the sequence is what a failure on another machine has to show.
+fn trace(notes: &[(String, Value)]) -> String {
+    notes
+        .iter()
+        .map(|(method, params)| match method.as_str() {
+            "textDocument/publishDiagnostics" => format!(
+                "publish v{} {:?}",
+                params["version"],
+                unknown_findings(params)
+            ),
+            "window/logMessage" | "window/showMessage" => {
+                format!("{method} {}", params["message"])
+            }
+            _ => method.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn finding(code: &str, severity: u64) -> (String, u64, String) {
     (code.to_owned(), severity, code.to_owned())
 }
@@ -567,9 +587,15 @@ fn a_modeline_toggles_and_regrades_each_rule_apart() {
     ] {
         let text = format!("# fix: diagnostics.rules.{setting}\n{VENUE_LINE}");
         client.did_change_full(URI, &text, version);
-        let last = last_publish(&client.drain_notifications(QUIET), URI).expect("published");
-        assert_eq!(last["version"], version, "{setting}");
-        assert_eq!(unknown_findings(&last), expected, "{setting}");
+        let notes = client.drain_notifications(QUIET);
+        let last = last_publish(&notes, URI).expect("published");
+        assert_eq!(last["version"], version, "{setting}\n{}", trace(&notes));
+        assert_eq!(
+            unknown_findings(&last),
+            expected,
+            "{setting}\n{}",
+            trace(&notes)
+        );
     }
     client.shutdown();
 }
@@ -596,11 +622,17 @@ fn a_modeline_edit_publishes_once_and_fresh() {
         })
         .map(|(_, params)| params)
         .collect();
-    assert_eq!(at_two.len(), 1, "one publish for the edit: {at_two:#?}");
+    assert_eq!(
+        at_two.len(),
+        1,
+        "one publish for the edit\n{}",
+        trace(&notes)
+    );
     assert_eq!(
         unknown_findings(at_two[0]),
         [finding("unknownMsgType", 3)],
-        "the first and only set already follows the modeline"
+        "the first and only set already follows the modeline\n{}",
+        trace(&notes)
     );
     client.shutdown();
 }
