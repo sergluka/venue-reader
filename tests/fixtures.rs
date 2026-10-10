@@ -11,7 +11,14 @@ mod harness;
 use fix_lsp::codec::LineAnalysis;
 use fix_lsp::config::Diagnostics;
 use fix_lsp::ctx::analyze;
-use fix_lsp::rules::{integrity, LineCtx, Registry};
+use fix_lsp::rules::{integrity, LineCtx, Registry, Scope};
+
+/// The one rule a repair answers to.
+const INTEGRITY: Scope = Scope {
+    label: None,
+    count_from: None,
+    only: Some("integrity"),
+};
 
 /// Totals, so a loop that quietly walks nothing cannot pass. They are
 /// tokenizer and rule facts — no dictionary decides them, so a dictionary
@@ -68,11 +75,7 @@ fn a_repair_is_offered_for_exactly_the_lines_that_report_one() {
 
     for (at, bytes) in harness::fixture_lines() {
         let analysis = analyze(&bytes, &ctx);
-        let reports = rules
-            .check_line(&bytes, &analysis)
-            .into_iter()
-            .filter(|diag| diag.rule == "integrity")
-            .count();
+        let reports = rules.check(&bytes, &analysis, &INTEGRITY).diags.len();
         let repair = analysis
             .message()
             .and_then(|message| integrity::repair(&LineCtx::new(&bytes, message)));
@@ -107,9 +110,9 @@ fn a_repaired_line_has_nothing_left_to_repair() {
 
         let analysis = analyze(&repaired, &ctx);
         let left: Vec<&str> = rules
-            .check_line(&repaired, &analysis)
+            .check(&repaired, &analysis, &INTEGRITY)
+            .diags
             .into_iter()
-            .filter(|diag| diag.rule == "integrity")
             .map(|diag| diag.code)
             .collect();
         assert!(
@@ -143,11 +146,7 @@ fn a_line_nothing_reports_on_agrees_with_its_own_trailer() {
         let Some(message) = analysis.message() else {
             continue;
         };
-        if rules
-            .check_line(&bytes, &analysis)
-            .iter()
-            .any(|diag| diag.rule == "integrity")
-        {
+        if !rules.check(&bytes, &analysis, &INTEGRITY).diags.is_empty() {
             continue;
         }
         let written = |tag: u32| {

@@ -249,7 +249,7 @@ fn malformed_params_are_an_error() {
 
 /// A desk's own FIX.4.4 dictionary: one standard tag, one FIX.5.0 tag, one of
 /// its own. Written by the test, so the shared fixtures stay as they are.
-const DESK_44: &str = "<fix type='FIX' major='4' minor='4' servicepack='0'><fields>\
+const DESK_44: &str = "<fix type='FIX' major='4' minor='4' servicepack='0'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
 <field number='55' name='Symbol' type='STRING'/>\
 <field number='1328' name='RejectText' type='STRING'/>\
 <field number='20001' name='DeskMode' type='INT'><value enum='1' description='ALPHA'/></field>\
@@ -343,4 +343,27 @@ fn a_flat_reference_url_still_links_a_custom_tag() {
         "{custom}"
     );
     client.shutdown();
+}
+
+/// NoHops(627) is a header group: a hop's field names its entry under FIX.4.4
+/// and under `8=FIXT.1.1`, whose header comes from FIXT11.
+#[test]
+fn a_field_in_a_header_group_names_its_group_path() {
+    for line in [
+        "8=FIX.4.4|35=0|627=2|628=A|630=1|628=B|630=2|",
+        "8=FIXT.1.1|35=0|627=2|628=A|630=1|628=B|630=2|",
+    ] {
+        let mut client = open(line);
+        let second = line.find("628=B").expect("the second hop") as u32;
+        let markdown = at(&mut client, second)["contents"]["value"]
+            .as_str()
+            .expect("markdown")
+            .to_owned();
+        assert!(markdown.starts_with("**HopCompID** (628)"), "{markdown}");
+        assert!(
+            markdown.contains("Group: `NoHops/2/HopCompID`"),
+            "{line}: {markdown}"
+        );
+        client.shutdown();
+    }
 }

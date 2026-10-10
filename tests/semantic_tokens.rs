@@ -293,3 +293,43 @@ fn the_switch_gates_the_answer_and_not_the_capability() {
     assert_eq!(answer, Value::Null);
     client.shutdown();
 }
+
+/// NoHops(627) is a header group under FIX.4.4 and under `8=FIXT.1.1`: its
+/// counter carries `count`, and a hop's tag sits in the first entry.
+#[test]
+fn a_header_group_counter_counts_and_its_entry_is_marked() {
+    for line in [
+        "8=FIX.4.4|35=0|627=1|628=A|",
+        "8=FIXT.1.1|35=0|627=1|628=A|",
+    ] {
+        let mut client = TestClient::start();
+        client.initialize_caps(caps("full"));
+        client.did_open(URI, line, 1);
+        let answer = client
+            .request(
+                "textDocument/semanticTokens/full",
+                json!({ "textDocument": { "uri": URI } }),
+            )
+            .expect("answered");
+        let data = integers(&answer["data"]);
+        let mut column = 0;
+        let mut by_column = Vec::new();
+        for token in data.chunks(5) {
+            column += token[1];
+            by_column.push((column, token[3], token[4]));
+        }
+        // Modifier bits in legend order: header 1<<1, session 1<<3, count
+        // 1<<6, group1a 1<<7. Type 0 is `property`.
+        let counter = line.find("627").expect("the counter") as u64;
+        let hop = line.find("628").expect("a hop") as u64;
+        assert!(
+            by_column.contains(&(counter, 0, (1 << 1) | (1 << 3) | (1 << 6))),
+            "{line}: {by_column:?}"
+        );
+        assert!(
+            by_column.contains(&(hop, 0, (1 << 1) | (1 << 3) | (1 << 7))),
+            "{line}: {by_column:?}"
+        );
+        client.shutdown();
+    }
+}

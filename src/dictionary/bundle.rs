@@ -1,8 +1,8 @@
 //! Assembles the bundled dictionaries: QuickFIX/J structure per version, the
 //! FIXT.1.1 session layer under its documented alias, and presentation metadata
 //! projected from FIX Orchestra. Shared with `build.rs` via `#[path]`, so this
-//! file may depend only on `std`, `roxmltree`, `super::model`, `super::parse`
-//! and `crate::tag`.
+//! file may depend only on `std`, `roxmltree`, `super::model`, `super::parse`,
+//! `super::schema` and `crate::tag`.
 //!
 //! The Orchestra projection is presentation for the version tables, and also
 //! the second witness on what is standard: `standard.rs` weighs it against the
@@ -10,8 +10,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::model::{EnumDef, FieldDef, GroupDef, ParsedDict};
+use super::model::{EnumDef, FieldDef, GroupDef, MessageDef, ParsedDict};
 use super::parse::{attr, parse_doc, ParseError, Source};
+use super::schema::{pack, PackError, ScopeDef, NONE};
 use crate::tag;
 
 /// Protocol order for comparing Orchestra pedigree against a bundled version.
@@ -290,13 +291,42 @@ pub fn enrich(dict: &mut ParsedDict, meta: &Metadata, version: &str) {
     }
 }
 
+/// The version `FIXT.1.1` resolves to, which carries the session layer.
+const SESSION_HOST: &str = "FIX.5.0SP2";
+
+/// Bundled versions that keep QuickFIX/J's empty session blocks until FIX 5
+/// handling, so checks that need the header or the message table stay silent.
+const WITHOUT_SESSION_LAYER: [&str; 2] = ["FIX.5.0", "FIX.5.0SP1"];
+
+/// One bundled version, ready to be generated or compared.
+#[derive(Debug)]
+pub struct Assembled {
+    pub dict: ParsedDict,
+    pub session_layer: bool,
+}
+
+/// The one pipeline from a parsed bundled file to its tables: the session
+/// layer folded into FIX.5.0SP2, then the metadata.
+pub fn assemble(
+    version: &str,
+    mut dict: ParsedDict,
+    session: &ParsedDict,
+    meta: &Metadata,
+) -> Result<Assembled, PackError> {
+    if version == SESSION_HOST {
+        merge_session(&mut dict, session)?;
+    }
+    enrich(&mut dict, meta, version);
+    Ok(Assembled {
+        dict,
+        session_layer: !WITHOUT_SESSION_LAYER.contains(&version),
+    })
+}
+
 /// Folds the FIXT.1.1 session layer into an application dictionary: QuickFIX/J
 /// keeps the header, trailer and admin messages only in `FIXT11.xml`, while
 /// `8=FIXT.1.1` resolves to the application tables. What `app` defines wins.
-pub fn merge_session(app: &mut ParsedDict, session: &ParsedDict) {
-    app.header = session.header.clone();
-    app.trailer = session.trailer.clone();
-
+pub fn merge_session(app: &mut ParsedDict, session: &ParsedDict) -> Result<(), PackError> {
     // Looked up before anything is appended: the lookup needs sorted fields.
     let mut added = Vec::new();
     for field in &session.fields {
@@ -317,39 +347,82 @@ pub fn merge_session(app: &mut ParsedDict, session: &ParsedDict) {
     app.fields.append(&mut added);
     app.fields.sort_by_key(|f| f.tag);
 
-    let mut index: HashMap<GroupDef, u16> = app
+    let mut defs = app.schema.as_schema().to_defs();
+    let theirs = session.schema.as_schema().to_defs();
+    let mut index: HashMap<(GroupDef, ScopeDef), u16> = HashMap::new();
+    for (i, key) in app
         .groups
         .iter()
+        .cloned()
+        .zip(defs.groups.iter().cloned())
         .enumerate()
-        .map(|(i, g)| (g.clone(), i as u16))
-        .collect();
-    // Session groups only ever nest earlier ones, so one ordered pass remaps.
-    let mut remap = Vec::with_capacity(session.groups.len());
-    for group in &session.groups {
-        let mut def = group.clone();
-        def.nested = group.nested.iter().map(|&n| remap[n as usize]).collect();
-        let idx = *index.entry(def.clone()).or_insert_with(|| {
-            app.groups.push(def);
-            (app.groups.len() - 1) as u16
-        });
-        remap.push(idx);
+    {
+        // The arena holds fewer than NONE groups, which `pack` checked.
+        let group = u16::try_from(i).expect("an arena index fits u16");
+        index.entry(key).or_insert(group);
     }
+    // Session groups only ever nest earlier ones, so one ordered pass remaps.
+    let mut remap: Vec<u16> = Vec::with_capacity(session.groups.len());
+    for (group, scope) in session.groups.iter().zip(&theirs.groups) {
+        let key = (group.clone(), remapped(scope, &remap));
+        let at = match index.get(&key) {
+            Some(&at) => at,
+            None => {
+                let at = u16::try_from(app.groups.len())
+                    .ok()
+                    .filter(|&at| at != NONE)
+                    .ok_or(PackError::Overflow {
+                        what: "groups",
+                        max: usize::from(NONE),
+                        scope: None,
+                    })?;
+                app.groups.push(key.0.clone());
+                defs.groups.push(key.1.clone());
+                index.insert(key, at);
+                at
+            }
+        };
+        remap.push(at);
+    }
+    defs.header = remapped(&theirs.header, &remap);
+    defs.trailer = remapped(&theirs.trailer, &remap);
 
     let own_types: HashSet<String> = app.messages.iter().map(|m| m.msg_type.clone()).collect();
-    for message in &session.messages {
+    let mut messages: Vec<(MessageDef, ScopeDef)> = app
+        .messages
+        .drain(..)
+        .zip(std::mem::take(&mut defs.messages))
+        .collect();
+    for (message, scope) in session.messages.iter().zip(&theirs.messages) {
         if !own_types.contains(&message.msg_type) {
-            let mut own = message.clone();
-            own.groups = message.groups.iter().map(|&g| remap[g as usize]).collect();
-            app.messages.push(own);
+            messages.push((message.clone(), remapped(scope, &remap)));
         }
     }
-    app.messages.sort_by(|a, b| a.msg_type.cmp(&b.msg_type));
+    messages.sort_by(|a, b| a.0.msg_type.cmp(&b.0.msg_type));
+    (app.messages, defs.messages) = messages.into_iter().unzip();
+
+    app.faults.extend(session.faults.iter().cloned());
+    app.faults.sort();
+    app.faults.dedup();
+    app.schema = pack(&defs)?;
+    Ok(())
+}
+
+/// A session scope with its group indices moved to the application's arena.
+fn remapped(scope: &ScopeDef, remap: &[u16]) -> ScopeDef {
+    let mut scope = scope.clone();
+    for member in &mut scope.members {
+        member.group = member.group.map(|group| remap[usize::from(group)]);
+    }
+    scope
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dictionary::model::{Datatype, EnumDef, FieldDef, MessageDef};
+    use crate::dictionary::schema::{ComponentDef, MemberDef, Schema, SchemaDefs, Scope};
+    use std::borrow::Cow;
     use std::path::PathBuf;
 
     fn field(tag: u32, values: &[&str]) -> FieldDef {
@@ -546,7 +619,7 @@ mod tests {
             fields: vec![field(1, &["Z"])],
             ..ParsedDict::default()
         };
-        merge_session(&mut app, &session);
+        merge_session(&mut app, &session).unwrap();
         enrich(&mut app, &metadata(META_OWN), "FIX.5.0SP2");
         let values: Vec<&str> = app.fields[0]
             .enums
@@ -587,43 +660,158 @@ mod tests {
         assert_eq!(d.fields[0].added, "FIX.4.0");
     }
 
+    // --- The session merge, on hand-written schemas -----------------------
+
+    fn plain(tag: u32) -> MemberDef {
+        MemberDef {
+            tag,
+            group: None,
+            component: None,
+            required: false,
+            ambiguous: false,
+            repeating: false,
+        }
+    }
+
+    fn required(tag: u32) -> MemberDef {
+        MemberDef {
+            required: true,
+            ..plain(tag)
+        }
+    }
+
+    fn opens(tag: u32, group: u16) -> MemberDef {
+        MemberDef {
+            group: Some(group),
+            ..plain(tag)
+        }
+    }
+
+    fn scope(members: Vec<MemberDef>, components: Vec<ComponentDef>) -> ScopeDef {
+        ScopeDef {
+            members,
+            components,
+        }
+    }
+
+    fn optional_component(name: &str) -> ComponentDef {
+        ComponentDef {
+            name: name.into(),
+            parent: None,
+            required: false,
+        }
+    }
+
+    fn group(name: &str, count_tag: u32, delimiter_tag: u32) -> GroupDef {
+        GroupDef {
+            name: name.into(),
+            count_tag,
+            delimiter_tag,
+        }
+    }
+
+    fn message(msg_type: &str, name: &str) -> MessageDef {
+        MessageDef {
+            msg_type: msg_type.into(),
+            name: name.into(),
+            ..MessageDef::default()
+        }
+    }
+
+    /// Every tag `scope` reaches, nested groups included, sorted.
+    fn reached(schema: Schema<'_>, scope: Scope<'_>) -> Vec<u32> {
+        let mut tags = schema.tags.to_vec();
+        tags.sort_unstable();
+        tags.dedup();
+        tags.retain(|&tag| scope.reaches(&schema, tag));
+        tags
+    }
+
+    /// A dictionary as a parser would leave it, its schema packed from `defs`.
+    fn with_schema(
+        groups: Vec<(GroupDef, ScopeDef)>,
+        messages: Vec<(MessageDef, ScopeDef)>,
+        header: ScopeDef,
+        trailer: ScopeDef,
+    ) -> ParsedDict {
+        let (groups, group_scopes): (Vec<_>, Vec<_>) = groups.into_iter().unzip();
+        let (messages, message_scopes): (Vec<_>, Vec<_>) = messages.into_iter().unzip();
+        let defs = SchemaDefs {
+            header,
+            trailer,
+            messages: message_scopes,
+            groups: group_scopes,
+        };
+        ParsedDict {
+            groups,
+            messages,
+            schema: pack(&defs).unwrap(),
+            ..ParsedDict::default()
+        }
+    }
+
+    fn msg_types(dict: &ParsedDict) -> Vec<&str> {
+        dict.messages.iter().map(|m| m.msg_type.as_str()).collect()
+    }
+
     #[test]
     fn session_layer_is_folded_in_without_overriding_the_application() {
-        let group = |count_tag, nested: Vec<u16>| GroupDef {
-            name: format!("G{count_tag}"),
-            count_tag,
-            delimiter_tag: count_tag + 1,
-            members: vec![count_tag + 1],
-            nested,
-        };
-        let mut app = dict();
-        app.groups = vec![group(50, vec![])];
-        let session = ParsedDict {
-            header: vec![8, 9, 35],
-            trailer: vec![10],
-            fields: vec![field(1, &["A", "B"]), field(35, &["A"])],
-            groups: vec![group(50, vec![]), group(60, vec![0])],
-            messages: vec![
-                MessageDef {
-                    msg_type: "A".into(),
-                    name: "Logon".into(),
-                    groups: vec![1],
-                    ..MessageDef::default()
-                },
-                MessageDef {
-                    msg_type: "D".into(),
-                    name: "SessionD".into(),
-                    ..MessageDef::default()
-                },
-            ],
-            ..ParsedDict::default()
-        };
-        merge_session(&mut app, &session);
-
-        assert_eq!(
-            (app.header.as_slice(), app.trailer.as_slice()),
-            (&[8, 9, 35][..], &[10][..])
+        // NoAllocs(78) entries: AllocAccount(79).
+        let no_allocs = || (group("NoAllocs", 78, 79), scope(vec![plain(79)], vec![]));
+        let mut app = with_schema(
+            vec![no_allocs()],
+            vec![(
+                message("D", "NewOrderSingle"),
+                scope(
+                    vec![
+                        required(11),
+                        MemberDef {
+                            component: Some(0),
+                            ..opens(78, 0)
+                        },
+                    ],
+                    vec![optional_component("PreAllocGrp")],
+                ),
+            )],
+            ScopeDef::default(),
+            ScopeDef::default(),
         );
+        app.fields = vec![field(1, &["A"])];
+        let mut session = with_schema(
+            vec![
+                // NoHops(627): HopCompID(628)
+                (group("NoHops", 627, 628), scope(vec![plain(628)], vec![])),
+                no_allocs(),
+                // NoMsgTypes(384): RefMsgType(372), NoAllocs(78)
+                (
+                    group("NoMsgTypes", 384, 372),
+                    scope(vec![plain(372), opens(78, 1)], vec![]),
+                ),
+            ],
+            vec![
+                (
+                    message("A", "Logon"),
+                    scope(vec![required(98), opens(384, 2)], vec![]),
+                ),
+                (message("D", "SessionD"), scope(vec![plain(58)], vec![])),
+            ],
+            scope(
+                vec![
+                    required(8),
+                    required(9),
+                    required(35),
+                    MemberDef {
+                        component: Some(0),
+                        ..opens(627, 0)
+                    },
+                ],
+                vec![optional_component("HopGrp")],
+            ),
+            scope(vec![required(10)], vec![]),
+        );
+        session.fields = vec![field(1, &["A", "B"]), field(35, &["A"])];
+        merge_session(&mut app, &session).unwrap();
+
         let tags: Vec<u32> = app.fields.iter().map(|f| f.tag).collect();
         assert_eq!(tags, [1, 35]);
         let values: Vec<&str> = app.fields[0]
@@ -634,11 +822,189 @@ mod tests {
         assert_eq!(values, ["A", "B"]);
         assert_eq!(app.fields[0].enums[0].name, "VA");
 
-        assert_eq!(app.groups.len(), 2, "the shared group is interned once");
-        assert_eq!(app.groups[1].nested, [0]);
-        let logon = app.message("A").unwrap();
-        assert_eq!(logon.groups, [1]);
+        // The shared NoAllocs(78) keeps the application's index 0; the others
+        // follow it in the session's arena order.
+        assert_eq!(
+            app.groups,
+            [
+                group("NoAllocs", 78, 79),
+                group("NoHops", 627, 628),
+                group("NoMsgTypes", 384, 372),
+            ],
+            "the shared group is interned once"
+        );
+        assert_eq!(
+            app.schema.as_schema().to_defs(),
+            SchemaDefs {
+                header: scope(
+                    vec![
+                        required(8),
+                        required(9),
+                        required(35),
+                        MemberDef {
+                            component: Some(0),
+                            ..opens(627, 1)
+                        },
+                    ],
+                    vec![optional_component("HopGrp")],
+                ),
+                trailer: scope(vec![required(10)], vec![]),
+                messages: vec![
+                    // Logon, from the session
+                    scope(vec![required(98), opens(384, 2)], vec![]),
+                    // NewOrderSingle, the application's own
+                    scope(
+                        vec![
+                            required(11),
+                            MemberDef {
+                                component: Some(0),
+                                ..opens(78, 0)
+                            },
+                        ],
+                        vec![optional_component("PreAllocGrp")],
+                    ),
+                ],
+                groups: vec![
+                    scope(vec![plain(79)], vec![]),
+                    scope(vec![plain(628)], vec![]),
+                    scope(vec![plain(372), opens(78, 0)], vec![]),
+                ],
+            }
+        );
+        assert_eq!(msg_types(&app), ["A", "D"]);
+        let schema = app.schema.as_schema();
+        let logon = schema.message(0);
+        assert_eq!(
+            logon
+                .groups()
+                .map(|(_, member)| member.group())
+                .collect::<Vec<_>>(),
+            [Some(2)]
+        );
         assert_eq!(app.message("D").unwrap().name, "NewOrderSingle");
+        assert_eq!(
+            app.schema.names,
+            [Cow::<str>::Borrowed("HopGrp"), Cow::Borrowed("PreAllocGrp")],
+            "re-interned in scope order: header, trailer, messages, groups"
+        );
+        assert_eq!(
+            (
+                reached(schema, schema.header()),
+                reached(schema, schema.trailer())
+            ),
+            (vec![8, 9, 35, 627, 628], vec![10])
+        );
+    }
+
+    /// Parity through `assemble` cannot prove this: both sides would merge alike.
+    #[test]
+    fn session_messages_sort_in_between_application_messages() {
+        let mut app = with_schema(
+            vec![],
+            vec![
+                (
+                    message("8", "ExecutionReport"),
+                    scope(vec![required(37)], vec![]),
+                ),
+                (
+                    message("D", "NewOrderSingle"),
+                    scope(vec![required(11)], vec![]),
+                ),
+            ],
+            ScopeDef::default(),
+            ScopeDef::default(),
+        );
+        let session = with_schema(
+            vec![],
+            vec![
+                (message("0", "Heartbeat"), scope(vec![plain(112)], vec![])),
+                (message("5", "Logout"), scope(vec![plain(58)], vec![])),
+                (message("A", "Logon"), scope(vec![required(98)], vec![])),
+            ],
+            ScopeDef::default(),
+            ScopeDef::default(),
+        );
+        merge_session(&mut app, &session).unwrap();
+        assert_eq!(msg_types(&app), ["0", "5", "8", "A", "D"]);
+        assert_eq!(
+            app.schema.as_schema().to_defs().messages,
+            [
+                // Heartbeat: TestReqID(112)
+                scope(vec![plain(112)], vec![]),
+                // Logout: Text(58)
+                scope(vec![plain(58)], vec![]),
+                // ExecutionReport: OrderID(37)
+                scope(vec![required(37)], vec![]),
+                // Logon: HeartBtInt(108) is not needed to tell them apart
+                scope(vec![required(98)], vec![]),
+                // NewOrderSingle: ClOrdID(11)
+                scope(vec![required(11)], vec![]),
+            ]
+        );
+    }
+
+    /// NoHops(627) from the session needs one arena index past the application's.
+    fn merging_one_group_into(groups: usize) -> (ParsedDict, Result<(), PackError>) {
+        let mut app = with_schema(
+            vec![(GroupDef::default(), ScopeDef::default()); groups],
+            vec![(message("D", "NewOrderSingle"), ScopeDef::default())],
+            ScopeDef::default(),
+            ScopeDef::default(),
+        );
+        let session = with_schema(
+            vec![(group("NoHops", 627, 628), scope(vec![plain(628)], vec![]))],
+            vec![],
+            scope(vec![opens(627, 0)], vec![]),
+            ScopeDef::default(),
+        );
+        let merged = merge_session(&mut app, &session);
+        (app, merged)
+    }
+
+    #[test]
+    fn the_remap_refuses_a_group_index_that_would_be_none() {
+        let (app, merged) = merging_one_group_into(65_534);
+        assert_eq!(merged, Ok(()));
+        assert_eq!(
+            app.schema.as_schema().to_defs().header,
+            scope(vec![opens(627, 65_534)], vec![])
+        );
+
+        let (_, merged) = merging_one_group_into(65_535);
+        assert_eq!(
+            merged,
+            Err(PackError::Overflow {
+                what: "groups",
+                max: 65_535,
+                scope: None,
+            })
+        );
+    }
+
+    #[test]
+    fn the_merge_refuses_more_messages_than_an_index_can_hold() {
+        let mut app = with_schema(
+            vec![],
+            (0..65_535)
+                .map(|i| (message(&format!("U{i:05}"), "Custom"), ScopeDef::default()))
+                .collect(),
+            ScopeDef::default(),
+            ScopeDef::default(),
+        );
+        let session = with_schema(
+            vec![],
+            vec![(message("0", "Heartbeat"), ScopeDef::default())],
+            ScopeDef::default(),
+            ScopeDef::default(),
+        );
+        assert_eq!(
+            merge_session(&mut app, &session),
+            Err(PackError::Overflow {
+                what: "messages",
+                max: 65_535,
+                scope: None,
+            })
+        );
     }
 
     /// A pack is applied on top of its date and ships in the next release, so

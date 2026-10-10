@@ -52,7 +52,7 @@ fn session_dictionary_commands_preserve_project_load_warnings_until_refresh() {
     // Commands reuse project definitions, even after the file has been fixed.
     fixture.write(
         "bad.xml",
-        "<fix major='4' minor='4'><fields><field number='8' name='BeginString' type='STRING'/></fields></fix>",
+        "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields><field number='8' name='BeginString' type='STRING'/></fields></fix>",
     );
     for selected in ["FIX.4.4", "FIX.4.2"] {
         client

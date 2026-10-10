@@ -4,6 +4,7 @@
 use super::packed::Packed16;
 use super::tokenize::{tokenize, FieldSpan, LineKind, LineTokens};
 use super::{Field, GroupInstance, LineAnalysis, MessageAnalysis, NO_GROUP};
+use crate::dictionary::schema::Schema;
 use crate::dictionary::{Dict, GroupIdx, MsgIdx};
 use std::sync::Arc;
 
@@ -58,6 +59,7 @@ pub fn decode_tokenized(
         Annotator {
             bytes,
             dict,
+            schema: dict.schema(),
             fields: &mut fields,
             groups: &mut groups,
         }
@@ -104,6 +106,7 @@ fn first_value<'a>(bytes: &'a [u8], fields: &[Field], tag: u32) -> Option<&'a [u
 struct Annotator<'a> {
     bytes: &'a [u8],
     dict: &'a Dict,
+    schema: Schema<'a>,
     fields: &'a mut [Field],
     groups: &'a mut Vec<GroupInstance>,
 }
@@ -111,22 +114,23 @@ struct Annotator<'a> {
 impl Annotator<'_> {
     /// A top-level count tag opens a group; anything else is skipped.
     fn run(&mut self, message: MsgIdx) {
-        // Gathered once per line, not searched per field: a message declares
-        // up to 17 top-level groups (FIX.5.0SP2 ExecutionReport; 10 in 4.4), so
-        // re-deriving the message view, the group and its count tag for each of
-        // ~62 fields costs far more than the one small allocation it saves.
-        let top: Vec<(u32, GroupIdx)> = self
-            .dict
-            .message(message)
-            .groups()
-            .map(|idx| (self.dict.group(idx).count_tag(), idx))
-            .collect();
-
+        // The message comes first, so its own group wins a counter the header
+        // or trailer also declares.
+        let scopes = [
+            self.schema.message(message.0),
+            self.schema.header(),
+            self.schema.trailer(),
+        ];
         let mut at = 0;
         while at < self.fields.len() {
             let tag = self.fields[at].tag;
-            match top.iter().find(|(count_tag, _)| *count_tag == tag) {
-                Some((_, group)) => at = self.group(*group, at, NO_GROUP, 1),
+            let opened = scopes
+                .iter()
+                .flat_map(|scope| scope.groups())
+                .find(|(count_tag, _)| *count_tag == tag)
+                .and_then(|(_, member)| member.group());
+            match opened {
+                Some(group) => at = self.group(GroupIdx(group), at, NO_GROUP, 1),
                 None => at += 1,
             }
         }
@@ -169,11 +173,8 @@ impl Annotator<'_> {
     }
 
     fn entry(&mut self, group: GroupIdx, start: usize, instance: u32, depth: u16) -> (usize, bool) {
-        // Both are loop-invariant; `members` is a linear scan, so it is only
-        // consulted once the nested lookup has come up empty.
-        let view = self.dict.group(group);
-        let delimiter = view.delimiter_tag();
-        let members = view.members();
+        let scope = self.schema.group(group.0);
+        let delimiter = self.dict.group(group).delimiter_tag();
 
         let mut at = start;
         let mut consumed = false;
@@ -182,21 +183,16 @@ impl Annotator<'_> {
             if consumed && tag == delimiter {
                 break;
             }
-            let nested = view
-                .nested()
-                .find(|idx| self.dict.group(*idx).count_tag() == tag);
-            if let Some(nested) = nested {
-                // The nested count tag belongs to *this* entry, not to its own.
-                self.fields[at].set_group(instance);
-                at = self.group(nested, at, instance, depth + 1);
-                consumed = true;
-            } else if members.contains(&tag) {
-                self.fields[at].set_group(instance);
-                at += 1;
-                consumed = true;
-            } else {
+            let Some(member) = scope.find(tag) else {
                 break;
-            }
+            };
+            // A nested count tag belongs to *this* entry, not to its own.
+            self.fields[at].set_group(instance);
+            at = match member.group() {
+                Some(nested) => self.group(GroupIdx(nested), at, instance, depth + 1),
+                None => at + 1,
+            };
+            consumed = true;
         }
         (at, consumed)
     }
@@ -513,6 +509,209 @@ mod tests {
         assert_eq!(paths[8].as_deref(), Some("NoRelatedSym/2/Symbol"));
     }
 
+    fn custom(xml: &str) -> Dict {
+        use crate::dictionary::parse::{fixtures::source, parse_quickfix_bytes};
+        let parsed = parse_quickfix_bytes(&source("custom.xml", xml.to_owned())).unwrap();
+        Dict::Owned(Arc::new(parsed))
+    }
+
+    fn decode_with(dict: &Dict, line: &str) -> MessageAnalysis {
+        expect_message(decode(line.as_bytes(), dict, &Arc::from("FIX.4.4")))
+    }
+
+    /// NoHops(627) sits in FIX.4.4's header, so a Heartbeat enters it although
+    /// its body declares no group.
+    #[test]
+    fn the_annotator_enters_header_groups() {
+        let line = "8=FIX.4.4|35=0|627=2|628=A|630=1|628=B|630=2|112=T";
+        let analysis = decode_as_44(line);
+        assert_eq!(analysis.groups.len(), 2, "two NoHops entries");
+        assert_eq!(
+            paths(&analysis, line),
+            [
+                None,
+                None,
+                None,
+                Some("NoHops/1/HopCompID".to_owned()),
+                Some("NoHops/1/HopRefID".to_owned()),
+                Some("NoHops/2/HopCompID".to_owned()),
+                Some("NoHops/2/HopRefID".to_owned()),
+                None,
+            ]
+        );
+    }
+
+    /// `8=FIXT.1.1` reads FIX.5.0SP2's tables, whose header comes from FIXT11.
+    #[test]
+    fn the_annotator_enters_header_groups_under_fixt() {
+        let dict = Dict::Static(bundled(Version::Fixt11));
+        let line = "8=FIXT.1.1|35=0|627=1|628=A|629=20260101-00:00:00|49=X";
+        let analysis = expect_message(decode(line.as_bytes(), &dict, &Arc::from("FIXT.1.1")));
+        assert_eq!(
+            paths(&analysis, line),
+            [
+                None,
+                None,
+                None,
+                Some("NoHops/1/HopCompID".to_owned()),
+                Some("NoHops/1/HopSendingTime".to_owned()),
+                None,
+            ]
+        );
+    }
+
+    const SESSION_GROUPS: &str = "<fix major='4' minor='4'>\
+        <header><field name='BeginString' required='Y'/><field name='MsgType' required='Y'/>\
+        <group name='NoPartyIDs' required='N'><field name='PartyID' required='N'/></group>\
+        </header>\
+        <trailer><group name='NoHops' required='N'><field name='HopCompID' required='N'/></group>\
+        <field name='CheckSum' required='Y'/></trailer>\
+        <messages>\
+        <message name='Heartbeat' msgtype='0' msgcat='admin'/>\
+        <message name='NewOrderSingle' msgtype='D' msgcat='app'>\
+        <group name='NoPartyIDs' required='N'><field name='PartyID' required='N'/>\
+        <field name='PartyRole' required='N'/></group>\
+        <group name='NoAllocs' required='N'/>\
+        </message>\
+        </messages>\
+        <fields>\
+        <field number='8' name='BeginString' type='STRING'/>\
+        <field number='10' name='CheckSum' type='STRING'/>\
+        <field number='35' name='MsgType' type='STRING'/>\
+        <field number='78' name='NoAllocs' type='NUMINGROUP'/>\
+        <field number='448' name='PartyID' type='STRING'/>\
+        <field number='452' name='PartyRole' type='INT'/>\
+        <field number='453' name='NoPartyIDs' type='NUMINGROUP'/>\
+        <field number='627' name='NoHops' type='NUMINGROUP'/>\
+        <field number='628' name='HopCompID' type='STRING'/>\
+        </fields></fix>";
+
+    /// A custom header group and a trailer group are entered too.
+    #[test]
+    fn a_custom_header_and_trailer_group_are_entered() {
+        let dict = custom(SESSION_GROUPS);
+        let line = "8=FIX.4.4|35=0|453=1|448=A|452=1|627=1|628=H|10=000";
+        let analysis = decode_with(&dict, line);
+        assert_eq!(
+            paths(&analysis, line),
+            [
+                None,
+                None,
+                None,
+                Some("NoPartyIDs/1/PartyID".to_owned()),
+                None,
+                None,
+                Some("NoHops/1/HopCompID".to_owned()),
+                None,
+            ],
+            "PartyRole(452) is not in the header's NoPartyIDs(453)"
+        );
+    }
+
+    /// The header and NewOrderSingle both declare NoPartyIDs(453); the
+    /// message's own, which has PartyRole(452), wins.
+    #[test]
+    fn the_messages_own_group_wins_a_clash_with_the_header() {
+        let dict = custom(SESSION_GROUPS);
+        let line = "8=FIX.4.4|35=D|453=1|448=A|452=1";
+        let analysis = decode_with(&dict, line);
+        assert_eq!(
+            paths(&analysis, line)[4].as_deref(),
+            Some("NoPartyIDs/1/PartyRole")
+        );
+    }
+
+    /// The message lists NoPartyIDs(453) as a plain field, which carries no
+    /// shape, so the header's group is the one entered.
+    #[test]
+    fn a_plain_field_in_the_message_does_not_hide_the_headers_group() {
+        let dict = custom(
+            "<fix major='4' minor='4'>\
+             <header><field name='BeginString' required='Y'/><field name='MsgType' required='Y'/>\
+             <group name='NoPartyIDs' required='N'><field name='PartyID' required='N'/>\
+             <field name='PartyRole' required='N'/></group></header>\
+             <trailer><field name='CheckSum' required='Y'/></trailer>\
+             <messages><message name='NewOrderSingle' msgtype='D' msgcat='app'>\
+             <field name='NoPartyIDs' required='N'/></message></messages>\
+             <fields>\
+             <field number='8' name='BeginString' type='STRING'/>\
+             <field number='10' name='CheckSum' type='STRING'/>\
+             <field number='35' name='MsgType' type='STRING'/>\
+             <field number='448' name='PartyID' type='STRING'/>\
+             <field number='452' name='PartyRole' type='INT'/>\
+             <field number='453' name='NoPartyIDs' type='NUMINGROUP'/>\
+             </fields></fix>",
+        );
+        let line = "8=FIX.4.4|35=D|453=1|448=A|452=1";
+        let analysis = decode_with(&dict, line);
+        assert_eq!(
+            paths(&analysis, line),
+            [
+                None,
+                None,
+                None,
+                Some("NoPartyIDs/1/PartyID".to_owned()),
+                Some("NoPartyIDs/1/PartyRole".to_owned()),
+            ]
+        );
+    }
+
+    /// An empty group's counter opens no entry, and a line whose MsgType(35)
+    /// is unknown or missing enters no group at all, header groups included.
+    #[test]
+    fn an_empty_group_and_an_unknown_message_give_no_annotation() {
+        let dict = custom(SESSION_GROUPS);
+        let line = "8=FIX.4.4|35=D|78=2|448=A";
+        let analysis = decode_with(&dict, line);
+        assert!(analysis.groups.is_empty());
+        assert_eq!(paths(&analysis, line), [None, None, None, None]);
+
+        for line in ["8=FIX.4.4|35=ZZ|627=1|628=A", "8=FIX.4.4|627=1|628=A"] {
+            let analysis = decode_as_44(line);
+            assert!(analysis.groups.is_empty(), "{line}");
+            assert!(
+                analysis
+                    .fields
+                    .iter()
+                    .all(|field| field.group_idx().is_none()),
+                "{line}"
+            );
+        }
+    }
+
+    /// An empty group's counter stays a member of the entry around it, so the
+    /// entry goes on past it.
+    #[test]
+    fn an_empty_nested_group_does_not_end_its_parents_entry() {
+        let dict = custom(
+            "<fix major='4' minor='4'><header/><trailer/><messages>\
+             <message name='NewOrderSingle' msgtype='D' msgcat='app'>\
+             <group name='NoPartyIDs' required='N'><field name='PartyID' required='N'/>\
+             <group name='NoPartySubIDs' required='N'/>\
+             <field name='PartyRole' required='N'/></group>\
+             </message></messages><fields>\
+             <field number='35' name='MsgType' type='STRING'/>\
+             <field number='448' name='PartyID' type='STRING'/>\
+             <field number='452' name='PartyRole' type='INT'/>\
+             <field number='453' name='NoPartyIDs' type='NUMINGROUP'/>\
+             <field number='802' name='NoPartySubIDs' type='NUMINGROUP'/>\
+             </fields></fix>",
+        );
+        let line = "35=D|453=1|448=A|802=1|452=3";
+        let analysis = decode_with(&dict, line);
+        assert_eq!(analysis.groups.len(), 1, "the empty group opens no entry");
+        assert_eq!(
+            paths(&analysis, line),
+            [
+                None,
+                None,
+                Some("NoPartyIDs/1/PartyID".to_owned()),
+                Some("NoPartyIDs/1/NoPartySubIDs".to_owned()),
+                Some("NoPartyIDs/1/PartyRole".to_owned()),
+            ]
+        );
+    }
+
     proptest! {
         #[test]
         fn decode_terminates_with_in_range_indices(
@@ -543,10 +742,11 @@ mod tests {
     /// that matter are the ones where marking and nesting disagree.
     ///
     /// `MAX_GROUP_DEPTH` has no case here, and that is not an omission: depth
-    /// grows only through `nested()`, which is the *dictionary's* structure, so
-    /// no input line can reach a depth its dictionary does not define. The
-    /// guard protects against a pathological dictionary, and a test would have
-    /// to build one rather than a line. `MAX_GROUP_INSTANCES` is the opposite —
+    /// grows only through a group scope's own group members, which are the
+    /// *dictionary's* structure, so no input line can reach a depth its
+    /// dictionary does not define. The guard protects against a pathological
+    /// dictionary, and a test would have to build one rather than a line.
+    /// `MAX_GROUP_INSTANCES` is the opposite —
     /// a line reaches it, and `the_annotator_fills_the_group_index_space_exactly`
     /// asserts the span there.
     mod spans {

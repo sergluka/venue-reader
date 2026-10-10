@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Synthetic FIX Repository-layout fixture written for this project (Apache-2.0); no third-party data. -->
-<Enums version="FIX.5.0SP2">
-  <Enum added="FIX.5.0"><Tag>1128</Tag><Value>9</Value><SymbolicName>FIX50SP2</SymbolicName><Description>Synthetic FIX50SP2.</Description></Enum>
-</Enums>

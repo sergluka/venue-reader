@@ -220,7 +220,7 @@ fn removing_a_previously_loaded_dictionary_is_fatal_on_refresh() {
         std::env::temp_dir().join(format!("fix-lsp-dictionary-refresh-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("dictionary.xml");
-    std::fs::write(&path, "<fix major='4' minor='4'><fields/></fix>").unwrap();
+    std::fs::write(&path, "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields/></fix>").unwrap();
     let settings = json!({ "allowDictionaryPath": true, "dictionaries": [{ "name": "temporary", "path": path }] });
     let mut client = TestClient::start();
     client.initialize_caps(TestClient::caps_with_pull());
@@ -236,4 +236,105 @@ fn removing_a_previously_loaded_dictionary_is_fatal_on_refresh() {
         matches!(client.wait_for_exit(), fix_lsp::server::ServerExit::Fatal(message) if message.contains("dictionary.xml"))
     );
     std::fs::remove_dir(directory).unwrap();
+}
+
+const SOUND: &str = "<fix major='4' minor='4'><messages>\
+    <message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
+    <field number='9001' name='SoundField' type='STRING'/></fields></fix>";
+const DOUBLED: &str = "<fix major='4' minor='4'><messages>\
+    <message name='NewOrderSingle' msgtype='D' msgcat='app'/>\
+    <message name='OrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
+    <field number='9001' name='DoubledField' type='STRING'/></fields></fix>";
+const BROKEN: &str = "<fix major='4' minor='4'><messages>\
+    <message name='NewOrderSingle' msgtype='D'><component name='Instrumnt'/></message></messages><fields>\
+    <field number='55' name='Symbol' type='STRING'/></fields></fix>";
+const MISSPELT: &str = "<fix major='4' minor='4'><messages>\
+    <message name='MarketDataRequest' msgtype='V' msgcat='app'><field name='PriceAggregation'/></message></messages><fields>\
+    <field number='9001' name='MisspeltField' type='STRING'/></fields></fix>";
+
+/// Hover text over tag 9001 on `8=FIX.4.4|35=0|9001=x|`.
+fn hover_9001(client: &mut TestClient, uri: &str) -> String {
+    client.did_open(uri, "8=FIX.4.4|35=0|9001=x|", 1);
+    client.hover(uri, 0, 16).unwrap().to_string()
+}
+
+#[test]
+fn a_refused_dictionary_is_an_error_and_a_sound_one_beside_it_applies() {
+    let fixture = Workspace::new("refused-dictionary");
+    let broken = fixture.write("broken.xml", BROKEN);
+    let sound = fixture.write("sound.xml", SOUND);
+    let mut client = fixture.client(json!({ "allowDictionaryPath": true, "dictionaries": [
+        { "path": broken, "name": "broken", "default": true },
+        { "path": sound, "name": "sound", "default": true },
+    ] }));
+    assert!(hover_9001(&mut client, "untitled:orders").contains("SoundField"));
+    let (_, notes) = client.request_collecting("shutdown", Value::Null);
+    let shown = shows(&notes);
+    assert_eq!(shown.len(), 1, "{notes:?}");
+    assert_eq!(shown[0]["type"], ERROR);
+    let text = shown[0]["message"].as_str().unwrap();
+    assert!(
+        text.contains("not loaded")
+            && text.contains("message NewOrderSingle refers to component \"Instrumnt\""),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_dictionary_with_a_doubled_message_type_applies_and_is_reported_as_an_error() {
+    let fixture = Workspace::new("doubled-message");
+    let mut client = fixture.client(fixture.desk_dictionary(DOUBLED));
+    assert!(hover_9001(&mut client, "untitled:orders").contains("DoubledField"));
+    let (_, notes) = client.request_collecting("shutdown", Value::Null);
+    let shown = shows(&notes);
+    assert_eq!(shown.len(), 1, "{notes:?}");
+    assert_eq!(shown[0]["type"], ERROR);
+    let text = shown[0]["message"].as_str().unwrap();
+    assert!(
+        text.ends_with(
+            "loaded with an error: message NewOrderSingle, MsgType(35) = D, \
+             is defined twice, also as OrderSingle; merged into one under NewOrderSingle"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_message_defined_twice_under_one_name_is_reported_as_a_warning() {
+    let fixture = Workspace::new("doubled-same-name");
+    let mut client = fixture.client(
+        fixture.desk_dictionary(&DOUBLED.replace("name='OrderSingle'", "name='NewOrderSingle'")),
+    );
+    assert!(hover_9001(&mut client, "untitled:orders").contains("DoubledField"));
+    let (_, notes) = client.request_collecting("shutdown", Value::Null);
+    let shown = shows(&notes);
+    assert_eq!(shown.len(), 1, "{notes:?}");
+    assert_eq!(shown[0]["type"], WARNING);
+    let text = shown[0]["message"].as_str().unwrap();
+    assert!(
+        text.ends_with(
+            "loaded with a warning: message NewOrderSingle, MsgType(35) = D, \
+             is defined twice; merged into one"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_dictionary_with_an_undefined_field_applies_and_is_reported_as_an_error() {
+    let fixture = Workspace::new("undefined-field");
+    let mut client = fixture.client(fixture.desk_dictionary(MISSPELT));
+    assert!(hover_9001(&mut client, "untitled:orders").contains("MisspeltField"));
+    let (_, notes) = client.request_collecting("shutdown", Value::Null);
+    let shown = shows(&notes);
+    assert_eq!(shown.len(), 1, "{notes:?}");
+    assert_eq!(shown[0]["type"], ERROR);
+    let text = shown[0]["message"].as_str().unwrap();
+    assert!(
+        text.ends_with(
+            "loaded with an error: message MarketDataRequest refers to field \
+             \"PriceAggregation\", which the file does not define; skipped"
+        ),
+        "{text}"
+    );
 }

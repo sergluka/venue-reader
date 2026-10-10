@@ -4,8 +4,7 @@ use std::fmt::Write as _;
 
 use crate::codec::MessageAnalysis;
 use crate::dictionary::{
-    bundled, newest_defining, standard, Dict, EnumIdx, FieldIdx, Lifecycle, Retirement, Standard,
-    Version,
+    bundled, newest_defining, standard, Dict, EnumIdx, FieldIdx, Lifecycle, Standard, Version,
 };
 use crate::tag;
 
@@ -38,8 +37,6 @@ pub fn hover(
     } = about(source, field.tag, against, label, !dict.is_static())?;
 
     let mut value = value_paragraph(source, field.tag, field.value(line), field.enum_value());
-    // A Repository dictionary can list a member it never declares; the codec
-    // still places it in its entry, and the hint already draws the path.
     if let Some(path) = analysis.group_path(field, line) {
         value.push(format!("Group: `{path}`"));
     }
@@ -151,13 +148,14 @@ fn about(
             if !description.is_empty() {
                 paragraphs.push(description.to_owned());
             }
+            // Empty for a custom dictionary, which dates nothing.
             let mut facts = def.lifecycle();
-            // A custom tag has no standard life, and under a "Not in" note the
-            // dictionary's own dates could contradict the standard's: neither
-            // shows one. A bundled date its own files contradict is not repeated.
+            // Under a note the tables' own dates could contradict the
+            // standard's: a QuickFIX/J-only tag would read as removed. A
+            // bundled date its own files contradict is not repeated.
             if note.is_some() && standing != Standard::InVersion {
                 facts = Lifecycle::default();
-            } else if !custom && !standard::date_holds(tag) {
+            } else if !standard::date_holds(tag) {
                 facts.added = None;
             }
             paragraphs.extend(note);
@@ -278,34 +276,22 @@ fn standing_note(
     label: Option<&str>,
     custom: bool,
 ) -> Option<String> {
-    let def = match standing {
-        Standard::Disputed => return None,
-        Standard::InVersion => {
-            let tables = bundled(version?).version;
-            return custom.then(|| format!("*Standard {tables}*"));
-        }
+    let note = match standing {
+        Standard::InVersion if !custom => return None,
         Standard::Nowhere => {
             return Some(match label {
                 Some(label) => format!("*Custom field, introduced in \"{label}\"*"),
                 None => "*Custom field*".to_owned(),
             });
         }
-        Standard::OtherVersion(def) | Standard::Unbundled(def) => def,
+        _ => standing.note(version)?,
     };
-    // A version without bundled tables cannot be checked, so "Not in" it is not said.
-    let mut note = format!("*Not in {}", bundled(version?).version);
-    if let Some(release) = def.introduced() {
-        let _ = write!(note, ", introduced in {release}");
-    } else {
-        match def.retirement {
-            Some(Retirement::After(release)) => {
-                let _ = write!(note, ", retired after {release}");
-            }
-            Some(Retirement::Gone) => note.push_str(", retired"),
-            None => {}
-        }
-    }
-    if bound_name.is_some_and(|bound| bound != def.name) {
+    // The note starts with "standard" or "not": ASCII, one byte.
+    let mut note = format!("*{}{}", note[..1].to_ascii_uppercase(), &note[1..]);
+    if let Some(def) = standing
+        .def()
+        .filter(|def| bound_name.is_some_and(|bound| bound != def.name))
+    {
         let _ = write!(note, " as \"{}\"", def.name);
     }
     note.push('*');
@@ -864,7 +850,7 @@ mod tests {
     use crate::dictionary::ParsedDict;
     use crate::render::TagUrl;
 
-    use crate::dictionary::parse::fixtures::{field, quickfix, repository};
+    use crate::dictionary::parse::fixtures::{field, quickfix};
 
     /// Hover over `tag` on a one-field line of `version`, `dict` answering for it.
     fn under(version: &str, dict: ParsedDict, tag: u32, options: &Options) -> String {
@@ -1033,52 +1019,24 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_tag_has_no_lifecycle_even_from_its_own_dictionary() {
-        let dict = repository(
-            "FIX.4.4",
-            "<Field added='FIX.4.4' deprecated='FIX.4.4'><Tag>20001</Tag><Name>DeskMode</Name><Type>String</Type></Field>",
-        );
+    fn a_custom_tag_has_no_lifecycle() {
         assert_eq!(
-            under("FIX.4.4", dict, 20001, &Options::default()),
-            "**DeskMode** (20001) — String\n\n*Custom field, introduced in \"selected\"*\n\n---\n\nValue: `x`"
-        );
-    }
-
-    /// Under a "Not in" note the dictionary's own dates could contradict the
-    /// standard's: RejectText(1328) cannot be deprecated in FIX.4.4.
-    #[test]
-    fn under_a_not_in_note_the_dictionarys_own_lifecycle_goes() {
-        let dict = repository(
-            "FIX.4.4",
-            "<Field added='FIX.4.4' deprecated='FIX.4.4'><Tag>1328</Tag><Name>RejectText</Name><Type>String</Type></Field>",
-        );
-        let shown = under("FIX.4.4", dict, 1328, &Options::default());
-        assert!(
-            !shown.contains("Introduced in") && !shown.contains("Deprecated in"),
-            "{shown}"
+            custom_fix44(20001, "DeskMode"),
+            "**DeskMode** (20001) — STRING\n\n*Custom field, introduced in \"selected\"*\n\n---\n\nValue: `x`"
         );
     }
 
     /// BenchmarkCurveCurrency(220): dated FIX.4.2, first in the FIX.4.3 file.
     #[test]
-    fn a_disputed_tag_keeps_the_dictionarys_own_date_and_no_note() {
-        let dict = repository(
-            "FIX.4.2",
-            "<Field added='FIX.4.2'><Tag>220</Tag><Name>BenchmarkCurveCurrency</Name><Type>String</Type></Field>\
-             <Field added='FIX.4.2'><Tag>559</Tag><Name>SecurityListRequestType</Name><Type>int</Type></Field>",
-        );
-        let disputed = under("FIX.4.2", dict.clone(), 220, &Options::default());
+    fn a_disputed_tag_has_no_note() {
+        let disputed = custom("FIX.4.2", 220, "BenchmarkCurveCurrency");
         assert!(
             !disputed.contains("Not in") && !disputed.contains("Standard FIX"),
             "{disputed}"
         );
-        assert!(
-            disputed.contains("*Introduced in FIX.4.2*"),
-            "the dictionary's own: {disputed}"
-        );
         assert!(!disputed.contains("[FIX Reference"), "{disputed}");
 
-        let later = under("FIX.4.2", dict, 559, &Options::default());
+        let later = custom("FIX.4.2", 559, "SecurityListRequestType");
         assert!(
             later.contains("*Not in FIX.4.2, introduced in FIX.4.3*"),
             "{later}"
@@ -1180,49 +1138,6 @@ mod tests {
                 "**Symbol** (55)\n\n*Not defined by this dictionary*\n\n*Standard FIX.4.4*\n\n---\n\n\
                  Value: `x`\n\n---\n\n[FIX Reference: fix.internal](https://fix.internal/t55)"
             )
-        );
-    }
-
-    /// A repository-format dictionary may list a group member it never
-    /// declares as a field (QuickFIX drops such a name; Repository keeps the
-    /// number). The codec still places the field in its entry, so hover says
-    /// so, as it does for a defined member — the hint already draws the path.
-    #[test]
-    fn an_undefined_group_member_keeps_its_group_path() {
-        use crate::dictionary::parse::{fixtures::source, parse_repository_bytes, RepoSources};
-        let dict = parse_repository_bytes(&RepoSources {
-            fields: source(
-                "Fields.xml",
-                "<Fields version='FIX.4.4'>\
-                 <Field added='FIX.4.4'><Tag>268</Tag><Name>NoMDEntries</Name><Type>NumInGroup</Type></Field>\
-                 <Field added='FIX.4.4'><Tag>269</Tag><Name>MDEntryType</Name><Type>char</Type></Field>\
-                 </Fields>"
-                    .to_owned(),
-            ),
-            enums: source("Enums.xml", "<Enums version='FIX.4.4'/>".to_owned()),
-            messages: Some(source(
-                "Messages.xml",
-                "<Messages><Message><ComponentID>1</ComponentID><MsgType>W</MsgType><Name>MarketData</Name><CategoryID>T</CategoryID></Message></Messages>".to_owned(),
-            )),
-            msg_contents: Some(source(
-                "MsgContents.xml",
-                "<MsgContents>\
-                 <MsgContent><ComponentID>1</ComponentID><TagText>268</TagText><Indent>0</Indent><Position>1</Position></MsgContent>\
-                 <MsgContent><ComponentID>1</ComponentID><TagText>269</TagText><Indent>1</Indent><Position>2</Position></MsgContent>\
-                 <MsgContent><ComponentID>1</ComponentID><TagText>1328</TagText><Indent>1</Indent><Position>3</Position></MsgContent>\
-                 </MsgContents>"
-                    .to_owned(),
-            )),
-            components: Some(source("Components.xml", "<Components/>".to_owned())),
-        })
-        .expect("a dictionary with one group");
-        let line = "8=FIX.4.4|35=W|268=1|269=0|1328=x|";
-        let (bytes, message, at) = at_tag_in(&Ctx::for_test_with_dict("FIX.4.4", dict), line, 1328);
-        let shown = hover(&bytes, &message, at, &Options::default(), Some("selected"))
-            .expect("standard FIX names it");
-        assert!(
-            shown.ends_with("Value: `x`\n\nGroup: `NoMDEntries/1/1328`"),
-            "{shown}"
         );
     }
 

@@ -177,7 +177,7 @@ impl ServerState {
         match hover::describe(tag, value, &self.render) {
             Some(text) => Ok(json!(text)),
             None => Err(super::config_pull::request_failed(&format!(
-                "{DESCRIBE_TAG}: no dictionary defines tag {tag}"
+                "{DESCRIBE_TAG}: no bundled dictionary defines tag {tag}"
             ))),
         }
     }
@@ -590,7 +590,7 @@ mod tests {
         assert_eq!(error.code, lsp_server::ErrorCode::RequestFailed as i32);
         assert_eq!(
             error.message,
-            "fix.describeTag: no dictionary defines tag 9999"
+            "fix.describeTag: no bundled dictionary defines tag 9999"
         );
     }
 
@@ -699,7 +699,7 @@ mod tests {
         let error = refused_description(&mut state, json!([9999]));
         assert_eq!(
             error.message,
-            "fix.describeTag: no dictionary defines tag 9999"
+            "fix.describeTag: no bundled dictionary defines tag 9999"
         );
     }
 

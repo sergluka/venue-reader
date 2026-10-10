@@ -9,21 +9,48 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
-use xxhash_rust::xxh3::Xxh3;
+use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
 use super::dict::{bundled, Dict, Version, DEFAULT_VERSION};
-use super::model::ParsedDict;
-use super::parse::{self, ParseError, RepoSources, Source};
+use super::model::{Fault, ParsedDict};
+use super::parse::{self, ParseError, Source};
 use super::statics::DICTS_BUILD_HASH;
-use crate::config::{DictionaryMode, DictionarySpec, Limits};
+use crate::config::{DictionarySpec, Limits};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryEvent {
-    LoadFailed { path: String, detail: String },
-    DuplicateDefault { version: String, path: String },
-    BadName { name: String, detail: String },
-    BlankName { path: String },
-    DefaultVersionUnresolved { requested: String },
+    LoadFailed {
+        path: String,
+        detail: String,
+    },
+    /// The dictionary loaded, with one defect in it; `error` as
+    /// `Fault::is_error`.
+    DictionaryFault {
+        path: String,
+        detail: String,
+        error: bool,
+    },
+    /// The faults past `MAX_FAULT_EVENTS` for one dictionary, counted; an
+    /// error when any of them is.
+    MoreDictionaryFaults {
+        path: String,
+        count: usize,
+        error: bool,
+    },
+    DuplicateDefault {
+        version: String,
+        path: String,
+    },
+    BadName {
+        name: String,
+        detail: String,
+    },
+    BlankName {
+        path: String,
+    },
+    DefaultVersionUnresolved {
+        requested: String,
+    },
 }
 
 impl RegistryEvent {
@@ -31,6 +58,22 @@ impl RegistryEvent {
         match self {
             Self::LoadFailed { path, detail } => {
                 format!("dictionary {path:?} not loaded: {detail}")
+            }
+            Self::DictionaryFault {
+                path,
+                detail,
+                error,
+            } => {
+                format!(
+                    "dictionary {path:?} loaded with {}: {detail}",
+                    a_fault(*error)
+                )
+            }
+            Self::MoreDictionaryFaults { path, count, error } => {
+                format!(
+                    "dictionary {path:?} loaded with {}: … and {count} more",
+                    a_fault(*error)
+                )
             }
             Self::DuplicateDefault { version, path } => format!(
                 "dictionary {path:?} is a second default for {version}; the first one is kept"
@@ -48,11 +91,55 @@ impl RegistryEvent {
     }
 
     pub fn is_error(&self) -> bool {
+        if let Self::DictionaryFault { error, .. } | Self::MoreDictionaryFaults { error, .. } = self
+        {
+            return *error;
+        }
         matches!(
             self,
-            Self::DuplicateDefault { .. } | Self::BadName { .. } | Self::BlankName { .. }
+            Self::LoadFailed { .. }
+                | Self::DuplicateDefault { .. }
+                | Self::BadName { .. }
+                | Self::BlankName { .. }
         )
     }
+}
+
+/// Beyond this many, one dictionary's faults are counted rather than listed:
+/// a generated file can repeat one mistake hundreds of times.
+const MAX_FAULT_EVENTS: usize = 20;
+
+fn a_fault(error: bool) -> &'static str {
+    if error {
+        "an error"
+    } else {
+        "a warning"
+    }
+}
+
+/// The events reporting the faults `path` loaded with: errors first, each
+/// kind in the faults' own sorted order.
+pub fn fault_events(path: &str, faults: &[Fault]) -> Vec<RegistryEvent> {
+    let (errors, warnings): (Vec<&Fault>, Vec<&Fault>) =
+        faults.iter().partition(|fault| fault.is_error());
+    let ordered: Vec<&Fault> = errors.into_iter().chain(warnings).collect();
+    let (listed, hidden) = ordered.split_at(ordered.len().min(MAX_FAULT_EVENTS));
+    let mut events: Vec<RegistryEvent> = listed
+        .iter()
+        .map(|fault| RegistryEvent::DictionaryFault {
+            path: path.to_owned(),
+            detail: fault.to_string(),
+            error: fault.is_error(),
+        })
+        .collect();
+    if !hidden.is_empty() {
+        events.push(RegistryEvent::MoreDictionaryFaults {
+            path: path.to_owned(),
+            count: hidden.len(),
+            error: hidden.iter().any(|fault| fault.is_error()),
+        });
+    }
+    events
 }
 
 pub struct BuildContext<'a> {
@@ -110,7 +197,7 @@ pub struct Registry {
 }
 
 // Shared across registry layers without retaining unused dictionaries.
-type ParsedCache = HashMap<LoadKey, (u64, Weak<ParsedDict>)>;
+type ParsedCache = HashMap<FileStamp, (u64, Weak<ParsedDict>)>;
 
 #[derive(Default)]
 pub struct DictionaryStore {
@@ -119,17 +206,11 @@ pub struct DictionaryStore {
     parse_count: AtomicUsize,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-struct LoadKey {
-    mode: DictionaryMode,
-    source: PathBuf,
-    files: Vec<FileStamp>,
-}
-
+/// A dictionary file as `plan` stat-checked it; the cache key, so a change
+/// to any of it is a re-read.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct FileStamp {
     path: PathBuf,
-    name: std::ffi::OsString,
     len: u64,
     mtime: SystemTime,
 }
@@ -205,7 +286,7 @@ impl DictionaryStore {
                     });
                     continue;
                 }
-                let (key, content, parsed) = match self.load(spec, &layer_ctx) {
+                let (stamp, content, parsed) = match self.load(&spec.path, &layer_ctx) {
                     Ok(loaded) => loaded,
                     Err(error @ LoadError::Io { .. }) => return Err(error),
                     Err(error) => {
@@ -216,8 +297,13 @@ impl DictionaryStore {
                         continue;
                     }
                 };
+                for event in fault_events(&spec.path, &parsed.faults) {
+                    if !events.contains(&event) {
+                        events.push(event);
+                    }
+                }
                 let version = parsed.version.clone().expect("validated XML version");
-                let source = display_load_key(&key);
+                let source = display_path(&stamp);
                 let dict = Dict::Owned(parsed);
                 if spec.default {
                     if defaults.insert(version.clone()) {
@@ -256,17 +342,11 @@ impl DictionaryStore {
         path: &str,
         ctx: &BuildContext<'_>,
     ) -> Result<DictionaryChoice, LoadError> {
-        let spec = DictionarySpec {
-            path: path.to_owned(),
-            name: String::new(),
-            mode: DictionaryMode::Auto,
-            default: false,
-        };
-        let (key, identity, parsed) = self.load(&spec, ctx)?;
+        let (stamp, identity, parsed) = self.load(path, ctx)?;
         Ok(DictionaryChoice {
             version: parsed.version.clone().expect("validated XML version"),
             dict: Dict::Owned(parsed),
-            source: display_load_key(&key),
+            source: display_path(&stamp),
             identity,
             name: None,
         })
@@ -274,10 +354,10 @@ impl DictionaryStore {
 
     fn load(
         &self,
-        spec: &DictionarySpec,
+        path: &str,
         ctx: &BuildContext<'_>,
-    ) -> Result<(LoadKey, u64, Arc<ParsedDict>), LoadError> {
-        load(spec, ctx, self)
+    ) -> Result<(FileStamp, u64, Arc<ParsedDict>), LoadError> {
+        load(path, ctx, self)
     }
 
     #[cfg(test)]
@@ -318,6 +398,10 @@ impl Registry {
             .or_else(|| self.by_version.get(Version::resolve_alias_str(version)))
             .cloned()
             .or_else(|| Version::parse(version).map(|version| Dict::Static(bundled(version))))
+    }
+
+    pub fn default_names(&self) -> &HashMap<String, String> {
+        &self.default_names
     }
 
     /// The configured name of the dictionary `resolve(version)` answers with,
@@ -415,8 +499,8 @@ impl Registry {
     }
 }
 
-fn display_load_key(key: &LoadKey) -> String {
-    key.source.to_string_lossy().into_owned()
+fn display_path(stamp: &FileStamp) -> String {
+    stamp.path.to_string_lossy().into_owned()
 }
 
 /// Why one `fix.dictionaries` entry could not be loaded. Rendered into the
@@ -441,6 +525,8 @@ pub enum LoadError {
     },
     #[error("{path}: not a regular file")]
     NotRegularFile { path: PathBuf },
+    #[error("{path}: is a directory; a dictionary is one QuickFIX XML file")]
+    Directory { path: PathBuf },
     #[error("{path}: larger than limits.dictionaryBytes ({limit} bytes)")]
     TooLarge { path: PathBuf, limit: u64 },
     #[error("{path}: missing FIX version metadata; correct the XML header")]
@@ -464,133 +550,48 @@ impl LoadError {
     }
 }
 
-/// The files an entry reads, stat-checked once by `plan`.
-enum Files {
-    Quickfix(FileStamp),
-    Repository { dir: PathBuf, files: Vec<FileStamp> },
-}
-
-impl Files {
-    fn stamps(&self) -> Vec<FileStamp> {
-        match self {
-            Files::Quickfix(stamp) => vec![stamp.clone()],
-            Files::Repository { files, .. } => files.clone(),
-        }
-    }
-
-    fn display_path(&self) -> &Path {
-        match self {
-            Files::Quickfix(stamp) => &stamp.path,
-            Files::Repository { dir, .. } => dir,
-        }
-    }
-}
-
-/// Resolve the path and stat every file the entry would read — exactly once
-/// each, and without opening any of them.
-fn plan(spec: &DictionarySpec, ctx: &BuildContext<'_>) -> Result<(LoadKey, Files), LoadError> {
-    let limit = ctx.limits.dictionary_bytes;
-    let path = resolve_path(&spec.path, ctx)?;
+/// Resolve the path and stat the file the entry would read — once, and
+/// without opening it.
+fn plan(raw: &str, ctx: &BuildContext<'_>) -> Result<FileStamp, LoadError> {
+    let path = resolve_path(raw, ctx)?;
     let meta = fs::metadata(&path).map_err(|e| LoadError::io(&path, e))?;
-    let repository = match spec.mode {
-        DictionaryMode::Repository => true,
-        DictionaryMode::Quickfix => false,
-        DictionaryMode::Auto => {
-            meta.is_dir() || path.file_name().is_some_and(|n| n == "Fields.xml")
-        }
-    };
-    let files = if repository {
-        let dir = repository_dir(&path, meta.is_dir())?;
-        let mut files = Vec::new();
-        for name in RepoSources::REQUIRED {
-            files.push(stamp(&dir.join(name), limit)?);
-        }
-        for name in RepoSources::OPTIONAL {
-            if let Some(s) = stamp_optional(&dir.join(name), limit)? {
-                files.push(s);
-            }
-        }
-        Files::Repository { dir, files }
-    } else {
-        Files::Quickfix(stamp_from(&path, &meta, limit)?)
-    };
-    let key = LoadKey {
-        mode: spec.mode,
-        source: files.display_path().to_path_buf(),
-        files: files.stamps(),
-    };
-    Ok((key, files))
+    // Refused for this entry alone: an `Io` error would abort the whole build.
+    if meta.is_dir() {
+        return Err(LoadError::Directory { path });
+    }
+    stamp_from(&path, &meta, ctx.limits.dictionary_bytes)
 }
 
 /// Reuse live parsed XML only after checking current metadata and limits.
 fn load(
-    spec: &DictionarySpec,
+    raw: &str,
     ctx: &BuildContext<'_>,
     store: &DictionaryStore,
-) -> Result<(LoadKey, u64, Arc<ParsedDict>), LoadError> {
-    let (key, files) = plan(spec, ctx)?;
+) -> Result<(FileStamp, u64, Arc<ParsedDict>), LoadError> {
+    let stamp = plan(raw, ctx)?;
     let mut cache = store.cache.lock().expect("dictionary cache lock");
-    if let Some((content, hit)) = cache.get(&key) {
+    if let Some((content, hit)) = cache.get(&stamp) {
         if let Some(hit) = hit.upgrade() {
-            return Ok((key, *content, hit));
+            return Ok((stamp, *content, hit));
         }
     }
     cache.retain(|_, (_, parsed)| parsed.strong_count() != 0);
     drop(cache);
-    let limit = ctx.limits.dictionary_bytes;
-    let mut content = Xxh3::new();
-    let parsed = match &files {
-        Files::Quickfix(stamp) => {
-            let source = read_stamped(stamp, limit)?;
-            content.update(&source.bytes);
-            parse::parse_quickfix_bytes(&source)?
-        }
-        Files::Repository { dir, files } => {
-            let src = RepoSources::read_with(dir, |path, required| {
-                match files
-                    .iter()
-                    .find(|stamp| Some(stamp.name.as_os_str()) == path.file_name())
-                {
-                    Some(stamp) => read_stamped(stamp, limit).map(Some),
-                    None if required => Err(LoadError::io(
-                        path,
-                        std::io::Error::from(std::io::ErrorKind::NotFound),
-                    )),
-                    None => Ok(None),
-                }
-            })?;
-            for source in [
-                Some(&src.fields),
-                Some(&src.enums),
-                src.messages.as_ref(),
-                src.msg_contents.as_ref(),
-                src.components.as_ref(),
-            ] {
-                // An absent optional file is part of the identity too.
-                match source {
-                    Some(source) => {
-                        content.update(&[1]);
-                        content.update(&source.bytes);
-                    }
-                    None => content.update(&[0]),
-                }
-            }
-            parse::parse_repository_bytes(&src)?
-        }
-    };
+    let source = read_stamped(&stamp, ctx.limits.dictionary_bytes)?;
+    let identity = xxh3_64(&source.bytes);
+    let parsed = parse::parse_quickfix_bytes(&source)?;
     let version = parsed
         .version
         .as_deref()
         .ok_or_else(|| LoadError::NoVersion {
-            path: files.display_path().to_path_buf(),
+            path: stamp.path.clone(),
         })?;
     if !valid_declared_version(version) {
         return Err(LoadError::InvalidVersion {
-            path: files.display_path().to_path_buf(),
+            path: stamp.path.clone(),
             version: version.to_owned(),
         });
     }
-    let identity = content.digest();
     let parsed = Arc::new(parsed);
     #[cfg(test)]
     store.parse_count.fetch_add(1, Ordering::Relaxed);
@@ -598,8 +599,8 @@ fn load(
         .cache
         .lock()
         .expect("dictionary cache lock")
-        .insert(key.clone(), (identity, Arc::downgrade(&parsed)));
-    Ok((key, identity, parsed))
+        .insert(stamp.clone(), (identity, Arc::downgrade(&parsed)));
+    Ok((stamp, identity, parsed))
 }
 
 /// The identity of a registry with no custom bindings.
@@ -618,20 +619,6 @@ fn bind(identity: &mut Xxh3, kind: u8, key: &str, content: u64) {
 }
 
 /// Stat-only identity and policy check: a regular file within the limit.
-fn stamp(path: &Path, limit: u64) -> Result<FileStamp, LoadError> {
-    let meta = fs::metadata(path).map_err(|e| LoadError::io(path, e))?;
-    stamp_from(path, &meta, limit)
-}
-
-/// `Ok(None)` when the file does not exist; any other problem is an error.
-fn stamp_optional(path: &Path, limit: u64) -> Result<Option<FileStamp>, LoadError> {
-    match fs::metadata(path) {
-        Ok(meta) => stamp_from(path, &meta, limit).map(Some),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(LoadError::io(path, e)),
-    }
-}
-
 fn stamp_from(path: &Path, meta: &fs::Metadata, limit: u64) -> Result<FileStamp, LoadError> {
     if !meta.is_file() {
         return Err(LoadError::NotRegularFile {
@@ -647,7 +634,6 @@ fn stamp_from(path: &Path, meta: &fs::Metadata, limit: u64) -> Result<FileStamp,
     let mtime = meta.modified().map_err(|e| LoadError::io(path, e))?;
     Ok(FileStamp {
         path: fs::canonicalize(path).map_err(|error| LoadError::io(path, error))?,
-        name: path.file_name().unwrap_or_default().to_owned(),
         len: meta.len(),
         mtime,
     })
@@ -677,30 +663,6 @@ fn read_stamped(stamp: &FileStamp, limit: u64) -> Result<Source, LoadError> {
         path: path.clone(),
         bytes,
     })
-}
-
-/// A version directory, a `…/Fields.xml` path, or a directory with `Base/`.
-fn repository_dir(path: &Path, is_dir: bool) -> Result<PathBuf, LoadError> {
-    let mut dir = if is_dir {
-        path.to_path_buf()
-    } else {
-        // A canonical file path always has a parent.
-        path.parent().unwrap_or(path).to_path_buf()
-    };
-    match fs::metadata(dir.join("Fields.xml")) {
-        Ok(_) => (),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let base = dir.join("Base");
-            match fs::metadata(&base) {
-                Ok(metadata) if metadata.is_dir() => dir = base,
-                Ok(_) => (),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                Err(error) => return Err(LoadError::io(&base, error)),
-            }
-        }
-        Err(error) => return Err(LoadError::io(&dir.join("Fields.xml"), error)),
-    }
-    Ok(dir)
 }
 
 fn valid_declared_version(version: &str) -> bool {
@@ -754,10 +716,10 @@ mod tests {
     use std::sync::LazyLock;
 
     const XML: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/xml");
-    const QF_44: &str = "<fix major='4' minor='4'><fields>\
+    const QF_44: &str = "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
         <field number='8' name='BeginString' type='STRING'/>\
         <field number='9999' name='Custom' type='STRING'/></fields></fix>";
-    const QF_44_OTHER: &str = "<fix major='4' minor='4'><fields>\
+    const QF_44_OTHER: &str = "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
         <field number='9998' name='Other' type='STRING'/></fields></fix>";
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -782,7 +744,6 @@ mod tests {
     fn spec(path: &str) -> DictionarySpec {
         DictionarySpec {
             path: path.to_owned(),
-            mode: DictionaryMode::Auto,
             // Prefixed: these fixtures are named after FIX versions on
             // purpose, and a name that looks like one is refused.
             name: format!("dict-{}", path.rsplit('/').next().unwrap_or(path)),
@@ -868,8 +829,8 @@ mod tests {
         dict.field_idx(tag).is_some()
     }
 
-    fn load_err(spec: &DictionarySpec) -> LoadError {
-        load(spec, &ctx(None, None), &DictionaryStore::default()).unwrap_err()
+    fn load_err(path: &str) -> LoadError {
+        load(path, &ctx(None, None), &DictionaryStore::default()).unwrap_err()
     }
 
     #[test]
@@ -922,23 +883,13 @@ mod tests {
     fn version_never_falls_back_to_file_and_directory_names() {
         let d = tmp();
         // A version-like filename cannot repair missing XML metadata.
-        let f = write(&d, "FIX42-prod.xml", "<fix><fields/></fix>");
+        let f = write(&d, "FIX42-prod.xml", "<fix><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields/></fix>");
         let (reg, events) = build(&[spec(&f)]);
         assert!(matches!(
             events.as_slice(),
             [RegistryEvent::LoadFailed { .. }]
         ));
         assert!(reg.resolve("FIX.4.2").unwrap().is_static());
-        let repo = d.join("FIX.4.1");
-        fs::create_dir(&repo).unwrap();
-        write(&repo, "Fields.xml", "<Fields/>");
-        write(&repo, "Enums.xml", "<Enums/>");
-        let (reg, events) = build(&[spec(&repo.to_string_lossy())]);
-        assert!(matches!(
-            events.as_slice(),
-            [RegistryEvent::LoadFailed { .. }]
-        ));
-        assert!(reg.resolve("FIX.4.1").unwrap().is_static());
     }
 
     #[test]
@@ -1094,7 +1045,7 @@ mod tests {
         let bad = write(
             &d,
             "bad.xml",
-            "<fix major='4' minor='4'><fields><field number='x'/></fields></fix>",
+            "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields><field number='x'/></fields></fix>",
         );
         let missing = d.join("missing.xml").to_string_lossy().into_owned();
         let (reg, events) = build(&[spec(&bad)]);
@@ -1106,8 +1057,8 @@ mod tests {
             reg.resolve("FIX.4.4").unwrap().is_static(),
             "falls back to bundled"
         );
-        assert!(matches!(load_err(&spec(&bad)), LoadError::Parse(_)));
-        assert!(matches!(load_err(&spec(&missing)), LoadError::Io { .. }));
+        assert!(matches!(load_err(&bad), LoadError::Parse(_)));
+        assert!(matches!(load_err(&missing), LoadError::Io { .. }));
     }
 
     #[test]
@@ -1116,9 +1067,9 @@ mod tests {
         let p = write(
             &d,
             "dict.xml",
-            "<fix><fields><field number='1' name='A'/></fields></fix>",
+            "<fix><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields><field number='1' name='A'/></fields></fix>",
         );
-        assert!(matches!(load_err(&spec(&p)), LoadError::NoVersion { .. }));
+        assert!(matches!(load_err(&p), LoadError::NoVersion { .. }));
     }
 
     #[test]
@@ -1134,7 +1085,7 @@ mod tests {
             ..ctx(None, None)
         };
         let store = DictionaryStore::default();
-        let err = load(&spec(&p), &ctx, &store).unwrap_err();
+        let err = load(&p, &ctx, &store).unwrap_err();
         assert!(
             matches!(err, LoadError::TooLarge { limit: 16, .. }),
             "{err}"
@@ -1157,7 +1108,7 @@ mod tests {
         assert!(status.success());
         // Opening a FIFO for reading with no writer would block forever; the
         // stat check must reject it first.
-        let err = load_err(&spec(&fifo.to_string_lossy()));
+        let err = load_err(&fifo.to_string_lossy());
         assert!(matches!(err, LoadError::NotRegularFile { .. }), "{err}");
     }
 
@@ -1174,7 +1125,7 @@ mod tests {
         for literal in ["$HOME/d.xml", "`echo x`", "~/*.xml", "~user/d.xml"] {
             // Taken literally: either a relative path without a root, or a
             // file that does not exist — never an expansion.
-            let err = load(&spec(literal), &ctx, &store).unwrap_err();
+            let err = load(literal, &ctx, &store).unwrap_err();
             assert!(
                 matches!(err, LoadError::Io { .. } | LoadError::NoRoot),
                 "{literal}: {err}"
@@ -1184,8 +1135,8 @@ mod tests {
 
     #[test]
     fn home_dir_unavailable_makes_tilde_paths_fail() {
-        assert!(matches!(load_err(&spec("~/d.xml")), LoadError::NoHome));
-        assert!(matches!(load_err(&spec("")), LoadError::EmptyPath));
+        assert!(matches!(load_err("~/d.xml"), LoadError::NoHome));
+        assert!(matches!(load_err(""), LoadError::EmptyPath));
     }
 
     #[test]
@@ -1202,7 +1153,7 @@ mod tests {
         assert!(has_tag(&reg.resolve("FIX.4.4").unwrap(), 9999));
 
         // No root: a relative path cannot be resolved, even if cwd would contain it.
-        assert!(matches!(load_err(&spec("Cargo.toml")), LoadError::NoRoot));
+        assert!(matches!(load_err("Cargo.toml"), LoadError::NoRoot));
     }
 
     #[test]
@@ -1218,7 +1169,7 @@ mod tests {
             ..ctx(None, None)
         };
         // `limit + 1` would wrap to take(0) in release and panic in debug.
-        let (_, _, parsed) = load(&spec(&p), &ctx, &DictionaryStore::default()).unwrap();
+        let (_, _, parsed) = load(&p, &ctx, &DictionaryStore::default()).unwrap();
         assert!(parsed.field(9999).is_some());
     }
 
@@ -1256,7 +1207,7 @@ mod tests {
 
     #[test]
     fn rewriting_a_file_with_the_same_bytes_keeps_the_identity() {
-        // The point of hashing content rather than stamps: the `LoadKey` moves,
+        // The point of hashing content rather than stamps: the stamp moves,
         // the file is genuinely re-read and re-parsed, a fresh `Arc` is
         // produced — and no cached analysis anywhere has to die.
         let d = tmp();
@@ -1319,6 +1270,219 @@ mod tests {
         };
         assert!(!Arc::ptr_eq(&a, &c));
         assert_eq!(c.version.as_deref(), Some("FIX.9.1"));
+    }
+
+    const QF_44_DOUBLED: &str = "<fix major='4' minor='4'><messages>\
+        <message name='NewOrderSingle' msgtype='D' msgcat='app'/>\
+        <message name='OrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
+        <field number='9999' name='Custom' type='STRING'/></fields></fix>";
+    const DOUBLED_DETAIL: &str = "message NewOrderSingle, MsgType(35) = D, is defined twice, \
+        also as OrderSingle; merged into one under NewOrderSingle";
+    const SAME_NAME_DETAIL: &str =
+        "message NewOrderSingle, MsgType(35) = D, is defined twice; merged into one";
+
+    fn doubled_fault(path: &str) -> RegistryEvent {
+        RegistryEvent::DictionaryFault {
+            path: path.to_owned(),
+            detail: DOUBLED_DETAIL.to_owned(),
+            error: true,
+        }
+    }
+
+    #[test]
+    fn a_dictionary_with_a_fault_loads_and_reports_it_as_an_error() {
+        let d = tmp();
+        let p = write(&d, "a.xml", QF_44_DOUBLED);
+        let (reg, events) = build(&[spec(&p)]);
+        assert_eq!(events, vec![doubled_fault(&p)]);
+        assert!(events[0].is_error());
+        assert_eq!(
+            events[0].message(),
+            format!("dictionary {p:?} loaded with an error: {DOUBLED_DETAIL}")
+        );
+        assert!(
+            has_tag(&reg.resolve("FIX.4.4").unwrap(), 9999),
+            "and it still applies"
+        );
+    }
+
+    #[test]
+    fn faults_replay_on_a_cache_hit() {
+        let d = tmp();
+        let p = write(&d, "a.xml", QF_44_DOUBLED);
+        let ctx = ctx(None, None);
+        let store = DictionaryStore::default();
+        // Held: the cache keeps only what a live registry still uses.
+        let (_held, first_events) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx, &store);
+        let (_, second_events) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx, &store);
+        assert_eq!(store.parse_count(), 1, "the second build is a cache hit");
+        assert_eq!(first_events, vec![doubled_fault(&p)]);
+        assert_eq!(second_events, first_events);
+    }
+
+    #[test]
+    fn one_file_under_two_names_reports_its_faults_once() {
+        let d = tmp();
+        let p = write(&d, "a.xml", QF_44_DOUBLED);
+        let other = DictionarySpec {
+            default: false,
+            ..named(&p, "other")
+        };
+        let (reg, events) = build(&[spec(&p), other]);
+        assert_eq!(events, vec![doubled_fault(&p)]);
+        assert!(reg.named("other").is_some());
+    }
+
+    #[test]
+    fn faults_past_twenty_are_counted_not_listed() {
+        let d = tmp();
+        let mut messages = String::new();
+        for i in 0..25 {
+            for name in ["First", "Second"] {
+                messages.push_str(&format!("<message name='{name}{i}' msgtype='U{i}'/>"));
+            }
+        }
+        let p = write(
+            &d,
+            "a.xml",
+            &format!("<fix major='4' minor='4'><messages>{messages}</messages><fields/></fix>"),
+        );
+        let (_, events) = build(&[spec(&p)]);
+        assert_eq!(events.len(), 21, "{events:?}");
+        assert!(events[..20]
+            .iter()
+            .all(|event| matches!(event, RegistryEvent::DictionaryFault { .. })));
+        assert_eq!(
+            events[20],
+            RegistryEvent::MoreDictionaryFaults {
+                path: p.clone(),
+                count: 5,
+                error: true,
+            }
+        );
+        assert!(events[20].is_error());
+        assert_eq!(
+            events[20].message(),
+            format!("dictionary {p:?} loaded with an error: … and 5 more")
+        );
+    }
+
+    /// The same message defined twice under one name loses nothing.
+    #[test]
+    fn a_fault_that_loses_nothing_is_a_warning() {
+        let d = tmp();
+        let p = write(
+            &d,
+            "a.xml",
+            "<fix major='4' minor='4'><messages>\
+             <message name='NewOrderSingle' msgtype='D'/><message name='NewOrderSingle' msgtype='D'/>\
+             </messages><fields><field number='9999' name='Custom' type='STRING'/></fields></fix>",
+        );
+        let (reg, events) = build(&[spec(&p)]);
+        assert_eq!(
+            events,
+            [RegistryEvent::DictionaryFault {
+                path: p.clone(),
+                detail: SAME_NAME_DETAIL.to_owned(),
+                error: false,
+            }]
+        );
+        assert!(!events[0].is_error());
+        assert_eq!(
+            events[0].message(),
+            format!("dictionary {p:?} loaded with a warning: {SAME_NAME_DETAIL}")
+        );
+        assert!(has_tag(&reg.resolve("FIX.4.4").unwrap(), 9999));
+    }
+
+    fn renamed(i: usize, error: bool) -> Fault {
+        Fault::DoubledMessage {
+            msg_type: format!("U{i:02}"),
+            name: format!("Custom{i:02}"),
+            definitions: 2,
+            others: if error {
+                vec![format!("Other{i:02}")]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn severities(events: &[RegistryEvent]) -> Vec<bool> {
+        events.iter().map(RegistryEvent::is_error).collect()
+    }
+
+    /// Errors come first under the cap; the count line is as severe as the
+    /// worst fault it hides.
+    #[test]
+    fn errors_are_listed_first_and_the_count_takes_the_worst_hidden_severity() {
+        // 21 warnings, then one error: the error leads, two warnings are hidden.
+        let mut faults: Vec<Fault> = (0..21).map(|i| renamed(i, false)).collect();
+        faults.push(renamed(21, true));
+        let events = fault_events("a.xml", &faults);
+        assert_eq!(events.len(), 21);
+        assert_eq!(
+            events[0],
+            RegistryEvent::DictionaryFault {
+                path: "a.xml".into(),
+                detail: renamed(21, true).to_string(),
+                error: true,
+            }
+        );
+        assert_eq!(severities(&events[1..20]), [false; 19]);
+        assert_eq!(
+            events[20],
+            RegistryEvent::MoreDictionaryFaults {
+                path: "a.xml".into(),
+                count: 2,
+                error: false,
+            }
+        );
+        assert_eq!(
+            events[20].message(),
+            "dictionary \"a.xml\" loaded with a warning: … and 2 more"
+        );
+
+        // 22 errors and one warning: two errors and the warning are hidden.
+        let mut faults: Vec<Fault> = (0..22).map(|i| renamed(i, true)).collect();
+        faults.push(renamed(22, false));
+        let events = fault_events("a.xml", &faults);
+        assert_eq!(severities(&events[..20]), [true; 20]);
+        assert_eq!(
+            events[20],
+            RegistryEvent::MoreDictionaryFaults {
+                path: "a.xml".into(),
+                count: 3,
+                error: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_refused_dictionary_is_an_error_and_a_sound_one_beside_it_still_binds() {
+        let d = tmp();
+        let broken = write(
+            &d,
+            "broken.xml",
+            "<fix major='4' minor='4'><messages>\
+             <message name='NewOrderSingle' msgtype='D'><component name='Instrumnt'/></message>\
+             </messages><fields><field number='55' name='Symbol' type='STRING'/></fields></fix>",
+        );
+        let sound = write(&d, "sound.xml", QF_44);
+        let (reg, events) = build(&[named(&broken, "broken"), spec(&sound)]);
+        let [event @ RegistryEvent::LoadFailed { path, detail }] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(*path, broken);
+        assert!(
+            detail.ends_with(
+                "message NewOrderSingle refers to component \"Instrumnt\", which the file does not define"
+            ),
+            "{detail}"
+        );
+        assert!(event.is_error());
+        assert!(reg.named("broken").is_none());
+        assert!(has_tag(&reg.resolve("FIX.4.4").unwrap(), 9999));
     }
 
     #[test]
@@ -1459,17 +1623,25 @@ mod tests {
         assert!(has_tag(&reg.default_dict(), 9999));
     }
 
+    /// Only one QuickFIX XML file is read. A directory — a FIX Repository package
+    /// among others — is refused for its own entry, not as an I/O error that
+    /// would abort the whole configuration.
     #[test]
-    fn repository_directory_descends_into_base_and_reads_version() {
-        // A version directory (auto → repository → Base/) and a Fields.xml path.
-        let dir = format!("{XML}/custom/synthetic/repository/FIX.4.4");
-        let fields = format!("{XML}/custom/synthetic/repository/FIX.5.0SP2/Base/Fields.xml");
-        let (reg, events) = build(&[spec(&dir), spec(&fields)]);
-        assert!(events.is_empty(), "{events:?}");
-        let d44 = reg.resolve("FIX.4.4").unwrap();
-        assert!(!d44.is_static());
-        assert!(d44.message_idx("0").is_some(), "groups/messages loaded too");
-        assert!(!reg.resolve("FIX.5.0SP2").unwrap().is_static());
+    fn a_directory_is_refused_as_a_dictionary() {
+        let directory = tmp();
+        write(&directory, "Fields.xml", "<Fields/>");
+        let sound = tmp();
+        let file = write(&sound, "desk.xml", QF_44);
+        let (registry, events) = build(&[spec(&directory.to_string_lossy()), spec(&file)]);
+        assert!(
+            matches!(&events[..], [RegistryEvent::LoadFailed { detail, .. }]
+                if detail.contains("one QuickFIX XML file")),
+            "{events:?}"
+        );
+        assert!(
+            !registry.resolve("FIX.4.4").unwrap().is_static(),
+            "the sound entry still loads"
+        );
     }
 
     #[test]
@@ -1647,12 +1819,9 @@ mod tests {
             let path = write(
                 &directory,
                 "FIX44.xml",
-                &format!("<fix version='{version}'><fields/></fix>"),
+                &format!("<fix version='{version}'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields/></fix>"),
             );
-            assert!(matches!(
-                load_err(&spec(&path)),
-                LoadError::InvalidVersion { .. }
-            ));
+            assert!(matches!(load_err(&path), LoadError::InvalidVersion { .. }));
         }
     }
 
@@ -1773,15 +1942,8 @@ mod tests {
         let store = DictionaryStore::default();
         let choice = store.load_choice(&file, &ctx(None, None)).expect("loads");
         assert_eq!(
-            names(registry.clone(), Some(choice)).of("FIX.4.4"),
+            names(registry, Some(choice)).of("FIX.4.4"),
             Some("desk.xml")
         );
-
-        let repository =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("xml/custom/synthetic/repository/FIX.4.4");
-        let choice = store
-            .load_choice(&repository.to_string_lossy(), &ctx(None, None))
-            .expect("loads");
-        assert_eq!(names(registry, Some(choice)).of("FIX.4.4"), Some("FIX.4.4"));
     }
 }

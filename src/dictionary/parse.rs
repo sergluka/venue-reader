@@ -1,21 +1,27 @@
-//! XML dictionary parsers. Shared with `build.rs` via `#[path]`, so this file may
-//! depend only on `std`, `roxmltree`, and `super::model`.
+//! The QuickFIX XML dictionary parser. Shared with `build.rs` via `#[path]`,
+//! so this file may depend only on `std`, `roxmltree`, `super::model` and
+//! `super::schema`.
 //!
-//! The core entry points take bytes and never touch the filesystem; the thin
-//! `parse_repository`/`parse_quickfix` wrappers read files for build.rs and tests.
+//! The core entry point takes bytes and never touches the filesystem; the thin
+//! `parse_quickfix` wrapper reads a file for tests.
 //! Bounded, validated reads for user-supplied dictionaries live in the registry.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use roxmltree::{Document, Node};
 
-use super::model::{Datatype, EnumDef, FieldDef, GroupDef, MessageDef, ParsedDict};
+use super::model::{Datatype, EnumDef, Fault, FieldDef, GroupDef, MessageDef, ParsedDict};
+use super::schema::{pack, ComponentDef, MemberDef, PackError, SchemaDefs, ScopeDef, NONE};
 
 /// Component/group nesting deeper than this is an error, not a deeper recursion.
 pub const MAX_DEPTH: usize = 32;
+
+/// A component chain can expand exponentially; the depth cap bounds depth only.
+pub const MAX_DECLARATIONS: usize = 1 << 20;
 
 /// The most entries a dictionary collection may hold. Consumers store an index
 /// in 16 bits with the top value reserved (`codec::Packed16`), so exactly this
@@ -41,11 +47,20 @@ pub enum ParseError {
         path: PathBuf,
         text: String,
     },
+    TagOutOfRange {
+        path: PathBuf,
+        name: String,
+        tag: u32,
+    },
     MissingRoot {
         path: PathBuf,
         expected: &'static str,
     },
     TooDeep {
+        path: PathBuf,
+    },
+    /// Expanding the components would produce more than [`MAX_DECLARATIONS`] members.
+    TooManyDeclarations {
         path: PathBuf,
     },
     /// More entries in a collection than its index can address.
@@ -59,6 +74,32 @@ pub enum ParseError {
         path: PathBuf,
         tag: u32,
     },
+    /// A reference to a name the file does not define. `within` says where the
+    /// reference was made, so the user can find it.
+    UndefinedReference {
+        path: PathBuf,
+        kind: &'static str,
+        name: String,
+        within: String,
+    },
+    /// `cycle` runs from the component back to itself.
+    ComponentCycle {
+        path: PathBuf,
+        name: String,
+        cycle: Vec<String>,
+    },
+    MessageWithoutType {
+        path: PathBuf,
+        name: String,
+    },
+    MessageWithoutName {
+        path: PathBuf,
+        msg_type: String,
+    },
+    /// No `<messages>` section, or one without a `<message>`.
+    NoMessages {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for ParseError {
@@ -69,12 +110,23 @@ impl fmt::Display for ParseError {
             ParseError::BadTag { path, text } => {
                 write!(f, "{}: tag is not a number: {text:?}", path.display())
             }
+            ParseError::TagOutOfRange { path, name, tag } => write!(
+                f,
+                "{}: field {name} has number {tag}, outside the tag range 1 to {}",
+                path.display(),
+                u32::MAX - 1
+            ),
             ParseError::MissingRoot { path, expected } => {
                 write!(f, "{}: expected <{expected}> root element", path.display())
             }
             ParseError::TooDeep { path } => write!(
                 f,
                 "{}: component/group nesting deeper than {MAX_DEPTH}",
+                path.display()
+            ),
+            ParseError::TooManyDeclarations { path } => write!(
+                f,
+                "{}: expands to more than {MAX_DECLARATIONS} member declarations",
                 path.display()
             ),
             ParseError::IndexOverflow { path, what, max } => {
@@ -86,6 +138,38 @@ impl fmt::Display for ParseError {
                     "{}: field {tag} has too many enum values (more than {MAX_ITEMS})",
                     path.display()
                 )
+            }
+            ParseError::UndefinedReference {
+                path,
+                kind,
+                name,
+                within,
+            } => write!(
+                f,
+                "{}: {within} refers to {kind} {name:?}, which the file does not define",
+                path.display()
+            ),
+            ParseError::ComponentCycle { path, name, cycle } => write!(
+                f,
+                "{}: component {name} contains itself ({})",
+                path.display(),
+                cycle.join(" → ")
+            ),
+            ParseError::MessageWithoutType { path, name } if name.is_empty() => write!(
+                f,
+                "{}: a message has neither a name nor a msgtype",
+                path.display()
+            ),
+            ParseError::MessageWithoutType { path, name } => {
+                write!(f, "{}: message {name} has no msgtype", path.display())
+            }
+            ParseError::MessageWithoutName { path, msg_type } => write!(
+                f,
+                "{}: the message with MsgType(35) = {msg_type} has no name",
+                path.display()
+            ),
+            ParseError::NoMessages { path } => {
+                write!(f, "{}: declares no messages", path.display())
             }
         }
     }
@@ -110,486 +194,229 @@ impl Source {
     }
 }
 
-/// The files of one FIX Repository version directory. The three structure files
-/// are optional as a set: groups and messages are built only when all are present.
-#[derive(Debug, Clone)]
-pub struct RepoSources {
-    pub fields: Source,
-    pub enums: Source,
-    pub messages: Option<Source>,
-    pub msg_contents: Option<Source>,
-    pub components: Option<Source>,
-}
-
-impl RepoSources {
-    pub const REQUIRED: [&'static str; 2] = ["Fields.xml", "Enums.xml"];
-    pub const OPTIONAL: [&'static str; 3] = ["Messages.xml", "MsgContents.xml", "Components.xml"];
-
-    /// Assemble the file set of `dir` through `read`, which decides how a file
-    /// is read (and returns `Ok(None)` for an absent optional one). The only
-    /// place that knows the repository layout.
-    pub fn read_with<E>(
-        dir: &Path,
-        mut read: impl FnMut(&Path, bool) -> Result<Option<Source>, E>,
-    ) -> Result<RepoSources, E> {
-        let mut required = |name: &str| read(&dir.join(name), true).map(|s| s.expect("required"));
-        let fields = required("Fields.xml")?;
-        let enums = required("Enums.xml")?;
-        let messages = read(&dir.join("Messages.xml"), false)?;
-        let msg_contents = read(&dir.join("MsgContents.xml"), false)?;
-        let components = read(&dir.join("Components.xml"), false)?;
-        Ok(RepoSources {
-            fields,
-            enums,
-            messages,
-            msg_contents,
-            components,
-        })
-    }
-}
-
-/// Convenience wrapper with plain unbounded reads — for build.rs and tests only.
-pub fn parse_repository(dir: &Path) -> Result<ParsedDict, ParseError> {
-    let src = RepoSources::read_with(dir, |path, required| {
-        if required || path.is_file() {
-            Source::read(path.to_path_buf()).map(Some)
-        } else {
-            Ok(None)
-        }
-    })?;
-    parse_repository_bytes(&src)
-}
-
-pub fn parse_repository_bytes(src: &RepoSources) -> Result<ParsedDict, ParseError> {
-    // Scoped so the Fields/Enums DOMs are freed before MsgContents (the largest
-    // file) is parsed: peak memory is one big document, not all five.
-    let (version, mut fields) = parse_fields_and_enums(src)?;
-
-    // A repository missing its optional structure files declares no header.
-    let structured = match (&src.messages, &src.msg_contents, &src.components) {
-        (Some(messages), Some(contents), Some(components)) => {
-            repository_structure(messages, contents, components, &fields)?
-        }
-        _ => Structured::default(),
-    };
-    fields.values_mut().for_each(|f| f.enums.shrink_to_fit());
-    check_index_space(fields.len(), &src.fields.path, "fields")?;
-    check_enum_space(&fields, &src.enums.path)?;
-
-    Ok(ParsedDict {
-        version,
-        fields: fields.into_values().collect(),
-        header: structured.header,
-        trailer: structured.trailer,
-        groups: structured.groups,
-        messages: structured.messages,
-    })
-}
-
 type FieldsByTag = BTreeMap<u32, FieldDef>;
 
-fn parse_fields_and_enums(src: &RepoSources) -> Result<(Option<String>, FieldsByTag), ParseError> {
-    let fields_doc = parse_doc(&src.fields)?;
-    let fields_root = expect_root(&fields_doc, "Fields", &src.fields.path)?;
-    let version = fields_root.attribute("version").map(str::to_owned);
-
-    // Duplicate tags: last definition wins.
-    let mut fields: BTreeMap<u32, FieldDef> = BTreeMap::new();
-    for node in elements(fields_root, "Field") {
-        let tag = parse_tag(&child_text(node, "Tag"), &src.fields.path)?;
-        fields.insert(tag, {
-            let datatype = child_text(node, "Type");
-            FieldDef {
-                tag,
-                name: child_text(node, "Name"),
-                datatype_class: Datatype::of(&datatype),
-                datatype,
-                description: child_text(node, "Description"),
-                added: attr(node, "added"),
-                deprecated: attr(node, "deprecated"),
-                added_ep: 0,
-                enums: Vec::new(),
-            }
-        });
-    }
-
-    let enums_doc = parse_doc(&src.enums)?;
-    let enums_root = expect_root(&enums_doc, "Enums", &src.enums.path)?;
-    for node in elements(enums_root, "Enum") {
-        let tag = parse_tag(&child_text(node, "Tag"), &src.enums.path)?;
-        // An enum whose tag has no field definition has nowhere to live: dropped.
-        let Some(field) = fields.get_mut(&tag) else {
-            continue;
-        };
-        upsert_enum(
-            &mut field.enums,
-            EnumDef {
-                value: child_text(node, "Value"),
-                name: child_text(node, "SymbolicName"),
-                description: child_text(node, "Description"),
-                added: attr(node, "added"),
-                added_ep: 0,
-            },
-        );
-    }
-    Ok((version, fields))
-}
-
 // ---------------------------------------------------------------------------
-// Repository message structure: Messages.xml + MsgContents.xml + Components.xml
+// Scopes: what one header, trailer, message or group entry lists
 
-/// A message's content before arena interning.
-#[derive(Debug, Clone)]
-enum Child {
-    Field { tag: u32, indent: i64 },
-    Group { group: GroupTree, indent: i64 },
+/// One reference in a scope, as the file lists it.
+#[derive(Debug, Clone, Copy)]
+struct Declaration {
+    tag: u32,
+    group: Option<u16>,
+    component: Option<u16>,
+    required: bool,
+    repeating: bool,
 }
 
-impl Child {
-    fn indent(&self) -> i64 {
-        match self {
-            Child::Field { indent, .. } | Child::Group { indent, .. } => *indent,
-        }
+/// A scope before a tag it lists twice is merged.
+#[derive(Debug, Default)]
+struct Draft {
+    members: Vec<Declaration>,
+    components: Vec<ComponentDef>,
+}
+
+impl Draft {
+    fn push_component(&mut self, component: ComponentDef, path: &Path) -> Result<u16, ParseError> {
+        let row = index16(self.components.len(), path, "component rows")?;
+        self.components.push(component);
+        Ok(row)
     }
 
-    /// The tag this child contributes to its parent's member list.
-    fn member_tag(&self) -> u32 {
-        match self {
-            Child::Field { tag, .. } => *tag,
-            Child::Group { group, .. } => group.count_tag,
+    /// Adds another definition of the same message after this one.
+    fn append(&mut self, other: Draft, path: &Path) -> Result<(), ParseError> {
+        let offset = self.components.len();
+        let shift = |row: u16| index16(offset + usize::from(row), path, "component rows");
+        for mut component in other.components {
+            component.parent = component.parent.map(shift).transpose()?;
+            self.push_component(component, path)?;
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct GroupTree {
-    name: String,
-    count_tag: u32,
-    delimiter_tag: u32,
-    members: Vec<u32>,
-    nested: Vec<GroupTree>,
-}
-
-/// Build a group from its children; `None` when there are none (no delimiter).
-fn new_group(name: &str, count_tag: u32, children: Vec<Child>) -> Option<GroupTree> {
-    let delimiter_tag = children.first()?.member_tag();
-    let mut members = Vec::new();
-    for child in &children {
-        let tag = child.member_tag();
-        if !members.contains(&tag) {
-            members.push(tag);
+        for mut declaration in other.members {
+            declaration.component = declaration.component.map(shift).transpose()?;
+            self.members.push(declaration);
         }
+        Ok(())
     }
-    let nested = children
-        .into_iter()
-        .filter_map(|c| match c {
-            Child::Group { group, .. } => Some(group),
-            Child::Field { .. } => None,
-        })
-        .collect();
-    Some(GroupTree {
-        name: name.to_owned(),
-        count_tag,
-        delimiter_tag,
-        members,
-        nested,
-    })
-}
 
-/// Every tag a child list reaches: fields, group counters, and the members of
-/// nested groups. `Child::member_tag` alone would stop at a group's counter.
-///
-/// **Sorted**, and `Dict::is_header` binary-searches it.
-fn reached_tags(children: &[Child]) -> Vec<u32> {
-    fn walk(children: &[Child], out: &mut Vec<u32>) {
-        for child in children {
-            match child {
-                Child::Field { tag, .. } => out.push(*tag),
-                Child::Group { group, .. } => group_tags(group, out),
+    /// What makes two declarations of a tag the same: shape, requiredness and
+    /// chain, components compared by name and requiredness.
+    fn identity(&self, declaration: &Declaration) -> (Option<u16>, bool, bool, Vec<(&str, bool)>) {
+        let mut chain = Vec::new();
+        let mut at = declaration.component;
+        while let Some(row) = at {
+            let component = &self.components[usize::from(row)];
+            chain.push((component.name.as_str(), component.required));
+            at = component.parent;
+        }
+        (
+            declaration.group,
+            declaration.required,
+            declaration.repeating,
+            chain,
+        )
+    }
+
+    /// The component names from `row` out to the scope.
+    fn chain(&self, row: Option<u16>) -> Vec<&str> {
+        let mut names = Vec::new();
+        let mut at = row;
+        while let Some(row) = at {
+            let component = &self.components[usize::from(row)];
+            names.push(component.name.as_str());
+            at = component.parent;
+        }
+        names
+    }
+
+    /// Lower wins a merge: any group before any plain field, then by
+    /// strictness.
+    fn rank(&self, declaration: &Declaration) -> (bool, u8) {
+        (declaration.group.is_none(), self.strictness(declaration))
+    }
+
+    /// 0 is the strictest: required with no optional component on its chain,
+    /// then required inside an optional component, then optional.
+    fn strictness(&self, declaration: &Declaration) -> u8 {
+        if !declaration.required {
+            return 2;
+        }
+        let mut at = declaration.component;
+        while let Some(row) = at {
+            let component = &self.components[usize::from(row)];
+            if !component.required {
+                return 1;
             }
+            at = component.parent;
         }
+        0
     }
-    fn group_tags(group: &GroupTree, out: &mut Vec<u32>) {
-        out.push(group.count_tag);
-        out.extend(&group.members);
-        for nested in &group.nested {
-            group_tags(nested, out);
+
+    /// One member per tag, at its first position. A tag listed twice takes the
+    /// strictest declaration whole — group, requiredness and chain — keeps the
+    /// first on a tie, and is reported once; a group always beats a plain
+    /// field, which a field carries no shape to argue with. Through different
+    /// components it can activate none of them, so it is marked ambiguous.
+    fn finish(
+        self,
+        label: impl Fn() -> String,
+        fields: &FieldsByTag,
+        faults: &mut Vec<Fault>,
+    ) -> ScopeDef {
+        struct Merge {
+            first: usize,
+            winner: usize,
+            declared: usize,
+            all_repeating: bool,
+            ambiguous: bool,
+            differs: bool,
+            fields: bool,
+            groups: bool,
         }
-    }
-    let mut out = Vec::new();
-    walk(children, &mut out);
-    out.sort_unstable();
-    out.dedup();
-    out
-}
-
-/// Old versions type group counters as plain `int`, so the `No…` name prefix is
-/// part of the rule, not just `NumInGroup`.
-fn can_count_group(field: Option<&FieldDef>) -> bool {
-    field.is_some_and(|f| f.datatype_class == Datatype::NumInGroup || f.name.starts_with("No"))
-}
-
-/// Re-nest a flat, indent-annotated child list: a counter field followed by
-/// deeper-indented children becomes a group; a counter with no children stays a field.
-fn grouped_by_indent(
-    children: &[Child],
-    start: usize,
-    parent_indent: i64,
-    fields: &BTreeMap<u32, FieldDef>,
-) -> (Vec<Child>, usize) {
-    let mut grouped = Vec::new();
-    let mut index = start;
-    while index < children.len() {
-        let child = &children[index];
-        let indent = child.indent();
-        if indent <= parent_indent {
-            break;
-        }
-        if let Child::Field { tag, .. } = child {
-            if can_count_group(fields.get(tag)) {
-                let (nested, next) = grouped_by_indent(children, index + 1, indent, fields);
-                if !nested.is_empty() {
-                    if let Some(group) = new_group(&fields[tag].name, *tag, nested) {
-                        grouped.push(Child::Group { group, indent });
-                    }
-                    index = next;
-                    continue;
-                }
-            }
-        }
-        grouped.push(child.clone());
-        index += 1;
-    }
-    (grouped, index)
-}
-
-struct ComponentInfo {
-    id: i64,
-    component_type: String,
-}
-
-struct Content {
-    tag_text: String,
-    indent: i64,
-    /// Fractional in the data (`13.1` sits between 13 and 14).
-    position: f64,
-}
-
-struct Structure<'a> {
-    components_by_name: HashMap<String, ComponentInfo>,
-    contents_by_component: HashMap<i64, Vec<Content>>,
-    fields: &'a BTreeMap<u32, FieldDef>,
-    path: &'a Path,
-}
-
-impl Structure<'_> {
-    /// Expand a component's contents into children; cycle-guarded (a component may
-    /// appear on several branches, but never inside itself) and depth-capped.
-    fn component_children(
-        &self,
-        component_id: i64,
-        seen: &mut HashSet<i64>,
-        depth: usize,
-        base_indent: i64,
-    ) -> Result<Vec<Child>, ParseError> {
-        if depth > MAX_DEPTH {
-            return Err(ParseError::TooDeep {
-                path: self.path.to_path_buf(),
-            });
-        }
-        if !seen.insert(component_id) {
-            return Ok(Vec::new());
-        }
-        let mut children = Vec::new();
-        for content in self
-            .contents_by_component
-            .get(&component_id)
-            .into_iter()
-            .flatten()
-        {
-            let indent = base_indent + content.indent;
-            if let Ok(tag) = content.tag_text.trim().parse::<u32>() {
-                children.push(Child::Field { tag, indent });
-                continue;
-            }
-            let Some(component) = self.components_by_name.get(&content.tag_text) else {
+        let mut at: HashMap<u32, usize> = HashMap::new();
+        let mut merges: Vec<Merge> = Vec::with_capacity(self.members.len());
+        for (i, declaration) in self.members.iter().enumerate() {
+            let Some(&merged) = at.get(&declaration.tag) else {
+                at.insert(declaration.tag, merges.len());
+                merges.push(Merge {
+                    first: i,
+                    winner: i,
+                    declared: 1,
+                    all_repeating: declaration.repeating,
+                    ambiguous: false,
+                    differs: false,
+                    fields: declaration.group.is_none(),
+                    groups: declaration.group.is_some(),
+                });
                 continue;
             };
-            let mut nested = self.component_children(component.id, seen, depth + 1, indent)?;
-            if component.component_type.contains("Repeating") {
-                // The first entry of a repeating component is its counter.
-                if nested.is_empty() {
-                    continue;
-                }
-                let count = nested.remove(0).member_tag();
-                if let Some(field) = self.fields.get(&count) {
-                    if let Some(group) = new_group(&field.name, count, nested) {
-                        children.push(Child::Group { group, indent });
-                    }
-                }
-            } else {
-                children.append(&mut nested);
+            let merge = &mut merges[merged];
+            merge.declared += 1;
+            merge.all_repeating &= declaration.repeating;
+            merge.fields |= declaration.group.is_none();
+            merge.groups |= declaration.group.is_some();
+            let first = &self.members[merge.first];
+            merge.ambiguous |= self.chain(declaration.component) != self.chain(first.component);
+            merge.differs |= self.identity(declaration) != self.identity(first);
+            if self.rank(declaration) < self.rank(&self.members[merge.winner]) {
+                merge.winner = i;
             }
         }
-        seen.remove(&component_id);
-        Ok(children)
+
+        let mut label_text = None;
+        let members = merges
+            .iter()
+            .map(|merge| {
+                let winner = &self.members[merge.winner];
+                let mut within = || label_text.get_or_insert_with(&label).clone();
+                let name = || {
+                    fields
+                        .get(&winner.tag)
+                        .map_or_else(String::new, |field| field.name.clone())
+                };
+                if merge.fields && merge.groups {
+                    faults.push(Fault::FieldAndGroup {
+                        within: within(),
+                        tag: winner.tag,
+                        name: name(),
+                    });
+                // A field that may repeat is allowed to be listed again, as
+                // the same declaration.
+                } else if merge.declared > 1 && !(merge.all_repeating && !merge.differs) {
+                    faults.push(Fault::DoubledTag {
+                        within: within(),
+                        tag: winner.tag,
+                        name: name(),
+                        differs: merge.differs,
+                    });
+                }
+                MemberDef {
+                    tag: winner.tag,
+                    group: winner.group,
+                    component: winner.component,
+                    required: winner.required,
+                    ambiguous: merge.ambiguous,
+                    repeating: winner.repeating,
+                }
+            })
+            .collect();
+        ScopeDef {
+            members,
+            components: self.components,
+        }
     }
 }
 
-/// What a repository's message section yields, beyond the fields.
+/// Structurally deduplicating group arena: the same group reached from many
+/// scopes, with the same entries, is one group. Nested groups come first.
 #[derive(Default)]
-struct Structured {
+struct Arena {
     groups: Vec<GroupDef>,
-    messages: Vec<MessageDef>,
-    header: Vec<u32>,
-    trailer: Vec<u32>,
+    scopes: Vec<ScopeDef>,
+    index: HashMap<(GroupDef, ScopeDef), u16>,
 }
 
-fn repository_structure(
-    messages: &Source,
-    contents: &Source,
-    components: &Source,
-    fields: &BTreeMap<u32, FieldDef>,
-) -> Result<Structured, ParseError> {
-    let components_doc = parse_doc(components)?;
-    let components_root = expect_root(&components_doc, "Components", &components.path)?;
-    let mut components_by_name = HashMap::new();
-    for node in elements(components_root, "Component") {
-        let Ok(id) = child_text(node, "ComponentID").trim().parse::<i64>() else {
-            continue;
+impl Arena {
+    fn intern(
+        &mut self,
+        name: &str,
+        count_tag: u32,
+        scope: ScopeDef,
+        path: &Path,
+    ) -> Result<u16, ParseError> {
+        let def = GroupDef {
+            name: name.to_owned(),
+            count_tag,
+            delimiter_tag: scope.members.first().map_or(0, |member| member.tag),
         };
-        let name = child_text(node, "Name");
-        if name.is_empty() {
-            continue;
+        let key = (def, scope);
+        if let Some(&group) = self.index.get(&key) {
+            return Ok(group);
         }
-        components_by_name.insert(
-            name,
-            ComponentInfo {
-                id,
-                component_type: child_text(node, "ComponentType"),
-            },
-        );
-    }
-
-    let contents_doc = parse_doc(contents)?;
-    let contents_root = expect_root(&contents_doc, "MsgContents", &contents.path)?;
-    let mut contents_by_component: HashMap<i64, Vec<Content>> = HashMap::new();
-    for node in elements(contents_root, "MsgContent") {
-        let Ok(component_id) = child_text(node, "ComponentID").trim().parse::<i64>() else {
-            continue;
-        };
-        let tag_text = child_text(node, "TagText");
-        if tag_text.is_empty() {
-            continue;
-        }
-        contents_by_component
-            .entry(component_id)
-            .or_default()
-            .push(Content {
-                tag_text,
-                indent: child_text(node, "Indent").trim().parse().unwrap_or(0),
-                position: child_text(node, "Position").trim().parse().unwrap_or(0.0),
-            });
-    }
-    for list in contents_by_component.values_mut() {
-        list.sort_by(|a, b| a.position.total_cmp(&b.position));
-    }
-
-    let structure = Structure {
-        components_by_name,
-        contents_by_component,
-        fields,
-        path: &contents.path,
-    };
-
-    let messages_doc = parse_doc(messages)?;
-    let messages_root = expect_root(&messages_doc, "Messages", &messages.path)?;
-    let mut arena = GroupArena::new(&messages.path);
-    // Duplicate message types: last definition wins.
-    let mut defs: BTreeMap<String, MessageDef> = BTreeMap::new();
-    for node in elements(messages_root, "Message") {
-        let msg_type = child_text(node, "MsgType");
-        let name = child_text(node, "Name");
-        if msg_type.is_empty() || name.is_empty() {
-            continue;
-        }
-        let mut groups = Vec::new();
-        if let Ok(component_id) = child_text(node, "ComponentID").trim().parse::<i64>() {
-            let children = structure.component_children(component_id, &mut HashSet::new(), 0, 0)?;
-            let (grouped, _) = grouped_by_indent(&children, 0, -1, fields);
-            for child in grouped {
-                if let Child::Group { group, .. } = child {
-                    groups.push(arena.intern(&group)?);
-                }
-            }
-        }
-        defs.insert(
-            msg_type.clone(),
-            MessageDef {
-                msg_type,
-                name,
-                category: child_text(node, "CategoryID"),
-                description: child_text(node, "Description"),
-                groups,
-            },
-        );
-    }
-    check_u16(defs.len(), &messages.path, "messages")?;
-
-    let session_block = |name: &str| match structure.components_by_name.get(name) {
-        Some(component) => structure
-            .component_children(component.id, &mut HashSet::new(), 0, 0)
-            .map(|children| reached_tags(&children)),
-        None => Ok(Vec::new()),
-    };
-    Ok(Structured {
-        groups: arena.groups,
-        messages: defs.into_values().collect(),
-        header: session_block("StandardHeader")?,
-        trailer: session_block("StandardTrailer")?,
-    })
-}
-
-/// Structurally deduplicating arena: the same component referenced from many
-/// messages becomes one `GroupDef`.
-struct GroupArena<'a> {
-    groups: Vec<GroupDef>,
-    index: HashMap<GroupDef, u16>,
-    path: &'a Path,
-}
-
-impl<'a> GroupArena<'a> {
-    fn new(path: &'a Path) -> Self {
-        GroupArena {
-            groups: Vec::new(),
-            index: HashMap::new(),
-            path,
-        }
-    }
-
-    fn intern(&mut self, tree: &GroupTree) -> Result<u16, ParseError> {
-        let mut nested = Vec::with_capacity(tree.nested.len());
-        for child in &tree.nested {
-            nested.push(self.intern(child)?);
-        }
-        self.push(GroupDef {
-            name: tree.name.clone(),
-            count_tag: tree.count_tag,
-            delimiter_tag: tree.delimiter_tag,
-            members: tree.members.clone(),
-            nested,
-        })
-    }
-
-    fn push(&mut self, def: GroupDef) -> Result<u16, ParseError> {
-        if let Some(&idx) = self.index.get(&def) {
-            return Ok(idx);
-        }
-        check_u16(self.groups.len(), self.path, "groups")?;
-        let idx = self.groups.len() as u16;
-        self.groups.push(def.clone());
-        self.index.insert(def, idx);
-        Ok(idx)
+        let group = index16(self.groups.len(), path, "groups")?;
+        self.groups.push(key.0.clone());
+        self.scopes.push(key.1.clone());
+        self.index.insert(key, group);
+        Ok(group)
     }
 }
 
@@ -620,9 +447,21 @@ pub fn parse_quickfix_bytes(src: &Source) -> Result<ParsedDict, ParseError> {
     // Duplicate tags: last definition wins. Attribute spellings vary between
     // generators (`number`/`tag`, `enum`/`value`, `description`/`name`).
     let mut fields: BTreeMap<u32, FieldDef> = BTreeMap::new();
+    // Built from every element, so both names of a doubled tag resolve. A
+    // doubled name refers to its last number, like a doubled tag.
+    let mut by_name: HashMap<String, u32> = HashMap::new();
+    let mut renumbered: BTreeMap<String, u32> = BTreeMap::new();
     for node in elements_ci(fields_root, "field") {
         let tag_text = attr_any(node, &["number", "tag"]);
         let tag = parse_tag(&tag_text, &src.path)?;
+        // The codec marks an overflowed tag as `u32::MAX`.
+        if tag == 0 || tag == u32::MAX {
+            return Err(ParseError::TagOutOfRange {
+                path: src.path.clone(),
+                name: attr(node, "name"),
+                tag,
+            });
+        }
         let datatype = attr(node, "type");
         let mut def = FieldDef {
             tag,
@@ -630,6 +469,7 @@ pub fn parse_quickfix_bytes(src: &Source) -> Result<ParsedDict, ParseError> {
             datatype_class: Datatype::of(&datatype),
             datatype,
             description: attr(node, "description"),
+            allows_other_values: attr(node, "allowOtherValues").eq_ignore_ascii_case("true"),
             ..FieldDef::default()
         };
         for value in elements_ci(node, "value") {
@@ -649,138 +489,408 @@ pub fn parse_quickfix_bytes(src: &Source) -> Result<ParsedDict, ParseError> {
                 },
             );
         }
+        if !def.name.is_empty() {
+            if let Some(earlier) = by_name.insert(def.name.clone(), tag) {
+                if earlier != tag {
+                    renumbered.entry(def.name.clone()).or_insert(earlier);
+                }
+            }
+        }
         fields.insert(tag, def);
     }
 
-    let by_name: HashMap<String, u32> = fields.values().map(|f| (f.name.clone(), f.tag)).collect();
-    let components: HashMap<String, Node<'_, '_>> = section(root, "components")
+    let component_nodes: Vec<Node<'_, '_>> = section(root, "components")
         .into_iter()
         .flat_map(|c| elements_ci(c, "component"))
-        .map(|c| (attr(c, "name"), c))
+        .collect();
+    let components: HashMap<String, Node<'_, '_>> = component_nodes
+        .iter()
+        .map(|&c| (attr(c, "name"), c))
         .collect();
     let expander = QuickfixExpander {
         by_name: &by_name,
         components: &components,
+        fields: &fields,
         path: &src.path,
+        expanded: RefCell::new(HashSet::new()),
+        faults: RefCell::new(Vec::new()),
+        arena: RefCell::new(Arena::default()),
+        declarations: Cell::new(0),
     };
 
-    let mut arena = GroupArena::new(&src.path);
-    let mut messages: BTreeMap<String, MessageDef> = BTreeMap::new();
+    // Every definition of a type, concatenated in document order.
+    struct Definition {
+        name: String,
+        category: String,
+        draft: Draft,
+        definitions: usize,
+        /// Other distinct names, in file order.
+        others: Vec<String>,
+    }
+    let mut definitions: BTreeMap<String, Definition> = BTreeMap::new();
+    expander
+        .faults
+        .borrow_mut()
+        .extend(renumbered.into_iter().filter_map(|(name, first)| {
+            let second = by_name[&name];
+            // Back on its first number after a detour: still one name, one tag.
+            (first != second).then_some(Fault::FieldNameTwice {
+                name,
+                first,
+                second,
+            })
+        }));
     for node in section(root, "messages")
         .into_iter()
         .flat_map(|m| elements_ci(m, "message"))
     {
         let msg_type = attr(node, "msgtype");
         let name = attr(node, "name");
-        if msg_type.is_empty() || name.is_empty() {
+        if msg_type.is_empty() {
+            return Err(ParseError::MessageWithoutType {
+                path: src.path.clone(),
+                name,
+            });
+        }
+        if name.is_empty() {
+            return Err(ParseError::MessageWithoutName {
+                path: src.path.clone(),
+                msg_type,
+            });
+        }
+        let mut draft = Draft::default();
+        let within = Within::Message {
+            name: &name,
+            msg_type: &msg_type,
+        };
+        expander.expand(node, &mut Vec::new(), 0, &within, &mut draft, None)?;
+        match definitions.entry(msg_type) {
+            btree_map::Entry::Vacant(slot) => {
+                slot.insert(Definition {
+                    name,
+                    category: attr(node, "msgcat"),
+                    draft,
+                    definitions: 1,
+                    others: Vec::new(),
+                });
+            }
+            btree_map::Entry::Occupied(mut slot) => {
+                let definition = slot.get_mut();
+                definition.definitions += 1;
+                if name != definition.name && !definition.others.contains(&name) {
+                    definition.others.push(name);
+                }
+                definition.draft.append(draft, &src.path)?;
+            }
+        }
+    }
+    if definitions.is_empty() {
+        return Err(ParseError::NoMessages {
+            path: src.path.clone(),
+        });
+    }
+
+    let mut messages = Vec::with_capacity(definitions.len());
+    let mut message_scopes = Vec::with_capacity(definitions.len());
+    for (msg_type, definition) in definitions {
+        if definition.definitions > 1 {
+            expander.faults.borrow_mut().push(Fault::DoubledMessage {
+                msg_type: msg_type.clone(),
+                name: definition.name.clone(),
+                definitions: definition.definitions,
+                others: definition.others,
+            });
+        }
+        let within = Within::Message {
+            name: &definition.name,
+            msg_type: &msg_type,
+        };
+        let scope = definition.draft.finish(
+            || within.label(),
+            &fields,
+            &mut expander.faults.borrow_mut(),
+        );
+        message_scopes.push(scope);
+        messages.push(MessageDef {
+            msg_type,
+            name: definition.name,
+            category: definition.category,
+            description: String::new(),
+        });
+    }
+    check_u16(messages.len(), &src.path, "messages")?;
+
+    // An absent or empty section is an empty scope.
+    let session_scope = |name: &str, within: Within<'_>| -> Result<ScopeDef, ParseError> {
+        let mut draft = Draft::default();
+        if let Some(node) = section(root, name) {
+            expander.expand(node, &mut Vec::new(), 0, &within, &mut draft, None)?;
+        }
+        Ok(draft.finish(
+            || within.label(),
+            &fields,
+            &mut expander.faults.borrow_mut(),
+        ))
+    };
+    let header = session_scope("header", Within::Header)?;
+    let trailer = session_scope("trailer", Within::Trailer)?;
+
+    // A component no message reaches is still the file's word; a bad
+    // reference in it rejects the file all the same. It is no scope, so it
+    // interns no group and merges nothing.
+    let arena = expander.arena.take();
+    let reported = expander.faults.borrow().len();
+    for node in component_nodes {
+        let name = attr(node, "name");
+        if expander.expanded.borrow().contains(&name) {
             continue;
         }
-        // QuickFIX carries no message descriptions; the MsgType enum is derived.
-        if let Some(field) = fields.get_mut(&35) {
+        expander.expanded.borrow_mut().insert(name.clone());
+        let within = Within::Component(&name);
+        let mut draft = Draft::default();
+        expander.expand(node, &mut vec![name.clone()], 1, &within, &mut draft, None)?;
+    }
+    let mut faults = expander.faults.into_inner();
+    let unreached = faults.split_off(reported);
+    faults.extend(
+        unreached
+            .into_iter()
+            .filter(|fault| matches!(fault, Fault::UndefinedField { .. })),
+    );
+    faults.sort();
+    faults.dedup();
+
+    // QuickFIX carries no message descriptions; the MsgType enum is derived.
+    if let Some(field) = fields.get_mut(&35) {
+        for message in &messages {
             upsert_enum(
                 &mut field.enums,
                 EnumDef {
-                    value: msg_type.clone(),
-                    name: name.clone(),
-                    description: name.clone(),
+                    value: message.msg_type.clone(),
+                    name: message.name.clone(),
+                    description: message.name.clone(),
                     added: String::new(),
                     added_ep: 0,
                 },
             );
         }
-        let mut groups = Vec::new();
-        for child in expander.children(node, &mut HashSet::new(), 0)? {
-            if let Child::Group { group, .. } = child {
-                groups.push(arena.intern(&group)?);
-            }
-        }
-        messages.insert(
-            msg_type.clone(),
-            MessageDef {
-                msg_type,
-                name,
-                category: attr(node, "msgcat"),
-                description: String::new(),
-                groups,
-            },
-        );
     }
-    check_u16(messages.len(), &src.path, "messages")?;
     check_index_space(fields.len(), &src.path, "fields")?;
     check_enum_space(&fields, &src.path)?;
 
-    let session_block = |name: &str| match section(root, name) {
-        Some(node) => expander
-            .children(node, &mut HashSet::new(), 0)
-            .map(|children| reached_tags(&children)),
-        None => Ok(Vec::new()),
+    let defs = SchemaDefs {
+        header,
+        trailer,
+        messages: message_scopes,
+        groups: arena.scopes,
     };
-
+    let schema = pack(&defs).map_err(|e| pack_error(e, &src.path))?;
     Ok(ParsedDict {
         version: quickfix_version(root),
         fields: fields.into_values().collect(),
-        header: session_block("header")?,
-        trailer: session_block("trailer")?,
         groups: arena.groups,
-        messages: messages.into_values().collect(),
+        messages,
+        schema,
+        faults,
     })
+}
+
+/// Only a count can overrun: the parser merges doubled tags and makes every
+/// index itself, so any other refusal is a bug here.
+fn pack_error(e: PackError, path: &Path) -> ParseError {
+    match e {
+        PackError::Overflow { what, max, .. } => ParseError::IndexOverflow {
+            path: path.to_path_buf(),
+            what,
+            max,
+        },
+        e => panic!(
+            "{}: the parser built an invalid schema: {e}",
+            path.display()
+        ),
+    }
+}
+
+/// Where a reference was made, rendered only when it fails to resolve.
+#[derive(Clone, Copy)]
+enum Within<'a> {
+    Message { name: &'a str, msg_type: &'a str },
+    Header,
+    Trailer,
+    Component(&'a str),
+    Group(&'a str, &'a Within<'a>),
+}
+
+impl Within<'_> {
+    /// The scope as a doubled-tag fault names it: a message with its MsgType(35).
+    fn label(&self) -> String {
+        match self {
+            Within::Message { name, msg_type } => {
+                format!("message {name}, MsgType(35) = {msg_type}")
+            }
+            Within::Group(name, parent) => format!("group {name} in {}", parent.label()),
+            _ => self.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for Within<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Within::Message { name, .. } => write!(f, "message {name}"),
+            Within::Header => f.write_str("the header"),
+            Within::Trailer => f.write_str("the trailer"),
+            Within::Component(name) => write!(f, "component {name}"),
+            Within::Group(name, parent) => write!(f, "group {name} in {parent}"),
+        }
+    }
 }
 
 struct QuickfixExpander<'a, 'i> {
     by_name: &'a HashMap<String, u32>,
     components: &'a HashMap<String, Node<'a, 'i>>,
+    /// For the names a fault shows.
+    fields: &'a FieldsByTag,
     path: &'a Path,
+    /// Components walked so far, so the unreached ones can be checked after.
+    expanded: RefCell<HashSet<String>>,
+    /// Undefined field references, skipped rather than refused, and merges.
+    faults: RefCell<Vec<Fault>>,
+    arena: RefCell<Arena>,
+    /// Members produced so far, bounded by [`MAX_DECLARATIONS`].
+    declarations: Cell<usize>,
 }
 
 impl QuickfixExpander<'_, '_> {
-    /// Children of a message/group/component node with `<component>` references
-    /// spliced in (cycle-guarded, depth-capped). Unknown field/group names and
-    /// groups left without children are dropped.
-    fn children(
+    /// Every member a scope gets passes through here, so the budget counts them all.
+    fn declare(&self, draft: &mut Draft, declaration: Declaration) -> Result<(), ParseError> {
+        let count = self.declarations.get() + 1;
+        if count > MAX_DECLARATIONS {
+            return Err(ParseError::TooManyDeclarations {
+                path: self.path.to_path_buf(),
+            });
+        }
+        self.declarations.set(count);
+        draft.members.push(declaration);
+        Ok(())
+    }
+
+    /// Adds the children of a message/group/component node to `draft`, with
+    /// `<component>` references expanded under row `current`. `chain` holds the
+    /// components being expanded, groups included, so a component inside
+    /// itself is caught however it got there; a `<group>` is a scope of its
+    /// own, with its own component rows. An undefined field is left out and
+    /// recorded as a fault.
+    fn expand(
         &self,
         node: Node<'_, '_>,
-        seen: &mut HashSet<String>,
+        chain: &mut Vec<String>,
         depth: usize,
-    ) -> Result<Vec<Child>, ParseError> {
+        within: &Within<'_>,
+        draft: &mut Draft,
+        current: Option<u16>,
+    ) -> Result<(), ParseError> {
         if depth > MAX_DEPTH {
             return Err(ParseError::TooDeep {
                 path: self.path.to_path_buf(),
             });
         }
-        let mut out = Vec::new();
         for child in node.children().filter(|n| n.is_element()) {
             let name = attr(child, "name");
+            // An absent `required` means optional.
+            let required = child.attribute("required") == Some("Y");
             let kind = child.tag_name().name().to_ascii_lowercase();
             match kind.as_str() {
-                "field" => {
-                    if let Some(&tag) = self.by_name.get(&name) {
-                        out.push(Child::Field { tag, indent: 0 });
-                    }
-                }
+                "field" => match self.by_name.get(&name) {
+                    Some(&tag) => self.declare(
+                        draft,
+                        Declaration {
+                            tag,
+                            group: None,
+                            component: current,
+                            required,
+                            repeating: child.attribute("repeating") == Some("Y"),
+                        },
+                    )?,
+                    None => self.faults.borrow_mut().push(Fault::UndefinedField {
+                        within: within.to_string(),
+                        name,
+                    }),
+                },
                 "group" => {
                     let Some(&count_tag) = self.by_name.get(&name) else {
-                        continue;
+                        return Err(self.undefined("group counter", name, within));
                     };
-                    let members = self.children(child, seen, depth + 1)?;
-                    if let Some(group) = new_group(&name, count_tag, members) {
-                        out.push(Child::Group { group, indent: 0 });
-                    }
+                    let within = Within::Group(&name, within);
+                    let mut entries = Draft::default();
+                    self.expand(child, chain, depth + 1, &within, &mut entries, None)?;
+                    let scope = entries.finish(
+                        || within.label(),
+                        self.fields,
+                        &mut self.faults.borrow_mut(),
+                    );
+                    let group = self
+                        .arena
+                        .borrow_mut()
+                        .intern(&name, count_tag, scope, self.path)?;
+                    self.declare(
+                        draft,
+                        Declaration {
+                            tag: count_tag,
+                            group: Some(group),
+                            component: current,
+                            required,
+                            repeating: false,
+                        },
+                    )?;
                 }
                 "component" => {
                     let Some(&component) = self.components.get(&name) else {
-                        continue;
+                        return Err(self.undefined("component", name, within));
                     };
-                    if !seen.insert(name.clone()) {
-                        continue;
+                    if let Some(start) = chain.iter().position(|seen| *seen == name) {
+                        let mut cycle = chain[start..].to_vec();
+                        cycle.push(name.clone());
+                        return Err(ParseError::ComponentCycle {
+                            path: self.path.to_path_buf(),
+                            name,
+                            cycle,
+                        });
                     }
-                    let mut nested = self.children(component, seen, depth + 1)?;
-                    seen.remove(&name);
-                    out.append(&mut nested);
+                    self.expanded.borrow_mut().insert(name.clone());
+                    let row = draft.push_component(
+                        ComponentDef {
+                            name: name.clone(),
+                            parent: current,
+                            required,
+                        },
+                        self.path,
+                    )?;
+                    chain.push(name.clone());
+                    let expanded = self.expand(
+                        component,
+                        chain,
+                        depth + 1,
+                        &Within::Component(&name),
+                        draft,
+                        Some(row),
+                    );
+                    chain.pop();
+                    expanded?;
                 }
                 _ => {}
             }
         }
-        Ok(out)
+        Ok(())
+    }
+
+    fn undefined(&self, kind: &'static str, name: String, within: &Within<'_>) -> ParseError {
+        ParseError::UndefinedReference {
+            path: self.path.to_path_buf(),
+            kind,
+            name,
+            within: within.to_string(),
+        }
     }
 }
 
@@ -842,35 +952,6 @@ pub(super) fn parse_doc(src: &Source) -> Result<Document<'_>, ParseError> {
     })
 }
 
-fn expect_root<'a, 'i>(
-    doc: &'a Document<'i>,
-    expected: &'static str,
-    path: &Path,
-) -> Result<Node<'a, 'i>, ParseError> {
-    let root = doc.root_element();
-    if root.has_tag_name(expected) {
-        Ok(root)
-    } else {
-        Err(ParseError::MissingRoot {
-            path: path.to_path_buf(),
-            expected,
-        })
-    }
-}
-
-fn elements<'a, 'i: 'a>(node: Node<'a, 'i>, name: &'a str) -> impl Iterator<Item = Node<'a, 'i>> {
-    node.children()
-        .filter(move |n| n.is_element() && n.has_tag_name(name))
-}
-
-/// Text of the first child element `name`, or empty.
-fn child_text<'a>(node: Node<'a, '_>, name: &'a str) -> String {
-    elements(node, name)
-        .next()
-        .map(|n| n.children().filter_map(|c| c.text()).collect())
-        .unwrap_or_default()
-}
-
 pub(super) fn attr(node: Node<'_, '_>, name: &str) -> String {
     node.attribute(name).unwrap_or_default().to_owned()
 }
@@ -890,8 +971,7 @@ fn check_index_space(len: usize, path: &Path, what: &'static str) -> Result<(), 
 }
 
 /// Enum positions are packed like field indices. Checked over the assembled
-/// fields rather than at either source, because the repository parser merges
-/// values from a second file into a field defined in the first.
+/// fields, because MsgType(35) also gains a value from every `<message>`.
 fn check_enum_space(fields: &FieldsByTag, path: &Path) -> Result<(), ParseError> {
     for field in fields.values() {
         if field.enums.len() > MAX_ITEMS {
@@ -917,6 +997,19 @@ fn check_u16(len: usize, path: &Path, what: &'static str) -> Result<(), ParseErr
     Ok(())
 }
 
+/// An index stored in 16 bits with `NONE` reserved, made where it is created
+/// so it can never wrap or become `NONE` before `pack` sees it.
+fn index16(len: usize, path: &Path, what: &'static str) -> Result<u16, ParseError> {
+    u16::try_from(len)
+        .ok()
+        .filter(|&index| index != NONE)
+        .ok_or_else(|| ParseError::IndexOverflow {
+            path: path.to_path_buf(),
+            what,
+            max: usize::from(NONE),
+        })
+}
+
 fn parse_tag(text: &str, path: &Path) -> Result<u32, ParseError> {
     text.trim().parse().map_err(|_| ParseError::BadTag {
         path: path.to_path_buf(),
@@ -935,12 +1028,8 @@ fn upsert_enum(enums: &mut Vec<EnumDef>, def: EnumDef) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dictionary::schema::Scope;
     use std::fmt::Write as _;
-
-    const FIX44: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/xml/custom/synthetic/repository/FIX.4.4/Base"
-    );
 
     fn src(name: &str, xml: &str) -> Source {
         Source {
@@ -949,308 +1038,62 @@ mod tests {
         }
     }
 
-    fn fields_enums(fields: &str, enums: &str) -> RepoSources {
-        RepoSources {
-            fields: src("Fields.xml", fields),
-            enums: src("Enums.xml", enums),
-            messages: None,
-            msg_contents: None,
-            components: None,
-        }
-    }
-
-    fn field_xml(tag: u32, name: &str, datatype: &str) -> String {
-        format!("<Field added=\"FIX.4.0\"><Tag>{tag}</Tag><Name>{name}</Name><Type>{datatype}</Type><Description>d{tag}</Description></Field>")
-    }
-
-    #[test]
-    fn fix44_field_8_is_begin_string() {
-        let dict = parse_repository(Path::new(FIX44)).unwrap();
-        let f = dict.field(8).unwrap();
-        assert_eq!(f.name, "BeginString");
-        assert_eq!(f.datatype, "String");
-        assert_eq!(f.description, "Synthetic description of BeginString.");
-        assert_eq!(f.added, "FIX.4.0");
-        assert!(f.deprecated.is_empty());
-    }
-
-    #[test]
-    fn a_repository_header_reaches_into_repeating_components() {
-        let dict = parse_repository(Path::new(FIX44)).unwrap();
-        assert_eq!(dict.header, vec![8, 9, 34, 35, 49, 52, 56, 627, 628]);
-        assert_eq!(dict.trailer, vec![10]);
-    }
-
-    #[test]
-    fn fix44_enum_54_1_is_buy() {
-        let dict = parse_repository(Path::new(FIX44)).unwrap();
-        let side = dict.field(54).unwrap();
-        let buy = side.enums.iter().find(|e| e.value == "1").unwrap();
-        assert_eq!(buy.name, "Buy");
-    }
-
-    #[test]
-    fn fix44_message_d_is_new_order_single() {
-        let dict = parse_repository(Path::new(FIX44)).unwrap();
-        let d = dict.message("D").unwrap();
-        assert!(d.name.contains("OrderSingle"), "{}", d.name);
-        assert!(!d.category.is_empty());
-        assert!(!d.description.is_empty());
-        assert!(dict.message("ZZZZ").is_none());
-    }
-
-    #[test]
-    fn fix44_market_data_has_no_md_entries_group() {
-        let dict = parse_repository(Path::new(FIX44)).unwrap();
-        let w = dict.message("W").unwrap();
-        let md = w
-            .groups
-            .iter()
-            .map(|&i| &dict.groups[usize::from(i)])
-            .find(|g| g.count_tag == 268)
-            .expect("NoMDEntries group");
-        assert_eq!(md.name, "NoMDEntries");
-        assert_eq!(md.delimiter_tag, 269);
-        assert!(md.members.contains(&270));
-        assert!(!md.members.contains(&268));
-    }
-
-    #[test]
-    fn fields_are_sorted_and_unique_by_tag() {
-        let dict = parse_repository(Path::new(FIX44)).unwrap();
-        assert!(dict.fields.windows(2).all(|w| w[0].tag < w[1].tag));
-        assert!(dict
-            .messages
-            .windows(2)
-            .all(|w| w[0].msg_type < w[1].msg_type));
-        assert!(!dict.groups.is_empty());
-    }
-
-    #[test]
-    fn missing_msg_contents_degrades_to_no_groups() {
-        let full = parse_repository(Path::new(FIX44)).unwrap();
-        let src = RepoSources {
-            fields: Source::read(Path::new(FIX44).join("Fields.xml")).unwrap(),
-            enums: Source::read(Path::new(FIX44).join("Enums.xml")).unwrap(),
-            messages: Some(Source::read(Path::new(FIX44).join("Messages.xml")).unwrap()),
-            msg_contents: None,
-            components: Some(Source::read(Path::new(FIX44).join("Components.xml")).unwrap()),
-        };
-        let dict = parse_repository_bytes(&src).unwrap();
-        assert!(dict.groups.is_empty());
-        assert!(dict.messages.is_empty());
-        assert_eq!(dict.fields, full.fields);
-    }
-
-    #[test]
-    fn version_attribute_is_captured() {
-        let dict = parse_repository(Path::new(FIX44)).unwrap();
-        assert_eq!(dict.version.as_deref(), Some("FIX.4.4"));
-        let none = parse_repository_bytes(&fields_enums("<Fields></Fields>", "<Enums/>")).unwrap();
-        assert_eq!(none.version, None);
-    }
-
-    #[test]
-    fn dtd_is_rejected() {
-        let xml = "<!DOCTYPE Fields [<!ENTITY x \"y\">]><Fields version=\"FIX.4.4\"></Fields>";
-        let err = parse_repository_bytes(&fields_enums(xml, "<Enums/>")).unwrap_err();
-        assert!(matches!(err, ParseError::Xml { .. }), "{err}");
-    }
-
-    #[test]
-    fn missing_root_is_reported() {
-        let err = parse_repository_bytes(&fields_enums("<Nope/>", "<Enums/>")).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                ParseError::MissingRoot {
-                    expected: "Fields",
-                    ..
-                }
-            ),
-            "{err}"
-        );
-        let err = parse_repository_bytes(&fields_enums("<Fields/>", "<Nope/>")).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                ParseError::MissingRoot {
-                    expected: "Enums",
-                    ..
-                }
-            ),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn non_numeric_tag_is_bad_tag() {
-        let xml = "<Fields><Field><Tag>abc</Tag><Name>X</Name></Field></Fields>";
-        let err = parse_repository_bytes(&fields_enums(xml, "<Enums/>")).unwrap_err();
-        assert!(
-            matches!(err, ParseError::BadTag { ref text, .. } if text == "abc"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn duplicate_tag_last_wins() {
-        let xml = format!(
-            "<Fields>{}{}</Fields>",
-            field_xml(8, "Old", "char"),
-            field_xml(8, "BeginString", "String")
-        );
-        let dict = parse_repository_bytes(&fields_enums(&xml, "<Enums/>")).unwrap();
-        assert_eq!(dict.fields.len(), 1);
-        assert_eq!(dict.field(8).unwrap().name, "BeginString");
-    }
-
-    #[test]
-    fn orphan_enum_is_dropped_and_duplicates_last_win() {
-        let fields = format!("<Fields>{}</Fields>", field_xml(54, "Side", "char"));
-        let enums = "<Enums>\
-            <Enum added=\"FIX.2.7\"><Tag>54</Tag><Value>1</Value><SymbolicName>Old</SymbolicName><Description>o</Description></Enum>\
-            <Enum><Tag>54</Tag><Value>1</Value><SymbolicName>Buy</SymbolicName><Description>Buy</Description></Enum>\
-            <Enum><Tag>54</Tag><Value>0</Value><SymbolicName>Zero</SymbolicName><Description>z</Description></Enum>\
-            <Enum><Tag>999</Tag><Value>1</Value><SymbolicName>Orphan</SymbolicName><Description>x</Description></Enum>\
-            </Enums>";
-        let dict = parse_repository_bytes(&fields_enums(&fields, enums)).unwrap();
-        let side = dict.field(54).unwrap();
-        assert_eq!(side.enums.len(), 2);
-        assert_eq!(side.enums[0].value, "0"); // sorted by value
-        assert_eq!(side.enums[1].name, "Buy");
-        assert_eq!(side.enums[1].added, "");
-        assert!(dict.field(999).is_none());
-    }
-
-    /// A chain of N non-repeating components, each containing the next.
-    fn component_chain(n: usize) -> RepoSources {
-        let fields = format!("<Fields>{}</Fields>", field_xml(1, "Account", "String"));
-        let mut components = String::from("<Components>");
-        let mut contents = String::from("<MsgContents>");
-        for i in 1..=n {
-            components.push_str(&format!("<Component><ComponentID>{i}</ComponentID><ComponentType>Block</ComponentType><Name>C{i}</Name></Component>"));
-            let child = if i < n {
-                format!("C{}", i + 1)
-            } else {
-                "1".to_owned()
-            };
-            contents.push_str(&format!("<MsgContent><ComponentID>{i}</ComponentID><TagText>{child}</TagText><Indent>0</Indent><Position>1</Position></MsgContent>"));
-        }
-        components.push_str("</Components>");
-        contents.push_str("</MsgContents>");
-        let messages = "<Messages><Message><ComponentID>1</ComponentID><MsgType>X</MsgType><Name>Chain</Name><CategoryID>T</CategoryID></Message></Messages>";
-        RepoSources {
-            fields: src("Fields.xml", &fields),
-            enums: src("Enums.xml", "<Enums/>"),
-            messages: Some(src("Messages.xml", messages)),
-            msg_contents: Some(src("MsgContents.xml", &contents)),
-            components: Some(src("Components.xml", &components)),
-        }
-    }
-
-    #[test]
-    fn deep_component_nesting_errors_not_overflows() {
-        let err = parse_repository_bytes(&component_chain(MAX_DEPTH + 5)).unwrap_err();
-        assert!(matches!(err, ParseError::TooDeep { .. }), "{err}");
-        let ok = parse_repository_bytes(&component_chain(5)).unwrap();
-        assert_eq!(ok.message("X").unwrap().name, "Chain");
-    }
-
-    #[test]
-    fn component_cycle_is_cut_not_infinite() {
-        let fields = format!(
-            "<Fields>{}{}</Fields>",
-            field_xml(1, "Account", "String"),
-            field_xml(2, "AdvId", "String")
-        );
-        let components = "<Components>\
-            <Component><ComponentID>1</ComponentID><ComponentType>Block</ComponentType><Name>A</Name></Component>\
-            <Component><ComponentID>2</ComponentID><ComponentType>Block</ComponentType><Name>B</Name></Component>\
-            </Components>";
-        let contents = "<MsgContents>\
-            <MsgContent><ComponentID>1</ComponentID><TagText>1</TagText><Indent>0</Indent><Position>1</Position></MsgContent>\
-            <MsgContent><ComponentID>1</ComponentID><TagText>B</TagText><Indent>0</Indent><Position>2</Position></MsgContent>\
-            <MsgContent><ComponentID>2</ComponentID><TagText>2</TagText><Indent>0</Indent><Position>1</Position></MsgContent>\
-            <MsgContent><ComponentID>2</ComponentID><TagText>A</TagText><Indent>0</Indent><Position>2</Position></MsgContent>\
-            </MsgContents>";
-        let messages = "<Messages><Message><ComponentID>1</ComponentID><MsgType>X</MsgType><Name>Cyc</Name></Message></Messages>";
-        let src = RepoSources {
-            fields: src("Fields.xml", &fields),
-            enums: src("Enums.xml", "<Enums/>"),
-            messages: Some(src("Messages.xml", messages)),
-            msg_contents: Some(src("MsgContents.xml", contents)),
-            components: Some(src("Components.xml", components)),
-        };
-        let dict = parse_repository_bytes(&src).unwrap();
-        assert_eq!(dict.message("X").unwrap().name, "Cyc");
-    }
-
-    #[test]
-    fn repeating_component_becomes_group_with_nested_group() {
-        // Message M → NoSides group (552) containing 54 and a nested NoPartyIDs group (453) with 448.
-        let fields = format!(
-            "<Fields>{}{}{}{}</Fields>",
-            field_xml(552, "NoSides", "NumInGroup"),
-            field_xml(54, "Side", "char"),
-            field_xml(453, "NoPartyIDs", "int"),
-            field_xml(448, "PartyID", "String")
-        );
-        let components = "<Components>\
-            <Component><ComponentID>10</ComponentID><ComponentType>ImplicitBlockRepeating</ComponentType><Name>SideGrp</Name></Component>\
-            <Component><ComponentID>20</ComponentID><ComponentType>BlockRepeating</ComponentType><Name>Parties</Name></Component>\
-            </Components>";
-        let contents = "<MsgContents>\
-            <MsgContent><ComponentID>1</ComponentID><TagText>SideGrp</TagText><Indent>0</Indent><Position>1</Position></MsgContent>\
-            <MsgContent><ComponentID>10</ComponentID><TagText>552</TagText><Indent>0</Indent><Position>1</Position></MsgContent>\
-            <MsgContent><ComponentID>10</ComponentID><TagText>54</TagText><Indent>1</Indent><Position>2</Position></MsgContent>\
-            <MsgContent><ComponentID>10</ComponentID><TagText>Parties</TagText><Indent>1</Indent><Position>3</Position></MsgContent>\
-            <MsgContent><ComponentID>20</ComponentID><TagText>453</TagText><Indent>0</Indent><Position>1</Position></MsgContent>\
-            <MsgContent><ComponentID>20</ComponentID><TagText>448</TagText><Indent>1</Indent><Position>2</Position></MsgContent>\
-            </MsgContents>";
-        let messages = "<Messages>\
-            <Message><ComponentID>1</ComponentID><MsgType>M</MsgType><Name>Multi</Name></Message>\
-            <Message><ComponentID>1</ComponentID><MsgType>N</MsgType><Name>Same</Name></Message>\
-            </Messages>";
-        let src = RepoSources {
-            fields: src("Fields.xml", &fields),
-            enums: src("Enums.xml", "<Enums/>"),
-            messages: Some(src("Messages.xml", messages)),
-            msg_contents: Some(src("MsgContents.xml", contents)),
-            components: Some(src("Components.xml", components)),
-        };
-        let dict = parse_repository_bytes(&src).unwrap();
-        let m = dict.message("M").unwrap();
-        assert_eq!(m.groups.len(), 1);
-        let sides = &dict.groups[usize::from(m.groups[0])];
-        assert_eq!(
-            (sides.name.as_str(), sides.count_tag, sides.delimiter_tag),
-            ("NoSides", 552, 54)
-        );
-        assert_eq!(sides.members, vec![54, 453]);
-        assert_eq!(sides.nested.len(), 1);
-        let parties = &dict.groups[usize::from(sides.nested[0])];
-        assert_eq!((parties.count_tag, parties.delimiter_tag), (453, 448));
-        assert_eq!(parties.members, vec![448]);
-        // Same component from two messages → one arena entry each.
-        assert_eq!(dict.groups.len(), 2);
-        assert_eq!(dict.message("N").unwrap().groups, m.groups);
-    }
-
-    // --- QuickFIX -----------------------------------------------------------
-
     const CUSTOM: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/xml/custom");
 
     fn quickfix(xml: &str) -> Result<ParsedDict, ParseError> {
         parse_quickfix_bytes(&src("dict.xml", xml))
     }
 
-    fn group_of<'a>(dict: &'a ParsedDict, msg_type: &str, count_tag: u32) -> Option<&'a GroupDef> {
-        dict.message(msg_type)?
-            .groups
-            .iter()
-            .map(|&i| &dict.groups[usize::from(i)])
-            .find(|g| g.count_tag == count_tag)
+    fn message_of<'a>(dict: &'a ParsedDict, msg_type: &str) -> Scope<'a> {
+        let index = u16::try_from(dict.message_index(msg_type).unwrap()).unwrap();
+        dict.schema.as_schema().message(index)
+    }
+
+    /// The groups a scope opens, as arena indices, in declared order.
+    fn opened(scope: Scope<'_>) -> Vec<u16> {
+        scope
+            .groups()
+            .filter_map(|(_, member)| member.group())
+            .collect()
+    }
+
+    /// Direct member tags in declared order, counters of nested groups included.
+    fn tags(scope: Scope<'_>) -> Vec<u32> {
+        scope.declared().map(|(tag, _)| tag).collect()
+    }
+
+    /// Every tag `scope` reaches, nested groups included, sorted.
+    fn reached(dict: &ParsedDict, scope: Scope<'_>) -> Vec<u32> {
+        let schema = dict.schema.as_schema();
+        let mut tags = schema.tags.to_vec();
+        tags.sort_unstable();
+        tags.dedup();
+        tags.retain(|&tag| scope.reaches(&schema, tag));
+        tags
+    }
+
+    fn header(dict: &ParsedDict) -> Vec<u32> {
+        reached(dict, dict.schema.as_schema().header())
+    }
+
+    fn trailer(dict: &ParsedDict) -> Vec<u32> {
+        reached(dict, dict.schema.as_schema().trailer())
+    }
+
+    /// A top-level group of a message, with its entry scope.
+    fn group_of<'a>(
+        dict: &'a ParsedDict,
+        msg_type: &str,
+        count_tag: u32,
+    ) -> Option<(&'a GroupDef, Scope<'a>)> {
+        let (_, member) = message_of(dict, msg_type)
+            .groups()
+            .find(|&(tag, _)| tag == count_tag)?;
+        let group = member.group()?;
+        Some((
+            &dict.groups[usize::from(group)],
+            dict.schema.as_schema().group(group),
+        ))
     }
 
     #[test]
@@ -1262,14 +1105,83 @@ mod tests {
         assert_eq!(d.name, "NewOrderSingle");
         assert_eq!(d.category, "app");
         // Group declared directly in the message, with a nested group.
-        let parties = group_of(&dict, "D", 453).expect("NoPartyIDs");
+        let (parties, entry) = group_of(&dict, "D", 453).expect("NoPartyIDs");
         assert_eq!(parties.delimiter_tag, 448);
-        assert_eq!(parties.members, vec![448, 452, 802]);
-        let subs = &dict.groups[usize::from(parties.nested[0])];
+        assert_eq!(tags(entry), vec![448, 452, 802]);
+        let subs = &dict.groups[usize::from(opened(entry)[0])];
         assert_eq!((subs.count_tag, subs.delimiter_tag), (802, 523));
         // The Instrument component is spliced inline: not a group.
-        assert_eq!(d.groups.len(), 1);
-        assert_eq!(dict.message("8").unwrap().groups.len(), 0);
+        assert_eq!(opened(message_of(&dict, "D")).len(), 1);
+        assert_eq!(opened(message_of(&dict, "8")).len(), 0);
+    }
+
+    #[test]
+    fn fields_are_sorted_and_unique_by_tag() {
+        let dict = parse_quickfix(&Path::new(CUSTOM).join("synthetic/oe-fix44.xml")).unwrap();
+        assert!(dict.fields.windows(2).all(|w| w[0].tag < w[1].tag));
+        assert!(dict
+            .messages
+            .windows(2)
+            .all(|w| w[0].msg_type < w[1].msg_type));
+        assert!(!dict.groups.is_empty());
+    }
+
+    #[test]
+    fn dtd_is_rejected() {
+        let xml = "<!DOCTYPE fix [<!ENTITY x \"y\">]><fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields/></fix>";
+        let err = quickfix(xml).unwrap_err();
+        assert!(matches!(err, ParseError::Xml { .. }), "{err}");
+    }
+
+    /// One number with two names: the last definition wins, and a reference
+    /// by either name still resolves.
+    #[test]
+    fn duplicate_tag_last_wins() {
+        let dict = quickfix(
+            "<fix major='4' minor='4'>\
+             <header><field name='Old'/></header>\
+             <messages><message name='NewOrderSingle' msgtype='D' msgcat='app'>\
+             <field name='BeginString'/></message></messages><fields>\
+             <field number='8' name='Old' type='CHAR'/>\
+             <field number='8' name='BeginString' type='STRING'/>\
+             </fields></fix>",
+        )
+        .unwrap();
+        assert_eq!(dict.fields.len(), 1);
+        assert_eq!(dict.field(8).unwrap().name, "BeginString");
+        assert_eq!(header(&dict), vec![8]);
+        assert!(dict.faults.is_empty());
+    }
+
+    #[test]
+    fn allow_other_values_is_read() {
+        let dict = quickfix(
+            "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
+             <field number='65' name='SymbolSfx' type='STRING' allowOtherValues='true'>\
+             <value enum='WI' description='WHEN_ISSUED'/></field>\
+             <field number='54' name='Side' type='CHAR'/>\
+             </fields></fix>",
+        )
+        .unwrap();
+        assert!(dict.field(65).unwrap().allows_other_values);
+        assert!(!dict.field(54).unwrap().allows_other_values);
+    }
+
+    #[test]
+    fn duplicate_enum_values_last_win_and_values_sort() {
+        let dict = quickfix(
+            "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
+             <field number='54' name='Side' type='CHAR'>\
+             <value enum='1' description='OLD'/>\
+             <value enum='1' description='BUY'/>\
+             <value enum='0' description='ZERO'/>\
+             </field></fields></fix>",
+        )
+        .unwrap();
+        let side = dict.field(54).unwrap();
+        assert_eq!(side.enums.len(), 2);
+        assert_eq!(side.enums[0].value, "0");
+        assert_eq!(side.enums[1].name, "BUY");
     }
 
     #[test]
@@ -1278,12 +1190,12 @@ mod tests {
         // the group's own first member comes from a nested <component name='Instrument'/>.
         let dict = parse_quickfix(&Path::new(CUSTOM).join("synthetic/md-fix50.xml")).unwrap();
         assert_eq!(dict.version.as_deref(), Some("FIX.5.0"));
-        let related = group_of(&dict, "y", 146).expect("NoRelatedSym via SecListGrp");
+        let (related, entry) = group_of(&dict, "y", 146).expect("NoRelatedSym via SecListGrp");
         assert_eq!(related.name, "NoRelatedSym");
         assert_eq!(related.delimiter_tag, 55);
-        assert_eq!(related.members, vec![55, 167, 562]);
+        assert_eq!(tags(entry), vec![55, 167, 562]);
         // Message V declares NoRelatedSym directly — present as well, but not the point.
-        assert_eq!(group_of(&dict, "V", 146).unwrap().members, vec![55]);
+        assert_eq!(tags(group_of(&dict, "V", 146).unwrap().1), vec![55]);
         // W reaches NoMDEntries through MDFullGrp; MDReqGrp is defined but unused.
         assert!(group_of(&dict, "W", 268).is_some());
         assert!(dict.groups.iter().all(|g| g.count_tag != 267));
@@ -1292,7 +1204,7 @@ mod tests {
     #[test]
     fn quickfix_enum_name_comes_from_description_attr() {
         let dict = quickfix(
-            "<fix major='4' minor='4'><fields>\
+            "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
              <field number='54' name='Side' type='CHAR'><value enum='1' description='BUY'/></field>\
              </fields></fix>",
         )
@@ -1329,7 +1241,7 @@ mod tests {
     #[test]
     fn attr_fallbacks_are_ported() {
         let dict = quickfix(
-            "<FIX major='4' minor='2'><Fields>\
+            "<FIX major='4' minor='2'><Messages><Message name='NewOrderSingle' msgtype='D' msgcat='app'/></Messages><Fields>\
              <Field tag='54' name='Side' type='CHAR'><Value value='2' name='SELL'/></Field>\
              </Fields></FIX>",
         )
@@ -1363,8 +1275,36 @@ mod tests {
             ),
             "{err}"
         );
-        let err = quickfix("<fix><fields><field number='x' name='A'/></fields></fix>").unwrap_err();
+        let err = quickfix("<fix><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields><field number='x' name='A'/></fields></fix>").unwrap_err();
         assert!(matches!(err, ParseError::BadTag { .. }), "{err}");
+    }
+
+    /// The codec marks a tag whose digits overflow a `u32` as `u32::MAX`, so a
+    /// field with that number would name every such tag; 0 is no FIX tag.
+    #[test]
+    fn a_field_number_outside_the_tag_range_is_refused() {
+        let file = |number: &str| {
+            format!(
+                "<fix><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages>\
+                 <fields><field number='{number}' name='A' type='STRING'/></fields></fix>"
+            )
+        };
+        for (number, text) in [
+            (
+                "0",
+                "dict.xml: field A has number 0, outside the tag range 1 to 4294967294",
+            ),
+            (
+                "4294967295",
+                "dict.xml: field A has number 4294967295, outside the tag range 1 to 4294967294",
+            ),
+        ] {
+            let err = quickfix(&file(number)).unwrap_err();
+            assert!(matches!(err, ParseError::TagOutOfRange { .. }), "{err}");
+            assert_eq!(err.to_string(), text);
+        }
+        let dict = quickfix(&file("4294967294")).unwrap();
+        assert_eq!(dict.fields[0].tag, 4_294_967_294);
     }
 
     /// A QuickFIX file declares its own session layer, groups included; a
@@ -1387,14 +1327,14 @@ mod tests {
              </fields></fix>",
         )
         .unwrap();
-        assert_eq!(dict.header, vec![8, 35, 627, 628]);
-        assert_eq!(dict.trailer, vec![10]);
+        assert_eq!(header(&dict), vec![8, 35, 627, 628]);
+        assert_eq!(trailer(&dict), vec![10]);
 
         let none = quickfix(
-            "<fix major='4' minor='4'><fields><field number='1' name='A' type='STRING'/></fields></fix>",
+            "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields><field number='1' name='A' type='STRING'/></fields></fix>",
         )
         .unwrap();
-        assert!(none.header.is_empty() && none.trailer.is_empty());
+        assert!(header(&none).is_empty() && trailer(&none).is_empty());
     }
 
     /// The counter is typed `int` in older files, so the name still decides.
@@ -1402,6 +1342,7 @@ mod tests {
     fn a_datatype_class_comes_from_the_spelling_whatever_its_case() {
         let dict = quickfix(
             "<fix major='4' minor='4'>\
+             <messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages>\
              <fields><field number='44' name='Price' type='PRICE'/>\
              <field number='60' name='TransactTime' type='utctimestamp'/>\
              <field number='9999' name='Odd' type='Whatever'/></fields></fix>",
@@ -1414,33 +1355,1203 @@ mod tests {
         assert_eq!(dict.field(44).unwrap().datatype, "PRICE");
     }
 
-    #[test]
-    fn empty_group_is_dropped() {
-        let dict = quickfix(
-            "<fix major='4' minor='4'>\
-             <messages><message name='X' msgtype='X'><group name='NoX' required='N'/><group name='Unknown'><field name='A'/></group></message></messages>\
-             <fields><field number='1' name='A' type='STRING'/><field number='2' name='NoX' type='NUMINGROUP'/></fields></fix>",
-        )
-        .unwrap();
-        assert!(dict.message("X").unwrap().groups.is_empty());
-        assert!(dict.groups.is_empty());
+    // --- Scopes -----------------------------------------------------------
+    // Expected values are written out by hand from the XML in each test.
+
+    const SCHEMA_FIELDS: &str = "\
+        <field number='8' name='BeginString' type='STRING'/>\
+        <field number='10' name='CheckSum' type='STRING'/>\
+        <field number='11' name='ClOrdID' type='STRING'/>\
+        <field number='35' name='MsgType' type='STRING'/>\
+        <field number='48' name='SecurityID' type='STRING'/>\
+        <field number='54' name='Side' type='CHAR'/>\
+        <field number='55' name='Symbol' type='STRING'/>\
+        <field number='58' name='Text' type='STRING'/>\
+        <field number='448' name='PartyID' type='STRING'/>\
+        <field number='452' name='PartyRole' type='INT'/>\
+        <field number='453' name='NoPartyIDs' type='NUMINGROUP'/>\
+        <field number='454' name='NoSecurityAltID' type='NUMINGROUP'/>\
+        <field number='455' name='SecurityAltID' type='STRING'/>\
+        <field number='517' name='OwnershipType' type='CHAR'/>\
+        <field number='627' name='NoHops' type='NUMINGROUP'/>\
+        <field number='628' name='HopCompID' type='STRING'/>\
+        <field number='629' name='HopSendingTime' type='UTCTIMESTAMP'/>\
+        <field number='1499' name='NoAsgnReqs' type='NUMINGROUP'/>";
+
+    fn schema_dict(body: &str) -> ParsedDict {
+        quickfix(&format!(
+            "<fix major='4' minor='4'>{body}<fields>{SCHEMA_FIELDS}</fields></fix>"
+        ))
+        .unwrap()
+    }
+
+    fn defs(dict: &ParsedDict) -> SchemaDefs {
+        dict.schema.as_schema().to_defs()
+    }
+
+    fn message_scope(dict: &ParsedDict, msg_type: &str) -> ScopeDef {
+        defs(dict).messages[dict.message_index(msg_type).unwrap()].clone()
+    }
+
+    fn plain(tag: u32) -> MemberDef {
+        MemberDef {
+            tag,
+            group: None,
+            component: None,
+            required: false,
+            ambiguous: false,
+            repeating: false,
+        }
+    }
+
+    fn required(tag: u32) -> MemberDef {
+        MemberDef {
+            required: true,
+            ..plain(tag)
+        }
+    }
+
+    fn component(name: &str, parent: Option<u16>, required: bool) -> ComponentDef {
+        ComponentDef {
+            name: name.into(),
+            parent,
+            required,
+        }
+    }
+
+    fn scope(members: Vec<MemberDef>, components: Vec<ComponentDef>) -> ScopeDef {
+        ScopeDef {
+            members,
+            components,
+        }
+    }
+
+    fn group(name: &str, count_tag: u32, delimiter_tag: u32) -> GroupDef {
+        GroupDef {
+            name: name.into(),
+            count_tag,
+            delimiter_tag,
+        }
+    }
+
+    fn doubled(within: &str, tag: u32, name: &str, differs: bool) -> Fault {
+        Fault::DoubledTag {
+            within: within.into(),
+            tag,
+            name: name.into(),
+            differs,
+        }
     }
 
     #[test]
-    fn quickfix_component_cycle_is_cut_and_depth_capped() {
-        let dict = quickfix(
-            "<fix major='4' minor='4'>\
-             <messages><message name='X' msgtype='X'><component name='A'/></message></messages>\
+    fn a_required_and_an_optional_component_each_get_a_row() {
+        let dict = schema_dict(
+            "<messages><message name='NewOrderSingle' msgtype='D'>\
+               <field name='ClOrdID' required='Y'/>\
+               <component name='Instrument' required='Y'/>\
+               <component name='Parties' required='N'/>\
+               <field name='Side' required='Y'/>\
+             </message></messages>\
              <components>\
-               <component name='A'><field name='F1'/><component name='B'/></component>\
-               <component name='B'><group name='NoG'><field name='F2'/><component name='A'/></group></component>\
-             </components>\
-             <fields><field number='1' name='F1'/><field number='2' name='F2'/><field number='3' name='NoG'/></fields></fix>",
-        )
+               <component name='Instrument'>\
+                 <field name='Symbol' required='Y'/><field name='SecurityID' required='N'/>\
+               </component>\
+               <component name='Parties'><field name='PartyID' required='Y'/></component>\
+             </components>",
+        );
+        assert_eq!(
+            message_scope(&dict, "D"),
+            scope(
+                vec![
+                    required(11),
+                    MemberDef {
+                        component: Some(0),
+                        ..required(55)
+                    },
+                    MemberDef {
+                        component: Some(0),
+                        ..plain(48)
+                    },
+                    MemberDef {
+                        component: Some(1),
+                        ..required(448)
+                    },
+                    required(54),
+                ],
+                vec![
+                    component("Instrument", None, true),
+                    component("Parties", None, false),
+                ],
+            )
+        );
+        assert!(dict.faults.is_empty());
+    }
+
+    /// Requiredness sits on the reference, and an absent `required` is optional.
+    #[test]
+    fn one_component_is_required_in_one_message_and_optional_in_another() {
+        let dict = schema_dict(
+            "<messages>\
+               <message name='NewOrderSingle' msgtype='D'><component name='Instrument' required='Y'/></message>\
+               <message name='OrderCancelRequest' msgtype='F'>\
+                 <field name='ClOrdID' required='Y'/><component name='Instrument'/>\
+               </message>\
+             </messages>\
+             <components><component name='Instrument'><field name='Symbol' required='Y'/></component></components>",
+        );
+        let symbol = MemberDef {
+            component: Some(0),
+            ..required(55)
+        };
+        assert_eq!(
+            message_scope(&dict, "D"),
+            scope(vec![symbol], vec![component("Instrument", None, true)])
+        );
+        assert_eq!(
+            message_scope(&dict, "F"),
+            scope(
+                vec![required(11), symbol],
+                vec![component("Instrument", None, false)]
+            )
+        );
+    }
+
+    #[test]
+    fn a_required_component_inside_an_optional_one_hangs_off_it() {
+        let dict = schema_dict(
+            "<messages><message name='NewOrderSingle' msgtype='D'>\
+               <component name='Instrument' required='N'/>\
+             </message></messages>\
+             <components>\
+               <component name='Instrument'>\
+                 <field name='Symbol' required='Y'/><component name='SecAltIDGrp' required='Y'/>\
+               </component>\
+               <component name='SecAltIDGrp'><field name='SecurityID' required='Y'/></component>\
+             </components>",
+        );
+        assert_eq!(
+            message_scope(&dict, "D"),
+            scope(
+                vec![
+                    MemberDef {
+                        component: Some(0),
+                        ..required(55)
+                    },
+                    MemberDef {
+                        component: Some(1),
+                        ..required(48)
+                    },
+                ],
+                vec![
+                    component("Instrument", None, false),
+                    component("SecAltIDGrp", Some(0), true),
+                ],
+            )
+        );
+    }
+
+    /// The counter belongs to the scope the component is expanded into; the
+    /// group's own entries start a fresh chain.
+    #[test]
+    fn a_group_counter_reached_through_a_component_carries_it() {
+        let dict = schema_dict(
+            "<messages><message name='NewOrderSingle' msgtype='D'>\
+               <field name='ClOrdID' required='Y'/><component name='Instrument' required='Y'/>\
+             </message></messages>\
+             <components>\
+               <component name='Instrument'>\
+                 <field name='Symbol' required='Y'/><component name='SecAltIDGrp' required='N'/>\
+               </component>\
+               <component name='SecAltIDGrp'>\
+                 <group name='NoSecurityAltID' required='N'><field name='SecurityAltID' required='Y'/></group>\
+               </component>\
+             </components>",
+        );
+        assert_eq!(
+            message_scope(&dict, "D"),
+            scope(
+                vec![
+                    required(11),
+                    MemberDef {
+                        component: Some(0),
+                        ..required(55)
+                    },
+                    MemberDef {
+                        group: Some(0),
+                        component: Some(1),
+                        ..plain(454)
+                    },
+                ],
+                vec![
+                    component("Instrument", None, true),
+                    component("SecAltIDGrp", Some(0), false),
+                ],
+            )
+        );
+        assert_eq!(defs(&dict).groups, [scope(vec![required(455)], vec![])]);
+        assert_eq!(dict.groups, [group("NoSecurityAltID", 454, 455)]);
+    }
+
+    /// An empty nested group still delimits the entry around it.
+    #[test]
+    fn an_empty_nested_group_as_the_first_member_is_the_delimiter() {
+        let dict = quickfix(&format!(
+            "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D'>\
+               <group name='NoPartyIDs'><group name='NoPartySubIDs'/><field name='PartyID'/></group>\
+             </message></messages>\
+             <fields>{SCHEMA_FIELDS}<field number='802' name='NoPartySubIDs' type='NUMINGROUP'/></fields></fix>"
+        ))
         .unwrap();
-        let g = group_of(&dict, "X", 3).unwrap();
-        assert_eq!(g.delimiter_tag, 2);
-        assert_eq!(g.members, vec![2]);
+        assert_eq!(
+            defs(&dict).groups,
+            [
+                scope(vec![], vec![]),
+                scope(
+                    vec![
+                        MemberDef {
+                            group: Some(0),
+                            ..plain(802)
+                        },
+                        plain(448),
+                    ],
+                    vec![],
+                ),
+            ]
+        );
+        assert_eq!(
+            dict.groups,
+            [
+                group("NoPartySubIDs", 802, 0),
+                group("NoPartyIDs", 453, 802),
+            ]
+        );
+    }
+
+    /// As FIX.5.0SP2's NoAsgnReqs(1499), whose first member is NoPartyIDs(453).
+    #[test]
+    fn a_nested_counter_can_be_the_delimiter() {
+        let dict = schema_dict(
+            "<messages><message name='StreamAssignmentReport' msgtype='CD'>\
+               <group name='NoAsgnReqs' required='N'>\
+                 <component name='Parties' required='N'/><field name='Symbol'/>\
+               </group>\
+             </message></messages>\
+             <components><component name='Parties'>\
+               <group name='NoPartyIDs' required='N'><field name='PartyID'/><field name='PartyRole'/></group>\
+             </component></components>",
+        );
+        assert_eq!(
+            defs(&dict).groups,
+            [
+                scope(vec![plain(448), plain(452)], vec![]),
+                scope(
+                    vec![
+                        MemberDef {
+                            group: Some(0),
+                            component: Some(0),
+                            ..plain(453)
+                        },
+                        plain(55),
+                    ],
+                    vec![component("Parties", None, false)],
+                ),
+            ]
+        );
+        assert_eq!(
+            dict.groups,
+            [
+                group("NoPartyIDs", 453, 448),
+                group("NoAsgnReqs", 1499, 453),
+            ]
+        );
+        assert_eq!(
+            message_scope(&dict, "CD"),
+            scope(
+                vec![MemberDef {
+                    group: Some(1),
+                    ..plain(1499)
+                }],
+                vec![]
+            )
+        );
+    }
+
+    #[test]
+    fn header_no_hops_is_a_group_direct_or_through_a_component() {
+        let order = "<messages><message name='NewOrderSingle' msgtype='D'><field name='Symbol'/></message></messages>";
+        let hops = "<group name='NoHops' required='N'>\
+                      <field name='HopCompID'/><field name='HopSendingTime'/>\
+                    </group>";
+        let entries = [scope(vec![plain(628), plain(629)], vec![])];
+        let no_hops = [group("NoHops", 627, 628)];
+
+        let direct = schema_dict(&format!(
+            "<header><field name='BeginString' required='Y'/>{hops}</header>\
+             <trailer><field name='CheckSum' required='Y'/></trailer>{order}"
+        ));
+        let schema = defs(&direct);
+        assert_eq!(
+            schema.header,
+            scope(
+                vec![
+                    required(8),
+                    MemberDef {
+                        group: Some(0),
+                        ..plain(627)
+                    },
+                ],
+                vec![]
+            )
+        );
+        assert_eq!(schema.trailer, scope(vec![required(10)], vec![]));
+        assert_eq!(schema.groups, entries);
+        assert_eq!(direct.groups, no_hops);
+        assert_eq!(header(&direct), [8, 627, 628, 629]);
+
+        let through = schema_dict(&format!(
+            "<header><field name='BeginString' required='Y'/><component name='HopGrp' required='N'/></header>\
+             {order}<components><component name='HopGrp'>{hops}</component></components>"
+        ));
+        let schema = defs(&through);
+        assert_eq!(
+            schema.header,
+            scope(
+                vec![
+                    required(8),
+                    MemberDef {
+                        group: Some(0),
+                        component: Some(0),
+                        ..plain(627)
+                    },
+                ],
+                vec![component("HopGrp", None, false)]
+            )
+        );
+        assert_eq!(schema.groups, entries);
+        assert_eq!(through.groups, no_hops);
+    }
+
+    #[test]
+    fn a_tag_listed_twice_is_one_member_at_its_first_position() {
+        let dict = schema_dict(
+            "<messages>\
+               <message name='RegistrationInstructions' msgtype='o'>\
+                 <field name='OwnershipType' required='N'/>\
+                 <field name='ClOrdID' required='Y'/>\
+                 <field name='OwnershipType' required='Y'/>\
+                 <field name='OwnershipType' required='N'/>\
+               </message>\
+               <message name='NewOrderSingle' msgtype='D'>\
+                 <group name='NoPartyIDs' required='N'>\
+                   <field name='PartyID'/><field name='PartyRole'/><field name='PartyID'/>\
+                 </group>\
+               </message>\
+             </messages>",
+        );
+        assert_eq!(
+            message_scope(&dict, "o"),
+            scope(vec![required(517), required(11)], vec![])
+        );
+        assert_eq!(
+            defs(&dict).groups,
+            [scope(vec![plain(448), plain(452)], vec![])]
+        );
+        assert_eq!(
+            dict.faults,
+            [
+                doubled(
+                    "group NoPartyIDs in message NewOrderSingle, MsgType(35) = D",
+                    448,
+                    "PartyID",
+                    false
+                ),
+                doubled(
+                    "message RegistrationInstructions, MsgType(35) = o",
+                    517,
+                    "OwnershipType",
+                    true
+                ),
+            ],
+            "three declarations, one fault"
+        );
+        let text: Vec<String> = dict.faults.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            text,
+            [
+                "group NoPartyIDs in message NewOrderSingle, MsgType(35) = D, lists PartyID(448) \
+                 twice; merged into one",
+                "message RegistrationInstructions, MsgType(35) = o, lists OwnershipType(517) \
+                 twice; merged into one",
+            ]
+        );
+        let header = schema_dict(
+            "<header><field name='BeginString' required='Y'/><field name='BeginString'/></header>\
+             <messages><message name='NewOrderSingle' msgtype='D'/></messages>",
+        );
+        assert_eq!(
+            header.faults[0].to_string(),
+            "the header lists BeginString(8) twice; merged into one"
+        );
+    }
+
+    /// Required outside any optional component beats required inside one,
+    /// which beats optional, whichever comes first.
+    #[test]
+    fn the_strictest_declaration_of_a_doubled_tag_wins() {
+        let dict = schema_dict(
+            "<messages>\
+               <message name='NewOrderSingle' msgtype='D'>\
+                 <component name='Instrument' required='N'/><field name='Symbol' required='Y'/>\
+               </message>\
+               <message name='OrderCancelRequest' msgtype='F'>\
+                 <field name='Symbol'/><component name='Instrument' required='N'/>\
+               </message>\
+             </messages>\
+             <components><component name='Instrument'><field name='Symbol' required='Y'/></component></components>",
+        );
+        let instrument = vec![component("Instrument", None, false)];
+        assert_eq!(
+            message_scope(&dict, "D"),
+            scope(
+                vec![MemberDef {
+                    ambiguous: true,
+                    ..required(55)
+                }],
+                instrument.clone()
+            )
+        );
+        assert_eq!(
+            message_scope(&dict, "F"),
+            scope(
+                vec![MemberDef {
+                    component: Some(0),
+                    ambiguous: true,
+                    ..required(55)
+                }],
+                instrument
+            )
+        );
+        assert_eq!(
+            dict.faults,
+            [
+                doubled(
+                    "message NewOrderSingle, MsgType(35) = D",
+                    55,
+                    "Symbol",
+                    true
+                ),
+                doubled(
+                    "message OrderCancelRequest, MsgType(35) = F",
+                    55,
+                    "Symbol",
+                    true
+                ),
+            ]
+        );
+    }
+
+    /// Ambiguous when the declarations came through different components; the
+    /// same component listed twice is not.
+    #[test]
+    fn a_tag_shared_by_two_optional_components_is_ambiguous() {
+        let dict = schema_dict(
+            "<messages>\
+               <message name='NewOrderSingle' msgtype='D'>\
+                 <component name='CommissionData' required='N'/><component name='Stipulations' required='N'/>\
+               </message>\
+               <message name='OrderCancelRequest' msgtype='F'>\
+                 <component name='CommissionData' required='N'/><component name='CommissionData' required='N'/>\
+               </message>\
+             </messages>\
+             <components>\
+               <component name='CommissionData'><field name='Text'/></component>\
+               <component name='Stipulations'><field name='Text'/></component>\
+             </components>",
+        );
+        assert_eq!(
+            message_scope(&dict, "D"),
+            scope(
+                vec![MemberDef {
+                    component: Some(0),
+                    ambiguous: true,
+                    ..plain(58)
+                }],
+                vec![
+                    component("CommissionData", None, false),
+                    component("Stipulations", None, false),
+                ]
+            )
+        );
+        assert_eq!(
+            message_scope(&dict, "F"),
+            scope(
+                vec![MemberDef {
+                    component: Some(0),
+                    ..plain(58)
+                }],
+                vec![
+                    component("CommissionData", None, false),
+                    component("CommissionData", None, false),
+                ]
+            )
+        );
+        assert_eq!(
+            dict.faults,
+            [
+                doubled("message NewOrderSingle, MsgType(35) = D", 58, "Text", true),
+                doubled(
+                    "message OrderCancelRequest, MsgType(35) = F",
+                    58,
+                    "Text",
+                    false
+                ),
+            ]
+        );
+    }
+
+    /// The shape, requiredness and chain come from one declaration together.
+    #[test]
+    fn a_counter_listed_twice_takes_the_strictest_shape_whole() {
+        let dict = schema_dict(
+            "<messages><message name='NewOrderSingle' msgtype='D'>\
+               <group name='NoPartyIDs' required='N'><field name='PartyID'/></group>\
+               <field name='Symbol'/>\
+               <component name='Parties' required='Y'/>\
+             </message></messages>\
+             <components><component name='Parties'>\
+               <group name='NoPartyIDs' required='Y'>\
+                 <field name='PartyID' required='Y'/><field name='PartyRole'/>\
+               </group>\
+             </component></components>",
+        );
+        assert_eq!(
+            message_scope(&dict, "D"),
+            scope(
+                vec![
+                    MemberDef {
+                        group: Some(1),
+                        component: Some(0),
+                        ambiguous: true,
+                        ..required(453)
+                    },
+                    plain(55),
+                ],
+                vec![component("Parties", None, true)]
+            )
+        );
+        assert_eq!(
+            defs(&dict).groups,
+            [
+                scope(vec![plain(448)], vec![]),
+                scope(vec![required(448), plain(452)], vec![]),
+            ]
+        );
+        assert_eq!(opened(message_of(&dict, "D")), [1]);
+        assert_eq!(
+            dict.faults,
+            [doubled(
+                "message NewOrderSingle, MsgType(35) = D",
+                453,
+                "NoPartyIDs",
+                true
+            )]
+        );
+    }
+
+    fn field_and_group(within: &str, tag: u32, name: &str) -> Fault {
+        Fault::FieldAndGroup {
+            within: within.into(),
+            tag,
+            name: name.into(),
+        }
+    }
+
+    /// A group declaration of a counter beats a plain field of the same tag
+    /// whole, whatever the order or requiredness, with its own fault.
+    #[test]
+    fn a_group_beats_a_plain_field_of_the_same_counter() {
+        let parties = "<components><component name='Parties'>\
+             <group name='NoPartyIDs' required='N'><field name='PartyID'/><field name='PartyRole'/></group>\
+             </component></components>";
+        let field_first = schema_dict(&format!(
+            "<messages><message name='ExecutionReport' msgtype='8'>\
+               <field name='NoPartyIDs' required='Y'/><field name='Symbol'/>\
+               <component name='Parties' required='N'/>\
+             </message></messages>{parties}"
+        ));
+        assert_eq!(
+            message_scope(&field_first, "8"),
+            scope(
+                vec![
+                    MemberDef {
+                        group: Some(0),
+                        component: Some(0),
+                        ambiguous: true,
+                        ..plain(453)
+                    },
+                    plain(55),
+                ],
+                vec![component("Parties", None, false)]
+            )
+        );
+        assert_eq!(opened(message_of(&field_first, "8")), [0]);
+        assert_eq!(
+            field_first.faults,
+            [field_and_group(
+                "message ExecutionReport, MsgType(35) = 8",
+                453,
+                "NoPartyIDs"
+            )]
+        );
+        assert_eq!(
+            field_first.faults[0].to_string(),
+            "message ExecutionReport, MsgType(35) = 8, lists NoPartyIDs(453) as a plain field \
+             and as a group; the group is kept"
+        );
+
+        let group_first = schema_dict(&format!(
+            "<messages><message name='ExecutionReport' msgtype='8'>\
+               <component name='Parties' required='N'/><field name='Symbol'/>\
+               <field name='NoPartyIDs' required='Y'/><field name='NoPartyIDs'/>\
+             </message></messages>{parties}"
+        ));
+        assert_eq!(
+            message_scope(&group_first, "8"),
+            scope(
+                vec![
+                    MemberDef {
+                        group: Some(0),
+                        component: Some(0),
+                        ambiguous: true,
+                        ..plain(453)
+                    },
+                    plain(55),
+                ],
+                vec![component("Parties", None, false)]
+            )
+        );
+        assert_eq!(
+            group_first.faults,
+            [field_and_group(
+                "message ExecutionReport, MsgType(35) = 8",
+                453,
+                "NoPartyIDs"
+            )],
+            "one fault, not a doubled-tag one besides"
+        );
+    }
+
+    /// Nothing the file says is lost when every declaration is the same; a
+    /// choice between different ones is an error.
+    #[test]
+    fn a_doubled_tag_is_a_warning_when_identical_and_an_error_when_not() {
+        let dict = schema_dict(
+            "<messages>\
+               <message name='NewOrderSingle' msgtype='D'>\
+                 <field name='Symbol'/><field name='Side' required='Y'/><field name='Symbol'/>\
+                 <component name='CommissionData' required='N'/><component name='CommissionData' required='N'/>\
+               </message>\
+               <message name='OrderCancelRequest' msgtype='F'>\
+                 <field name='Symbol'/><field name='Symbol' required='Y'/>\
+                 <component name='CommissionData' required='N'/><component name='CommissionData' required='Y'/>\
+               </message>\
+             </messages>\
+             <components><component name='CommissionData'><field name='Text'/></component></components>",
+        );
+        let order = "message NewOrderSingle, MsgType(35) = D";
+        let cancel = "message OrderCancelRequest, MsgType(35) = F";
+        assert_eq!(
+            dict.faults,
+            [
+                doubled(order, 55, "Symbol", false),
+                doubled(order, 58, "Text", false),
+                doubled(cancel, 55, "Symbol", true),
+                doubled(cancel, 58, "Text", true),
+            ]
+        );
+        let errors: Vec<bool> = dict.faults.iter().map(Fault::is_error).collect();
+        assert_eq!(errors, [false, false, true, true]);
+    }
+
+    fn doubled_message(msg_type: &str, name: &str, definitions: usize, others: &[&str]) -> Fault {
+        Fault::DoubledMessage {
+            msg_type: msg_type.into(),
+            name: name.into(),
+            definitions,
+            others: others.iter().map(|&other| other.to_owned()).collect(),
+        }
+    }
+
+    /// The other names are what makes it an error, so the fault says them:
+    /// each distinct one once, in file order.
+    #[test]
+    fn a_doubled_message_names_its_other_names() {
+        let dict = schema_dict(
+            "<messages>\
+               <message name='NewOrderSingle' msgtype='D'/>\
+               <message name='OrderSingle' msgtype='D'/>\
+               <message name='OrderCancelRequest' msgtype='F'/>\
+               <message name='CancelOrder' msgtype='F'/>\
+               <message name='OrderCancelRequest' msgtype='F'/>\
+               <message name='CancelOrder' msgtype='F'/>\
+               <message name='Heartbeat' msgtype='0'/>\
+               <message name='Heartbeat' msgtype='0'/>\
+               <message name='Heartbeat' msgtype='0'/>\
+               <message name='ExecutionReport' msgtype='8'/>\
+               <message name='OrderSingle' msgtype='8'/>\
+               <message name='NOS' msgtype='8'/>\
+             </messages>",
+        );
+        assert_eq!(
+            dict.faults,
+            [
+                doubled_message("0", "Heartbeat", 3, &[]),
+                doubled_message("8", "ExecutionReport", 3, &["OrderSingle", "NOS"]),
+                doubled_message("D", "NewOrderSingle", 2, &["OrderSingle"]),
+                doubled_message("F", "OrderCancelRequest", 4, &["CancelOrder"]),
+            ]
+        );
+        let errors: Vec<bool> = dict.faults.iter().map(Fault::is_error).collect();
+        assert_eq!(errors, [false, true, true, true]);
+        let text: Vec<String> = dict.faults.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            text,
+            [
+                "message Heartbeat, MsgType(35) = 0, is defined 3 times; merged into one",
+                "message ExecutionReport, MsgType(35) = 8, is defined 3 times, also as \
+                 OrderSingle, NOS; merged into one under ExecutionReport",
+                "message NewOrderSingle, MsgType(35) = D, is defined twice, also as \
+                 OrderSingle; merged into one under NewOrderSingle",
+                "message OrderCancelRequest, MsgType(35) = F, is defined 4 times, also as \
+                 CancelOrder; merged into one under OrderCancelRequest",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_field_and_a_group_is_a_warning_and_a_skipped_or_renumbered_field_an_error() {
+        let within = || "message ExecutionReport, MsgType(35) = 8".to_owned();
+        assert!(!Fault::FieldAndGroup {
+            within: within(),
+            tag: 453,
+            name: "NoPartyIDs".into(),
+        }
+        .is_error());
+        assert!(Fault::UndefinedField {
+            within: within(),
+            name: "Symbl".into(),
+        }
+        .is_error());
+        assert!(Fault::FieldNameTwice {
+            name: "TargetStrategy".into(),
+            first: 847,
+            second: 50001,
+        }
+        .is_error());
+    }
+
+    /// `repeating="Y"` allows a tag again only as the same declaration.
+    #[test]
+    fn a_repeating_tag_listed_again_with_another_requiredness_is_a_fault() {
+        let dict = schema_dict(
+            "<messages><message name='NewOrderSingle' msgtype='D'>\
+               <field name='Symbol' repeating='Y' required='Y'/>\
+               <field name='ClOrdID'/>\
+               <field name='Symbol' repeating='Y'/>\
+             </message></messages>",
+        );
+        assert_eq!(
+            message_scope(&dict, "D"),
+            scope(
+                vec![
+                    MemberDef {
+                        repeating: true,
+                        ..required(55)
+                    },
+                    plain(11),
+                ],
+                vec![]
+            )
+        );
+        assert_eq!(
+            dict.faults,
+            [doubled(
+                "message NewOrderSingle, MsgType(35) = D",
+                55,
+                "Symbol",
+                true
+            )]
+        );
+    }
+
+    /// Both definitions' members in document order, each with its own
+    /// component rows, then merged like any other scope.
+    #[test]
+    fn a_doubled_message_type_unions_its_scopes() {
+        let dict = schema_dict(
+            "<messages>\
+               <message name='NewOrderSingle' msgtype='D'>\
+                 <field name='ClOrdID' required='Y'/><component name='Parties' required='N'/>\
+               </message>\
+               <message name='OrderSingle' msgtype='D'>\
+                 <field name='Side' required='Y'/><component name='Instrument' required='Y'/>\
+               </message>\
+             </messages>\
+             <components>\
+               <component name='Parties'><group name='NoPartyIDs' required='N'><field name='PartyID'/></group></component>\
+               <component name='Instrument'><field name='Symbol' required='Y'/></component>\
+             </components>",
+        );
+        assert_eq!(
+            message_scope(&dict, "D"),
+            scope(
+                vec![
+                    required(11),
+                    MemberDef {
+                        group: Some(0),
+                        component: Some(0),
+                        ..plain(453)
+                    },
+                    required(54),
+                    MemberDef {
+                        component: Some(1),
+                        ..required(55)
+                    },
+                ],
+                vec![
+                    component("Parties", None, false),
+                    component("Instrument", None, true),
+                ]
+            )
+        );
+        assert_eq!(
+            dict.faults,
+            [doubled_message("D", "NewOrderSingle", 2, &["OrderSingle"])]
+        );
+    }
+
+    /// The second definition's component rows come after the first's, so a
+    /// nested row's parent and a member's component point at the shifted row.
+    #[test]
+    fn a_doubled_message_type_shifts_the_second_definitions_component_rows() {
+        let dict = schema_dict(
+            "<messages>\
+               <message name='NewOrderSingle' msgtype='D'>\
+                 <field name='ClOrdID' required='Y'/><component name='Parties' required='N'/>\
+               </message>\
+               <message name='OrderSingle' msgtype='D'>\
+                 <component name='Instrument' required='Y'/>\
+               </message>\
+             </messages>\
+             <components>\
+               <component name='Parties'><group name='NoPartyIDs' required='N'><field name='PartyID'/></group></component>\
+               <component name='Instrument'>\
+                 <field name='Symbol' required='Y'/><component name='SecAltIDGrp' required='N'/>\
+               </component>\
+               <component name='SecAltIDGrp'>\
+                 <group name='NoSecurityAltID' required='N'><field name='SecurityAltID' required='Y'/></group>\
+               </component>\
+             </components>",
+        );
+        assert_eq!(
+            message_scope(&dict, "D"),
+            scope(
+                vec![
+                    required(11),
+                    MemberDef {
+                        group: Some(0),
+                        component: Some(0),
+                        ..plain(453)
+                    },
+                    MemberDef {
+                        component: Some(1),
+                        ..required(55)
+                    },
+                    MemberDef {
+                        group: Some(1),
+                        component: Some(2),
+                        ..plain(454)
+                    },
+                ],
+                vec![
+                    component("Parties", None, false),
+                    component("Instrument", None, true),
+                    component("SecAltIDGrp", Some(1), false),
+                ]
+            )
+        );
+        assert_eq!(
+            dict.groups,
+            [
+                group("NoPartyIDs", 453, 448),
+                group("NoSecurityAltID", 454, 455),
+            ]
+        );
+        assert_eq!(
+            dict.faults,
+            [doubled_message("D", "NewOrderSingle", 2, &["OrderSingle"])]
+        );
+    }
+
+    /// A message with no members allows none; an empty group is kept with
+    /// delimiter 0 and its counter stays a member.
+    #[test]
+    fn an_empty_group_and_an_empty_message_are_empty_scopes() {
+        let dict = schema_dict(
+            "<header><field name='BeginString' required='Y'/><group name='NoHops' required='N'/></header>\
+             <messages>\
+               <message name='Heartbeat' msgtype='0'/>\
+               <message name='NewOrderSingle' msgtype='D'>\
+                 <field name='Symbol'/><group name='NoPartyIDs' required='Y'/>\
+               </message>\
+             </messages>",
+        );
+        let schema = defs(&dict);
+        assert_eq!(message_scope(&dict, "0"), ScopeDef::default());
+        assert_eq!(
+            message_scope(&dict, "D"),
+            scope(
+                vec![
+                    plain(55),
+                    MemberDef {
+                        group: Some(0),
+                        ..required(453)
+                    },
+                ],
+                vec![]
+            )
+        );
+        assert_eq!(
+            schema.header,
+            scope(
+                vec![
+                    required(8),
+                    MemberDef {
+                        group: Some(1),
+                        ..plain(627)
+                    },
+                ],
+                vec![]
+            )
+        );
+        assert_eq!(schema.groups, [ScopeDef::default(), ScopeDef::default()]);
+        assert_eq!(
+            dict.groups,
+            [group("NoPartyIDs", 453, 0), group("NoHops", 627, 0),]
+        );
+        assert!(dict.faults.is_empty());
+    }
+
+    /// FIX.4.0's RelatdSym(46): a field that may repeat, listed again, is no
+    /// defect.
+    #[test]
+    fn a_repeating_field_is_marked_and_may_be_listed_again() {
+        let dict = schema_dict(
+            "<messages><message name='News' msgtype='B'>\
+               <field name='Symbol' required='N' repeating='Y'/>\
+               <field name='Text'/>\
+               <field name='Symbol' repeating='Y'/>\
+             </message></messages>",
+        );
+        assert_eq!(
+            message_scope(&dict, "B"),
+            scope(
+                vec![
+                    MemberDef {
+                        repeating: true,
+                        ..plain(55)
+                    },
+                    plain(58),
+                ],
+                vec![]
+            )
+        );
+        assert!(dict.faults.is_empty());
+    }
+
+    /// Around `body`, the fields every rejection test refers to by name.
+    fn with_fields(body: &str) -> String {
+        format!(
+            "<fix major='4' minor='4'>{body}<fields>\
+             <field number='35' name='MsgType' type='STRING'/>\
+             <field number='55' name='Symbol' type='STRING'/>\
+             <field number='78' name='NoAllocs' type='NUMINGROUP'/>\
+             <field number='79' name='AllocAccount' type='STRING'/>\
+             <field number='448' name='PartyID' type='STRING'/>\
+             <field number='453' name='NoPartyIDs' type='NUMINGROUP'/>\
+             </fields></fix>"
+        )
+    }
+
+    fn refused(body: &str) -> ParseError {
+        quickfix(&with_fields(body)).unwrap_err()
+    }
+
+    const ORDER: &str = "<message name='NewOrderSingle' msgtype='D'>";
+
+    /// The member is left out, the rest of the scope and the file load, and
+    /// the fault names where the reference was made.
+    #[test]
+    fn an_undefined_field_is_skipped_with_a_fault_naming_where_it_was_referenced() {
+        let parties = "<group name='NoPartyIDs'><field name='PartyID'/></group>";
+        let has_parties = |dict: &ParsedDict| {
+            group_of(dict, "D", 453)
+                .is_some_and(|(group, entry)| tags(entry) == [448] && group.delimiter_tag == 448)
+        };
+        type Check = fn(&ParsedDict) -> bool;
+        let cases: [(String, &str, Check); 6] = [
+            (
+                format!("<messages>{ORDER}<field name='Symbl'/>{parties}</message></messages>"),
+                "message NewOrderSingle",
+                has_parties,
+            ),
+            (
+                format!(
+                    "<messages>{ORDER}<component name='Instrument'/></message></messages>\
+                     <components><component name='Instrument'><field name='Symbl'/>{parties}</component></components>"
+                ),
+                "component Instrument",
+                has_parties,
+            ),
+            (
+                format!(
+                    "<messages>{ORDER}<group name='NoPartyIDs'><field name='Symbl'/><field name='PartyID'/></group></message></messages>"
+                ),
+                "group NoPartyIDs in message NewOrderSingle",
+                has_parties,
+            ),
+            (
+                format!(
+                    "<header><field name='Symbl'/><field name='Symbol'/></header>\
+                     <messages>{ORDER}</message></messages>"
+                ),
+                "the header",
+                |dict| header(dict) == [55],
+            ),
+            (
+                format!(
+                    "<messages>{ORDER}</message></messages>\
+                     <trailer><field name='Symbl'/><field name='Symbol'/></trailer>"
+                ),
+                "the trailer",
+                |dict| trailer(dict) == [55],
+            ),
+            // No message reaches it, and it is reported all the same.
+            (
+                format!(
+                    "<messages>{ORDER}{parties}</message></messages>\
+                     <components><component name='Unused'><field name='Symbl'/></component></components>"
+                ),
+                "component Unused",
+                has_parties,
+            ),
+        ];
+        for (body, within, rest_is_there) in cases {
+            let dict = quickfix(&with_fields(&body)).unwrap();
+            assert_eq!(
+                dict.faults,
+                [Fault::UndefinedField {
+                    within: within.into(),
+                    name: "Symbl".into()
+                }],
+                "{within}"
+            );
+            assert_eq!(
+                dict.faults[0].to_string(),
+                format!(
+                    "{within} refers to field \"Symbl\", which the file does not define; skipped"
+                )
+            );
+            assert_eq!(dict.message("D").unwrap().name, "NewOrderSingle");
+            assert!(rest_is_there(&dict), "{within}: {dict:?}");
+        }
+    }
+
+    #[test]
+    fn one_undefined_field_reached_from_two_messages_is_one_fault() {
+        let dict = quickfix(&with_fields(
+            "<messages>\
+             <message name='NewOrderSingle' msgtype='D'><component name='Instrument'/></message>\
+             <message name='OrderCancelRequest' msgtype='F'><component name='Instrument'/></message>\
+             </messages><components><component name='Instrument'><field name='Symbl'/></component></components>",
+        ))
+        .unwrap();
+        assert_eq!(
+            dict.faults,
+            [Fault::UndefinedField {
+                within: "component Instrument".into(),
+                name: "Symbl".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn an_undefined_group_counter_is_refused() {
+        let err = refused(
+            "<messages><message name='NewOrderSingle' msgtype='D'><component name='AttrbGrp'/></message></messages>\
+             <components><component name='AttrbGrp'>\
+               <group name='NoInstrAttrib'><field name='Symbol'/></group>\
+             </component></components>",
+        );
+        assert!(
+            matches!(
+                &err,
+                ParseError::UndefinedReference {
+                    kind: "group counter",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "dict.xml: component AttrbGrp refers to group counter \"NoInstrAttrib\", \
+             which the file does not define"
+        );
+    }
+
+    #[test]
+    fn an_unknown_component_is_refused() {
+        let err = refused(&format!(
+            "<messages>{ORDER}<component name='Instrumnt'/></message></messages>"
+        ));
+        assert_eq!(
+            err.to_string(),
+            "dict.xml: message NewOrderSingle refers to component \"Instrumnt\", \
+             which the file does not define"
+        );
+    }
+
+    #[test]
+    fn a_component_inside_itself_is_refused_and_depth_is_capped() {
+        let cases = [
+            ("<component name='A'><component name='A'/></component>", "A → A"),
+            (
+                "<component name='A'><field name='Symbol'/><component name='B'/></component>\
+                 <component name='B'><component name='A'/></component>",
+                "A → B → A",
+            ),
+            // The chain spans groups: a group starts no fresh expansion.
+            (
+                "<component name='A'><field name='Symbol'/><component name='B'/></component>\
+                 <component name='B'><group name='NoPartyIDs'><field name='PartyID'/><component name='A'/></group></component>",
+                "A → B → A",
+            ),
+        ];
+        for (components, cycle) in cases {
+            let err = refused(&format!(
+                "<messages>{ORDER}<component name='A'/></message></messages>\
+                 <components>{components}</components>"
+            ));
+            assert!(
+                matches!(&err, ParseError::ComponentCycle { name, .. } if name == "A"),
+                "{err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                format!("dict.xml: component A contains itself ({cycle})")
+            );
+        }
 
         let mut xml = String::from("<fix major='4' minor='4'><messages><message name='X' msgtype='X'><component name='C0'/></message></messages><components>");
         for i in 0..(MAX_DEPTH + 5) {
@@ -1456,36 +2567,221 @@ mod tests {
         ));
     }
 
+    /// The leaf lists 16 fields and each component above it lists the one
+    /// before inside 16 groups, so a level has 16 counters plus 16 times the
+    /// level below: 16, 272, 4 368, 69 904, then 1 118 480 at the top.
+    #[test]
+    fn a_dictionary_that_expands_past_the_declaration_budget_is_refused() {
+        const LEAF: [&str; 16] = [
+            "BeginString",
+            "CheckSum",
+            "ClOrdID",
+            "SecurityID",
+            "Side",
+            "Symbol",
+            "Text",
+            "PartyID",
+            "PartyRole",
+            "NoSecurityAltID",
+            "SecurityAltID",
+            "OwnershipType",
+            "NoHops",
+            "HopCompID",
+            "HopSendingTime",
+            "NoAsgnReqs",
+        ];
+        let leaf: String = LEAF
+            .iter()
+            .map(|name| format!("<field name='{name}'/>"))
+            .collect();
+        let mut components = format!("<component name='C0'>{leaf}</component>");
+        for i in 1..=4 {
+            let groups = format!(
+                "<group name='NoPartyIDs'><component name='C{}'/></group>",
+                i - 1
+            )
+            .repeat(16);
+            components.push_str(&format!("<component name='C{i}'>{groups}</component>"));
+        }
+        let xml = format!(
+            "<fix major='4' minor='4'><messages><message name='X' msgtype='X'>\
+             <component name='C4'/></message></messages>\
+             <components>{components}</components><fields>{SCHEMA_FIELDS}</fields></fix>"
+        );
+        let err = quickfix(&xml).unwrap_err();
+        assert!(
+            matches!(err, ParseError::TooManyDeclarations { .. }),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "dict.xml: expands to more than 1048576 member declarations"
+        );
+    }
+
+    #[test]
+    fn a_message_without_a_type_or_a_name_is_refused() {
+        let err = refused("<messages><message name='NewOrderSingle'/></messages>");
+        assert!(
+            matches!(err, ParseError::MessageWithoutType { .. }),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "dict.xml: message NewOrderSingle has no msgtype"
+        );
+        let err = refused("<messages><message msgcat='app'/></messages>");
+        assert_eq!(
+            err.to_string(),
+            "dict.xml: a message has neither a name nor a msgtype"
+        );
+        let err = refused("<messages><message msgtype='D'/></messages>");
+        assert!(
+            matches!(err, ParseError::MessageWithoutName { .. }),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "dict.xml: the message with MsgType(35) = D has no name"
+        );
+    }
+
+    /// Both tags stay defined; the name refers to the last one.
+    #[test]
+    fn a_field_name_with_two_numbers_loads_with_a_fault() {
+        let dict = quickfix(
+            "<fix major='4' minor='4'>\
+             <header><field name='TargetStrategy'/></header>\
+             <messages><message name='NewOrderSingle' msgtype='D'/></messages>\
+             <fields><field number='847' name='TargetStrategy' type='INT'/>\
+             <field number='50001' name='TargetStrategy' type='STRING'/></fields></fix>",
+        )
+        .unwrap();
+        assert_eq!(dict.field(847).unwrap().name, "TargetStrategy");
+        assert_eq!(dict.field(50001).unwrap().name, "TargetStrategy");
+        assert_eq!(header(&dict), [50001]);
+        assert_eq!(
+            dict.faults,
+            [Fault::FieldNameTwice {
+                name: "TargetStrategy".into(),
+                first: 847,
+                second: 50001
+            }]
+        );
+        assert_eq!(
+            dict.faults[0].to_string(),
+            "field TargetStrategy is defined with two numbers, TargetStrategy(847) and \
+             TargetStrategy(50001); the name refers to TargetStrategy(50001)"
+        );
+    }
+
+    #[test]
+    fn a_file_that_declares_no_messages_is_refused() {
+        for body in ["", "<messages/>", "<messages><header/></messages>"] {
+            let err = refused(body);
+            assert!(
+                matches!(err, ParseError::NoMessages { .. }),
+                "{body}: {err:?}"
+            );
+            assert_eq!(err.to_string(), "dict.xml: declares no messages");
+        }
+    }
+
+    #[test]
+    fn a_doubled_message_type_is_the_union_of_its_definitions_with_one_fault() {
+        let dict = quickfix(&with_fields(
+            "<messages>\
+             <message name='NewOrderSingle' msgtype='D' msgcat='app'>\
+               <group name='NoPartyIDs'><field name='PartyID'/></group></message>\
+             <message name='OrderSingle' msgtype='D' msgcat='admin'>\
+               <group name='NoAllocs'><field name='AllocAccount'/></group></message>\
+             <message name='Order' msgtype='D'><field name='Symbol'/></message>\
+             </messages>",
+        ))
+        .unwrap();
+        let order = dict.message("D").unwrap();
+        assert_eq!(
+            (order.name.as_str(), order.category.as_str()),
+            ("NewOrderSingle", "app"),
+            "the first definition names it"
+        );
+        let counters: Vec<u32> = opened(message_of(&dict, "D"))
+            .into_iter()
+            .map(|group| dict.groups[usize::from(group)].count_tag)
+            .collect();
+        assert_eq!(counters, vec![453, 78]);
+        let label = &dict.field(35).unwrap().enums[0];
+        assert_eq!(
+            (label.value.as_str(), label.name.as_str()),
+            ("D", "NewOrderSingle")
+        );
+        assert_eq!(
+            dict.faults,
+            vec![doubled_message(
+                "D",
+                "NewOrderSingle",
+                3,
+                &["OrderSingle", "Order"]
+            )],
+            "three definitions, one fault"
+        );
+        assert_eq!(
+            dict.faults[0].to_string(),
+            "message NewOrderSingle, MsgType(35) = D, is defined 3 times, also as OrderSingle, \
+             Order; merged into one under NewOrderSingle"
+        );
+    }
+
+    #[test]
+    fn faults_are_sorted() {
+        let dict = quickfix(&with_fields(
+            "<messages>\
+             <message name='OrderCancelRequest' msgtype='F'/>\
+             <message name='NewOrderSingle' msgtype='D'/>\
+             <message name='OrderCancelRequest' msgtype='F'/>\
+             <message name='NewOrderSingle' msgtype='D'/>\
+             </messages>",
+        ))
+        .unwrap();
+        assert_eq!(
+            dict.faults,
+            [
+                doubled_message("D", "NewOrderSingle", 2, &[]),
+                doubled_message("F", "OrderCancelRequest", 2, &[])
+            ]
+        );
+    }
+
     #[test]
     fn version_from_header_attrs() {
         let v = |xml: &str| quickfix(xml).unwrap().version;
         assert_eq!(
-            v("<fix type='FIXT' major='1' minor='1' servicepack='0'><fields/></fix>").as_deref(),
+            v("<fix type='FIXT' major='1' minor='1' servicepack='0'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields/></fix>").as_deref(),
             Some("FIXT.1.1")
         );
         assert_eq!(
-            v("<fix major='5' minor='0' servicepack='2'><fields/></fix>").as_deref(),
+            v("<fix major='5' minor='0' servicepack='2'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields/></fix>").as_deref(),
             Some("FIX.5.0SP2")
         );
         assert_eq!(
-            v("<fix major='4' minor='4' servicePack='0'><fields/></fix>").as_deref(),
+            v("<fix major='4' minor='4' servicePack='0'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields/></fix>").as_deref(),
             Some("FIX.4.4")
         );
         assert_eq!(
-            v("<fix version='FIX.9.9'><fields/></fix>").as_deref(),
+            v("<fix version='FIX.9.9'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields/></fix>").as_deref(),
             Some("FIX.9.9")
         );
         // Runtime loading rejects absent or invalid XML version metadata.
-        assert_eq!(v("<fix><fields/></fix>"), None);
+        assert_eq!(v("<fix><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields/></fix>"), None);
         assert_eq!(
-            v("<fix major='4' minor='4' servicepack='bad'><fields/></fix>"),
+            v("<fix major='4' minor='4' servicepack='bad'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields/></fix>"),
             None
         );
     }
 
     fn quickfix_with_fields(count: u32) -> String {
         let mut doc = String::with_capacity(count as usize * 48 + 64);
-        doc.push_str("<fix major='4' minor='4'><fields>");
+        doc.push_str("<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>");
         for tag in 1..=count {
             doc.push_str(&format!(
                 "<field number='{tag}' name='F{tag}' type='STRING'/>"
@@ -1562,9 +2858,9 @@ mod tests {
         );
     }
 
-    /// The two below exist because the test above cannot tell whether either
-    /// parser calls the helper. Generated rather than checked in: the point is
-    /// the count, and a 3 MB fixture in the repository would be worse.
+    /// Exists because the test above cannot tell whether the parser calls the
+    /// helper. Generated rather than checked in: the point is the count, and a
+    /// 3 MB fixture in the repository would be worse.
     #[test]
     fn a_quickfix_field_with_too_many_values_is_refused() {
         let mut values = String::with_capacity(MAX_ITEMS * 40);
@@ -1572,7 +2868,7 @@ mod tests {
             let _ = write!(values, "<value enum='V{i}' description='D{i}'/>");
         }
         let doc = format!(
-            "<fix major='4' minor='4'><fields>\
+            "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
              <field number='54' name='Side' type='CHAR'>{values}</field>\
              </fields></fix>"
         );
@@ -1582,34 +2878,12 @@ mod tests {
             "{err:?}"
         );
     }
-
-    #[test]
-    fn a_repository_field_with_too_many_values_is_refused() {
-        let mut enums = String::with_capacity(MAX_ITEMS * 70);
-        for i in 0..=MAX_ITEMS {
-            let _ = write!(
-                enums,
-                "<Enum><Tag>54</Tag><Value>V{i}</Value><SymbolicName>S{i}</SymbolicName></Enum>"
-            );
-        }
-        let src = fields_enums(
-            "<Fields><Field><Tag>54</Tag><Name>Side</Name><Type>char</Type></Field></Fields>",
-            &format!("<Enums>{enums}</Enums>"),
-        );
-        let err = parse_repository_bytes(&src).unwrap_err();
-        let text = err.to_string();
-        assert!(text.contains("54"), "{text}");
-        assert!(
-            text.contains("Enums"),
-            "points at the file the values are in: {text}"
-        );
-    }
 }
 
 /// Dictionaries built from a string, for tests across the crate.
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use super::{parse_quickfix_bytes, parse_repository_bytes, RepoSources, Source};
+    use super::{parse_quickfix_bytes, Source};
     use crate::dictionary::ParsedDict;
 
     pub fn source(path: &str, xml: String) -> Source {
@@ -1619,25 +2893,11 @@ pub(crate) mod fixtures {
         }
     }
 
-    /// A QuickFIX dictionary for `version` declaring `fields`.
+    /// A QuickFIX dictionary for `version` declaring `fields`, and the one
+    /// application message a file must declare to load.
     pub fn quickfix(version: &str, fields: &str) -> ParsedDict {
-        let xml = format!("<fix version='{version}'><fields>{fields}</fields></fix>");
+        let xml = format!("<fix version='{version}'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>{fields}</fields></fix>");
         parse_quickfix_bytes(&source("custom.xml", xml)).unwrap()
-    }
-
-    /// A Repository dictionary, which carries `added` and `deprecated`.
-    pub fn repository(version: &str, fields: &str) -> ParsedDict {
-        parse_repository_bytes(&RepoSources {
-            fields: source(
-                "Fields.xml",
-                format!("<Fields version='{version}'>{fields}</Fields>"),
-            ),
-            enums: source("Enums.xml", format!("<Enums version='{version}'/>")),
-            messages: None,
-            msg_contents: None,
-            components: None,
-        })
-        .unwrap()
     }
 
     /// One `<field>` declaration for `quickfix`.

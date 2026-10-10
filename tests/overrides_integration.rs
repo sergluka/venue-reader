@@ -135,6 +135,99 @@ fn a_project_direct_path_is_resolved_beside_the_supplying_file() {
     client.shutdown();
 }
 
+/// Selected by path, a file no registry build saw: what it is refused for, or
+/// loaded with, is reported here, at error severity.
+#[test]
+fn a_dictionary_selected_by_path_reports_a_refusal_and_a_fault_as_errors() {
+    let fixture = Workspace::new("overrides");
+    fixture.write(
+        "logs/broken.xml",
+        &dictionary_xml("ProjectPathField").replace(
+            r#"<field name="ProjectPathField" required="N"/>"#,
+            r#"<component name="Instrumnt" required="N"/>"#,
+        ),
+    );
+    fixture.write("logs/.fix-lsp.toml", "dictionary = './broken.xml'\n");
+    fixture.write(
+        "logs/doubled.xml",
+        &dictionary_xml("DoubledField").replace(
+            "</messages>",
+            r#"<message name="OrderSingle" msgtype="D" msgcat="app"/></messages>"#,
+        ),
+    );
+    fixture.write(
+        "logs/doubled-same-name.xml",
+        &dictionary_xml("DoubledField").replace(
+            "</messages>",
+            r#"<message name="NewOrderSingle" msgtype="D" msgcat="app"/></messages>"#,
+        ),
+    );
+    let mut client = TestClient::start();
+    fixture.initialize(
+        &mut client,
+        json!({"allowDictionaryPath":true,"diagnostics":{"enabled":false}}),
+    );
+
+    let refused = fixture.uri("logs/refused.fix");
+    let report = client.did_open(&refused, MESSAGE, 1);
+    assert_eq!(report["effective"]["dictionary"], Value::Null);
+    let warnings = report["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| {
+            let message = warning["message"].as_str().unwrap();
+            warning["severity"] == "error"
+                && message.contains("./broken.xml")
+                && message.contains("not loaded")
+                && message.contains(r#"refers to component "Instrumnt""#)
+        }),
+        "{warnings:?}"
+    );
+
+    let faulty = fixture.uri("logs/faulty.fix");
+    let report = client.did_open(
+        &faulty,
+        "# fix: dictionary=./doubled.xml\n8=FIX.4.4|35=D|9001=x|",
+        1,
+    );
+    assert_eq!(report["effective"]["dictionary"], json!("./doubled.xml"));
+    let warnings = report["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| {
+            warning["severity"] == "error"
+                && warning["message"].as_str().unwrap().ends_with(
+                    "loaded with an error: message NewOrderSingle, MsgType(35) = D, \
+                     is defined twice, also as OrderSingle; merged into one under NewOrderSingle",
+                )
+        }),
+        "{warnings:?}"
+    );
+    assert!(client
+        .hover(&faulty, 1, 16)
+        .unwrap()
+        .to_string()
+        .contains("DoubledField"));
+
+    // The same definition twice loses nothing: a warning, by path as well.
+    let harmless = fixture.uri("logs/harmless.fix");
+    let report = client.did_open(
+        &harmless,
+        "# fix: dictionary=./doubled-same-name.xml\n8=FIX.4.4|35=D|9001=x|",
+        1,
+    );
+    let warnings = report["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| {
+            warning["severity"] == "warning"
+                && warning["message"].as_str().unwrap().ends_with(
+                    "loaded with a warning: message NewOrderSingle, MsgType(35) = D, \
+                     is defined twice; merged into one",
+                )
+        }),
+        "{warnings:?}"
+    );
+    client.shutdown();
+}
+
 #[test]
 fn project_dictionary_definitions_are_refused_without_filesystem_permission() {
     let fixture = Workspace::new("overrides");

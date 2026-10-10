@@ -327,3 +327,39 @@ mod deep {
         client.shutdown();
     }
 }
+
+/// NoHops(627) is a header group: the outline nests its entries under FIX.4.4
+/// and under `8=FIXT.1.1`.
+#[test]
+fn a_header_group_nests_in_the_outline() {
+    for (line, begin) in [
+        (
+            "8=FIX.4.4|35=0|627=2|628=A|630=1|628=B|630=2|112=T",
+            "FIX.4.4",
+        ),
+        (
+            "8=FIXT.1.1|35=0|627=2|628=A|630=1|628=B|630=2|112=T",
+            "FIXT.1.1",
+        ),
+    ] {
+        let mut client = open_with(nesting_client(), line);
+        assert_eq!(
+            shape(&outline(&mut client)),
+            format!(
+                "\
+# → Heartbeat (0) [19]
+  BeginString (8) = {begin} [8]
+  MsgType (35) = 0 (Heartbeat) [8]
+  NoHops (627) = 2 [18]
+    [1] [23]
+      HopCompID (628) = A [8]
+      HopRefID (630) = 1 [8]
+    [2] [23]
+      HopCompID (628) = B [8]
+      HopRefID (630) = 2 [8]
+  TestReqID (112) = T [8]"
+            )
+        );
+        client.shutdown();
+    }
+}

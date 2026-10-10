@@ -1,14 +1,16 @@
 //! Validation rules over a decoded line.
 //!
-//! A rule is a pure function of a `MessageAnalysis` plus the line bytes, which
-//! is what keeps `diagnostics.rules.*` out of `CtxFingerprint`: toggling one
-//! invalidates no cached analysis.
+//! A rule is a pure function of a `MessageAnalysis`, the line bytes and the
+//! name the caller gives the line's dictionary, which is what keeps
+//! `diagnostics.rules.*` and dictionary names out of `CtxFingerprint`:
+//! changing either invalidates no cached analysis.
 //!
 //! Spans are bytes. Conversion to LSP positions happens at the publish site and
 //! nowhere else, so a rule never constructs a protocol type.
 
 pub mod integrity;
 pub mod structure;
+pub mod unknown;
 
 use std::cell::OnceCell;
 use std::sync::LazyLock;
@@ -23,6 +25,8 @@ pub const BUILTINS: &[&dyn Rule] = &[
     &structure::UnknownVersion,
     &structure::DictionaryVersion,
     &integrity::Integrity,
+    &unknown::UnknownMsgType,
+    &unknown::UnknownTag,
 ];
 
 /// A problem on one line, in bytes.
@@ -73,6 +77,11 @@ pub enum Precondition {
     Fields,
     /// …and it carries a BeginString.
     FixMessage,
+    /// The line's dictionary was chosen, not fallen back to: BeginString(8)
+    /// names the binding's version, or — on a line without BeginString(8) —
+    /// the selected dictionary is the one that decoded it. A rule about what
+    /// a dictionary lacks says nothing about one nobody chose.
+    Bound,
 }
 
 /// What a rule sees.
@@ -80,6 +89,9 @@ pub struct LineCtx<'a> {
     pub bytes: &'a [u8],
     pub message: &'a MessageAnalysis,
     pub selected_version: Option<&'a str>,
+    /// The name of the dictionary that decoded the line — configured, else
+    /// its file name; `None` for bundled tables.
+    pub label: Option<&'a str>,
     /// Both integrity rules need this and neither owns it: shared scratch,
     /// computed at most once per line.
     integrity: OnceCell<Integrity>,
@@ -91,6 +103,7 @@ impl<'a> LineCtx<'a> {
             bytes,
             message,
             selected_version: None,
+            label: None,
             integrity: OnceCell::new(),
         }
     }
@@ -104,6 +117,16 @@ impl<'a> LineCtx<'a> {
     pub fn begin_string(&self) -> Option<&'a str> {
         self.message.first(tag::BEGIN_STRING)?.text(self.bytes)
     }
+
+    fn bound(&self) -> bool {
+        let version = self.message.version.as_ref();
+        match self.message.first(tag::BEGIN_STRING) {
+            Some(field) => field.text(self.bytes) == Some(version),
+            None => self
+                .selected_version
+                .is_some_and(|selected| crate::dictionary::versions_compatible(selected, version)),
+        }
+    }
 }
 
 pub trait Rule: Sync {
@@ -113,6 +136,32 @@ pub trait Rule: Sync {
     fn precondition(&self) -> Precondition;
     fn default_severity(&self) -> Severity;
     fn check(&self, ctx: &LineCtx, severity: Severity) -> Vec<Diag>;
+
+    /// How many findings `check` would return, without rendering them. Only for
+    /// a rule whose findings carry no `document_key`: those are deduplicated by
+    /// the whole-document walk, which needs them in full.
+    fn count(&self, _ctx: &LineCtx) -> Option<usize> {
+        None
+    }
+}
+
+/// What one check asks of a line. The default: every enabled rule, every
+/// finding rendered, no dictionary name.
+#[derive(Debug, Default)]
+pub struct Scope<'a> {
+    pub label: Option<&'a str>,
+    /// Findings this severe or less are counted rather than rendered, by
+    /// rules that can: the walk's cap would refuse them anyway.
+    pub count_from: Option<Severity>,
+    /// Only this rule, and nothing when it is disabled.
+    pub only: Option<&'a str>,
+}
+
+/// One line's findings under a [`Scope`].
+#[derive(Debug, Default)]
+pub struct Checked {
+    pub diags: Vec<Diag>,
+    pub counted: usize,
 }
 
 /// The enabled rules and the severity each was configured with. Rebuilt on
@@ -161,25 +210,50 @@ impl Registry {
         self.rules.is_empty()
     }
 
+    /// Exactly `rules`, for tests that need a rule of their own.
+    #[cfg(test)]
+    pub(crate) fn of_rules(
+        rules: Vec<(&'static dyn Rule, Severity)>,
+        selected_version: Option<&str>,
+    ) -> Registry {
+        Registry {
+            rules,
+            selected_version: selected_version.map(str::to_owned),
+        }
+    }
+
     /// Empty for a line that is not a message: there is nothing to check.
-    pub fn check_line(&self, bytes: &[u8], analysis: &LineAnalysis) -> Vec<Diag> {
+    pub fn check(&self, bytes: &[u8], analysis: &LineAnalysis, scope: &Scope) -> Checked {
+        let mut checked = Checked::default();
         let Some(message) = analysis.message() else {
-            return Vec::new();
+            return checked;
         };
         let mut ctx = LineCtx::new(bytes, message);
         ctx.selected_version = self.selected_version.as_deref();
+        ctx.label = scope.label;
         let is_fix = message.first(tag::BEGIN_STRING).is_some();
-        let mut out = Vec::new();
+        let bound = OnceCell::new();
         for (rule, severity) in &self.rules {
+            if scope.only.is_some_and(|id| id != rule.id()) {
+                continue;
+            }
             let holds = match rule.precondition() {
                 Precondition::Fields => !message.fields.is_empty(),
                 Precondition::FixMessage => is_fix,
+                Precondition::Bound => *bound.get_or_init(|| ctx.bound()),
             };
-            if holds {
-                out.extend(rule.check(&ctx, *severity));
+            if !holds {
+                continue;
+            }
+            let refused = scope
+                .count_from
+                .is_some_and(|from| severity.rank() >= from.rank());
+            match refused.then(|| rule.count(&ctx)).flatten() {
+                Some(count) => checked.counted += count,
+                None => checked.diags.extend(rule.check(&ctx, *severity)),
             }
         }
-        out
+        checked
     }
 }
 
@@ -197,7 +271,9 @@ pub(crate) mod tests {
     pub(crate) fn diags_with(line: &str, config: &Diagnostics) -> Vec<Diag> {
         let ctx = Ctx::for_test("FIX.4.4");
         let analysis = analyze(line.as_bytes(), &ctx);
-        Registry::from_config(config).check_line(line.as_bytes(), &analysis)
+        Registry::from_config(config)
+            .check(line.as_bytes(), &analysis, &Scope::default())
+            .diags
     }
 
     /// What each diagnostic says is wrong, not which rule said it.
@@ -226,6 +302,227 @@ pub(crate) mod tests {
     }
 
     const FRAGMENT: &str = "268=2|269=0|270=1.5|269=1|270=1.6";
+
+    /// One finding per line it runs on, saying the label it was given.
+    struct Probe;
+
+    impl Rule for Probe {
+        fn id(&self) -> &'static str {
+            "probe"
+        }
+        fn precondition(&self) -> Precondition {
+            Precondition::Bound
+        }
+        fn default_severity(&self) -> Severity {
+            Severity::Info
+        }
+        fn check(&self, ctx: &LineCtx, severity: Severity) -> Vec<Diag> {
+            vec![Diag {
+                code: self.id(),
+                rule: self.id(),
+                start: ByteOffset::new(0),
+                end: ByteOffset::new(1),
+                message: ctx.label.unwrap_or("no label").to_owned(),
+                severity,
+                document_key: None,
+            }]
+        }
+        fn count(&self, _ctx: &LineCtx) -> Option<usize> {
+            Some(1)
+        }
+    }
+
+    fn probe(ctx: &Ctx) -> Registry {
+        Registry::of_rules(vec![(&Probe, Severity::Info)], ctx.selected_version())
+    }
+
+    fn only(id: &str) -> Scope<'_> {
+        Scope {
+            only: Some(id),
+            ..Scope::default()
+        }
+    }
+
+    fn bound(ctx: &Ctx, line: &[u8]) -> bool {
+        let analysis = analyze(line, ctx);
+        !probe(ctx)
+            .check(line, &analysis, &Scope::default())
+            .diags
+            .is_empty()
+    }
+
+    #[test]
+    fn a_line_is_bound_by_its_own_begin_string() {
+        let ctx = Ctx::for_test("FIX.4.4");
+        assert!(bound(&ctx, b"8=FIX.4.4|35=0|"));
+        assert!(
+            bound(&ctx, b"8=FIXT.1.1|35=0|"),
+            "the alias is a version of its own"
+        );
+        assert!(!bound(&ctx, b"8=FIX.9.9|35=0|"), "decoded by fallback");
+        assert!(!bound(&ctx, b"8=|35=0|"));
+        assert!(!bound(&ctx, b"8=\xff|35=0|"));
+        assert!(!bound(&ctx, b"55=X|"), "a fragment with nothing selected");
+    }
+
+    /// Only a line with no BeginString(8) at all is bound by the selection,
+    /// and only when the selection is what decoded it.
+    #[test]
+    fn a_fragment_is_bound_by_a_selection_that_decoded_it() {
+        let covering = Ctx::for_test_selected("FIX.4.4");
+        assert!(bound(&covering, b"55=X|"));
+        assert!(bound(&covering, b"8=FIX.4.4|35=0|"));
+        assert!(
+            !bound(&covering, b"8=FIX.9.9|35=0|"),
+            "falls back to the selection, still not bound"
+        );
+        assert!(!bound(&covering, b"8=|35=0|"));
+        assert!(!bound(&covering, b"8=\xff|35=0|"));
+
+        let elsewhere = Ctx::for_test_selected("FIX.9.1");
+        assert!(
+            !bound(&elsewhere, b"55=X|"),
+            "decoded by the bundled default"
+        );
+        assert!(bound(&elsewhere, b"8=FIX.9.1|35=0|"));
+        let analysis = analyze(b"55=X|", &elsewhere);
+        let registry =
+            Registry::with_selected_version(&Diagnostics::default(), elsewhere.selected_version());
+        let codes: Vec<&str> = registry
+            .check(b"55=X|", &analysis, &Scope::default())
+            .diags
+            .into_iter()
+            .map(|diag| diag.code)
+            .collect();
+        assert!(
+            codes.contains(&"dictionaryVersion"),
+            "the mismatch is still said: {codes:?}"
+        );
+    }
+
+    /// A FIX.5.0SP2 selection decodes fragments when the default version is
+    /// FIXT.1.1, which it covers only through the alias.
+    #[test]
+    fn a_selection_covering_the_default_through_the_alias_binds_a_fragment() {
+        use crate::dictionary::parse::fixtures::{field, quickfix};
+        use crate::dictionary::{Dict, DictionaryChoice};
+        let choice = DictionaryChoice {
+            dict: Dict::Owned(std::sync::Arc::new(quickfix(
+                "FIX.5.0SP2",
+                &field(9999, "Selected"),
+            ))),
+            version: "FIX.5.0SP2".into(),
+            source: "test".into(),
+            identity: 123,
+            name: Some("selected".into()),
+        };
+        let limits = crate::config::Limits::default();
+        let build = crate::dictionary::BuildContext {
+            root_dir: None,
+            home_dir: None,
+            limits: &limits,
+        };
+        let (registry, _) = crate::dictionary::Registry::build(
+            &[],
+            "FIXT.1.1",
+            &build,
+            &crate::dictionary::DictionaryStore::default(),
+        );
+        let ctx = Ctx::with_choice(
+            &crate::config::Config::default(),
+            std::sync::Arc::new(registry),
+            Some(choice),
+        );
+        assert_eq!(ctx.resolve(None).version.as_ref(), "FIXT.1.1");
+        assert!(
+            !ctx.resolve(None).dict.is_static(),
+            "the selection decoded it"
+        );
+        assert!(bound(&ctx, b"55=X|"));
+        assert!(bound(&ctx, b"8=FIXT.1.1|35=0|"));
+    }
+
+    #[test]
+    fn the_label_reaches_the_rule() {
+        let ctx = Ctx::for_test("FIX.4.4");
+        let line = b"8=FIX.4.4|35=0|";
+        let analysis = analyze(line, &ctx);
+        let scope = Scope {
+            label: Some("desk"),
+            ..Scope::default()
+        };
+        let found = probe(&ctx).check(line, &analysis, &scope).diags;
+        assert_eq!(found[0].message, "desk");
+    }
+
+    #[test]
+    fn one_rule_can_be_run_alone() {
+        let ctx = Ctx::for_test("FIX.4.4");
+        let bad = b"8=FIX.4.4|9=7|35=0|34=1|49=A|56=B|10=001|";
+        let analysis = analyze(bad, &ctx);
+        let registry = Registry::from_config(&Diagnostics::default());
+        let found = registry.check(bad, &analysis, &only("integrity")).diags;
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|diag| diag.rule == "integrity"));
+        assert!(registry
+            .check(bad, &analysis, &only("beginString"))
+            .diags
+            .is_empty());
+
+        let mut config = Diagnostics::default();
+        config
+            .rules
+            .insert("integrity".into(), RuleSetting::Enabled(false));
+        let registry = Registry::from_config(&config);
+        assert!(
+            registry
+                .check(bad, &analysis, &only("integrity"))
+                .diags
+                .is_empty(),
+            "disabled"
+        );
+    }
+
+    #[test]
+    fn a_finding_past_the_refusal_is_counted_not_rendered() {
+        let ctx = Ctx::for_test("FIX.4.4");
+        let line = b"8=FIX.4.4|35=0|";
+        let analysis = analyze(line, &ctx);
+        let registry = probe(&ctx);
+        let within = |count_from| {
+            registry.check(
+                line,
+                &analysis,
+                &Scope {
+                    count_from,
+                    ..Scope::default()
+                },
+            )
+        };
+        let rendered = within(None);
+        assert_eq!((rendered.diags.len(), rendered.counted), (1, 0));
+        let counted = within(Some(Severity::Info));
+        assert_eq!((counted.diags.len(), counted.counted), (0, 1));
+        let less_severe = within(Some(Severity::Hint));
+        assert_eq!(
+            (less_severe.diags.len(), less_severe.counted),
+            (1, 0),
+            "info is not refused yet"
+        );
+
+        // A rule that cannot count is rendered whatever the refusal.
+        let bad = b"8=FIX.4.4|9=7|35=0|34=1|49=A|56=B|10=001|";
+        let analysis = analyze(bad, &ctx);
+        let checked = Registry::from_config(&Diagnostics::default()).check(
+            bad,
+            &analysis,
+            &Scope {
+                count_from: Some(Severity::Error),
+                ..Scope::default()
+            },
+        );
+        assert_eq!((checked.diags.len(), checked.counted), (2, 0));
+    }
 
     #[test]
     fn every_builtin_id_is_distinct() {
@@ -302,7 +599,9 @@ pub(crate) mod tests {
                 "beginString",
                 "unknownVersion",
                 "dictionaryVersion",
-                "integrity"
+                "integrity",
+                "unknownMsgType",
+                "unknownTag",
             ]
         );
 

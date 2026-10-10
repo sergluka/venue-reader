@@ -12,11 +12,6 @@ use crate::codec::{decode_non_message, decode_tokenized, tokenize, LineAnalysis,
 use crate::config::Config;
 use crate::dictionary::{Dict, DictionaryChoice, Registry};
 
-/// Version of the decoding behaviour, mixed into the fingerprint: the other
-/// inputs cover the data, none covers the algorithm. Bump it when a codec
-/// change invalidates cached analyses. Never zero, so a default is visible.
-const CODEC_POLICY: u8 = 1;
-
 /// A dictionary bound to the version string that selected it.
 #[derive(Clone)]
 pub struct Binding {
@@ -51,8 +46,9 @@ impl Ctx {
         registry: &Registry,
         choice: Option<&DictionaryChoice>,
     ) -> u64 {
+        // No codec version: the line cache lives only in memory, so a new
+        // binary always starts with an empty one.
         let mut hasher = Xxh3::new();
-        hasher.update(&[CODEC_POLICY]);
         hasher.update(config.default_version.as_bytes());
         hasher.update(&registry.identity().to_le_bytes());
         if let Some(choice) = choice {
@@ -160,6 +156,14 @@ impl Ctx {
         Ctx::new(&config, Arc::new(Registry::bundled_only()), None)
     }
 
+    /// A selected custom dictionary for `version` that defines one tag of its
+    /// own, Selected(9999), and nothing else.
+    #[cfg(test)]
+    pub fn for_test_selected(version: &str) -> Arc<Ctx> {
+        use crate::dictionary::parse::fixtures::{field, quickfix};
+        Ctx::for_test_with_dict(version, quickfix(version, &field(9999, "Selected")))
+    }
+
     /// Bundled tables everywhere except `version`, which `dict` answers for,
     /// as a selected custom dictionary would.
     #[cfg(test)]
@@ -210,11 +214,19 @@ impl DictionaryNames {
         }
         self.registry.default_name(version)
     }
+
+    /// Whether every version is named alike. A name is no input to the
+    /// analysis, so a change here is the only sign that what a rule says has
+    /// changed — moving `default` between two names for one file leaves the
+    /// dictionaries, and so the context, exactly as they were.
+    pub fn same_as(&self, other: &DictionaryNames) -> bool {
+        self.choice == other.choice
+            && self.registry.default_names() == other.registry.default_names()
+    }
 }
 
-/// A choice's configured name, else the last component of its source path —
-/// never the full path. A Repository resolves to its `Base/` directory, so the
-/// directory holding that is the one named. `None` for a bundled version.
+/// A choice's configured name, else the file name of its source path — never
+/// the full path. `None` for a bundled version.
 fn choice_label(choice: &DictionaryChoice) -> Option<Arc<str>> {
     if choice.dict.is_static() {
         return None;
@@ -222,13 +234,10 @@ fn choice_label(choice: &DictionaryChoice) -> Option<Arc<str>> {
     if let Some(name) = &choice.name {
         return Some(Arc::from(name.as_str()));
     }
-    let path = std::path::Path::new(&choice.source);
-    let path = if path.file_name().is_some_and(|name| name == "Base") {
-        path.parent()?
-    } else {
-        path
-    };
-    path.file_name()?.to_str().map(Arc::from)
+    std::path::Path::new(&choice.source)
+        .file_name()?
+        .to_str()
+        .map(Arc::from)
 }
 
 /// Decode one line: classify, pick the dictionary from BeginString(8), decode.
@@ -254,14 +263,29 @@ pub fn analyze(bytes: &[u8], ctx: &Ctx) -> LineAnalysis {
 mod tests {
     use super::*;
 
-    fn selected_context(version: &str) -> Arc<Ctx> {
+    /// A path selection switched to an identical file: the same dictionary,
+    /// loaded under the same identity, named after another file.
+    #[test]
+    fn names_differ_when_only_the_selected_file_is_renamed() {
         use crate::dictionary::parse::fixtures::{field, quickfix};
-        Ctx::for_test_with_dict(version, quickfix(version, &field(9999, "Selected")))
+        let dict = Dict::Owned(Arc::new(quickfix("FIX.4.4", &field(9999, "Selected"))));
+        let choice = |source: &str| DictionaryChoice {
+            dict: dict.clone(),
+            version: "FIX.4.4".into(),
+            source: source.into(),
+            identity: 123,
+            name: None,
+        };
+        let registry = Arc::new(Registry::bundled_only());
+        let names = |source| DictionaryNames::new(registry.clone(), Some(&choice(source)));
+        assert!(names("/logs/desk.xml").same_as(&names("/logs/desk.xml")));
+        assert!(!names("/logs/desk.xml").same_as(&names("/logs/book.xml")));
+        assert!(!names("/logs/desk.xml").same_as(&DictionaryNames::new(registry.clone(), None)));
     }
 
     #[test]
     fn a_selected_nondefault_version_is_known_but_does_not_change_missing_tag8_fallback() {
-        let context = selected_context("FIX.9.1");
+        let context = Ctx::for_test_selected("FIX.9.1");
         let selected = context.resolve(Some(b"FIX.9.1"));
         assert_eq!(selected.version.as_ref(), "FIX.9.1");
         assert!(selected.dict.field_idx(9999).is_some());
@@ -273,16 +297,16 @@ mod tests {
 
     #[test]
     fn selected_alias_compatibility_is_asymmetric() {
-        let application = selected_context("FIX.5.0SP2");
+        let application = Ctx::for_test_selected("FIX.5.0SP2");
         assert!(!application.resolve(Some(b"FIXT.1.1")).dict.is_static());
-        let transport = selected_context("FIXT.1.1");
+        let transport = Ctx::for_test_selected("FIXT.1.1");
         assert!(!transport.resolve(Some(b"FIXT.1.1")).dict.is_static());
         assert!(transport.resolve(Some(b"FIX.5.0SP2")).dict.is_static());
     }
 
     #[test]
     fn choice_provenance_is_not_a_context_fingerprint_input() {
-        let original = selected_context("FIX.4.4");
+        let original = Ctx::for_test_selected("FIX.4.4");
         let mut choice = original.choice().unwrap().clone();
         choice.source = "another.toml:6".into();
         choice.name = Some("different-name".into());
@@ -308,13 +332,16 @@ mod tests {
     /// user's dictionary for every 5.x line.
     #[test]
     fn the_fixt11_alias_reaches_a_custom_five_x_dictionary() {
+        let path =
+            std::env::temp_dir().join(format!("fix-lsp-ctx-fixt11-{}.xml", std::process::id()));
+        std::fs::write(
+            &path,
+            "<fix major='5' minor='0' servicepack='2'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
+             <field number='9999' name='Desk' type='STRING'/></fields></fix>",
+        )
+        .unwrap();
         let spec = crate::config::DictionarySpec {
-            path: concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/xml/custom/synthetic/repository/FIX.5.0SP2/Base"
-            )
-            .to_owned(),
-            mode: crate::config::DictionaryMode::Auto,
+            path: path.to_string_lossy().into_owned(),
             name: "md-fix50".to_owned(),
             default: true,
         };

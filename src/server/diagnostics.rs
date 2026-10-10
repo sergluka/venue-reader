@@ -12,6 +12,8 @@
 //! *same* document version and a client cannot tell them apart.
 //!
 
+mod cap;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -27,8 +29,9 @@ use super::dispatch::Snapshot;
 use super::{OutgoingRequest, ServerState};
 use crate::ctx::analyze;
 use crate::document::{Column, Columns, LineNo};
-use crate::rules::Diag;
+use crate::rules::{Diag, Scope};
 use crate::transport::Sink;
+use cap::{Admit, CappedFindings, Quota};
 
 /// Collapses a typing burst into one walk.
 const DEBOUNCE: Duration = Duration::from_millis(80);
@@ -85,10 +88,10 @@ pub(crate) enum Report {
 struct Inflight {
     generation: u64,
     cancel: Arc<AtomicBool>,
-    /// Kept so the byte→position conversion uses the lines the walk saw, and so
+    /// CappedFindings so the byte→position conversion uses the lines the walk saw, and so
     /// the publish carries the version the walk was about.
     snapshot: Snapshot,
-    found: Vec<(LineNo, Diag)>,
+    capped: CappedFindings,
     published_at: Option<Instant>,
     /// The token the client agreed to, before anything is said under it.
     /// `None` until the `create` is answered, and for clients that refuse.
@@ -268,7 +271,7 @@ impl Worker {
                 generation,
                 cancel: cancel.clone(),
                 snapshot: snapshot.clone(),
-                found: Vec::new(),
+                capped: CappedFindings::new(cap),
                 published_at: None,
                 token: None,
                 progress: None,
@@ -340,7 +343,8 @@ fn run(jobs: &Receiver<Job>, reports: &Sender<Report>) {
 fn walk(job: &Job, reports: &Sender<Report>) -> usize {
     let mut total = 0usize;
     let mut batch: Vec<(LineNo, Diag)> = Vec::new();
-    let mut carried = 0usize;
+    // The main loop replays the same decisions over what is sent.
+    let mut quota = Quota::new(job.cap);
     let mut last_sent = Instant::now();
     let mut document_keys = HashSet::new();
 
@@ -351,15 +355,25 @@ fn walk(job: &Job, reports: &Sender<Report>) -> usize {
         // `analyze`, not `cached_analysis`: a whole-document walk may not
         // populate the cache. This is the caller that rule exists for.
         let analysis = analyze(&line.bytes, &job.snapshot.ctx);
-        for diag in job.snapshot.rules.check_line(&line.bytes, &analysis) {
+        let scope = Scope {
+            label: analysis
+                .message()
+                .and_then(|message| job.snapshot.names.of(&message.version)),
+            // What the cap would refuse is only counted. Fixed for the whole
+            // line, so one line still renders all it finds.
+            count_from: quota.refused_from(),
+            only: None,
+        };
+        let checked = job.snapshot.rules.check(&line.bytes, &analysis, &scope);
+        total += checked.counted;
+        for diag in checked.diags {
             if let Some(key) = &diag.document_key {
                 if !document_keys.insert((diag.rule, key.clone())) {
                     continue;
                 }
             }
             total += 1;
-            if carried < job.cap {
-                carried += 1;
+            if quota.admit(diag.severity) != Admit::Refused {
                 batch.push((LineNo::new(number as u32), diag));
             }
         }
@@ -436,7 +450,7 @@ pub(super) fn lsp_severity(severity: crate::config::Severity) -> lsp_types::Diag
 }
 
 /// Convert one line's diagnostics in a single ascending walk.
-pub(super) fn render(found: &[(LineNo, Diag)], snapshot: &Snapshot) -> Vec<serde_json::Value> {
+pub(super) fn render(found: &[(LineNo, &Diag)], snapshot: &Snapshot) -> Vec<serde_json::Value> {
     let mut out = Vec::with_capacity(found.len());
     let mut at = 0usize;
     while at < found.len() {
@@ -655,7 +669,9 @@ impl ServerState {
                     return;
                 }
                 let inflight = self.diagnostics.inflight.get_mut(&uri).expect("accepted");
-                inflight.found.extend(found);
+                for (line, diag) in found {
+                    inflight.capped.insert(line, diag);
+                }
                 let due = inflight
                     .published_at
                     .is_none_or(|at| at.elapsed() >= PUBLISH_EVERY);
@@ -731,14 +747,14 @@ impl ServerState {
     /// already has: a publish redraws its whole problem list.
     fn publish_current(&mut self, uri: &Uri, total: Option<usize>) {
         let inflight = self.diagnostics.inflight.get_mut(uri).expect("in flight");
-        let left_out = total.map_or(0, |total| total.saturating_sub(inflight.found.len()));
+        let left_out = total.map_or(0, |total| total.saturating_sub(inflight.capped.len()));
         inflight.published_at = Some(Instant::now());
         let version = inflight.snapshot.version;
-        let mut rendered = render(&inflight.found, &inflight.snapshot);
+        let mut rendered = render(&inflight.capped.in_line_order(), &inflight.snapshot);
         if left_out > 0 {
             rendered.push(truncated(left_out));
         }
-        let shown = inflight.found.len();
+        let shown = inflight.capped.len();
         let encoded = serde_json::to_vec(&rendered).expect("FIX diagnostics serialize");
         drop(rendered);
         self.diagnostics.fix_results.insert(uri.clone(), encoded);
@@ -951,6 +967,157 @@ mod tests {
             })
             .sum();
         assert_eq!(carried, 1, "only the cap is carried");
+    }
+
+    /// What the main loop ends up holding after a walk: its own `CappedFindings`, fed
+    /// every batch in order.
+    fn kept_after(job: &Job) -> (usize, Vec<(u32, crate::config::Severity)>) {
+        let (tx, rx) = unbounded();
+        let total = walk(job, &tx);
+        drop(tx);
+        let mut capped = CappedFindings::new(job.cap);
+        for report in rx.try_iter() {
+            if let Report::Batch { found, .. } = report {
+                for (line, diag) in found {
+                    capped.insert(line, diag);
+                }
+            }
+        }
+        let held = capped
+            .in_line_order()
+            .into_iter()
+            .map(|(line, diag)| (line.raw(), diag.severity))
+            .collect();
+        (total, held)
+    }
+
+    /// Two fragments' `beginString` warnings fill the cap first; the errors
+    /// further down still take it.
+    #[test]
+    fn a_less_severe_finding_never_keeps_an_error_out() {
+        use crate::config::Severity::*;
+        let lines = ["1=x|", "1=x|", BAD].join("\n");
+        let (total, held) = kept_after(&job(&lines, Arc::new(AtomicBool::new(false)), 2));
+        assert_eq!(total, 4);
+        assert_eq!(held, [(2, Error), (2, Error)]);
+
+        let (total, held) = kept_after(&job(&lines, Arc::new(AtomicBool::new(false)), 3));
+        assert_eq!(total, 4);
+        assert_eq!(
+            held,
+            [(0, Warning), (2, Error), (2, Error)],
+            "the earlier warning stays"
+        );
+    }
+
+    /// Two undefined tags on a line whose trailer is sound.
+    fn venue_line() -> String {
+        crate::rules::tests::repaired("8=FIX.4.4|9=0|35=0|9000=a|9000=b|10=000|")
+    }
+
+    fn with_rules(mut job: Job, config: &Diagnostics, selected: Option<&str>) -> Job {
+        job.snapshot.rules = Arc::new(Registry::with_selected_version(config, selected));
+        job
+    }
+
+    /// The cap fills with `unknownTag` findings, refuses the next one, counts
+    /// the line after without rendering it, and still gives way to the errors.
+    #[test]
+    fn the_walk_counts_what_the_cap_refuses() {
+        use crate::config::{RuleSetting, Severity::*};
+        let venue = venue_line();
+        let lines = [venue.as_str(), &venue, BAD, &venue].join("\n");
+        let fresh = || Arc::new(AtomicBool::new(false));
+
+        let (total, held) = kept_after(&job(&lines, fresh(), 3));
+        assert_eq!(total, 8, "six unknown tags and two integrity errors");
+        assert_eq!(held, [(0, Info), (2, Error), (2, Error)]);
+
+        let mut config = Diagnostics::default();
+        config.rules.insert(
+            "unknownTag".into(),
+            RuleSetting::Detailed {
+                enabled: None,
+                severity: Some(Warning),
+                rest: Default::default(),
+            },
+        );
+        let regraded = with_rules(job(&lines, fresh(), 3), &config, None);
+        let (total, held) = kept_after(&regraded);
+        assert_eq!(total, 8);
+        assert_eq!(held, [(0, Warning), (2, Error), (2, Error)]);
+
+        // A finding deduplicated per document is counted once, however late.
+        let mismatched = with_rules(
+            job(&lines, fresh(), 3),
+            &Diagnostics::default(),
+            Some("FIX.4.3"),
+        );
+        let (total, held) = kept_after(&mismatched);
+        assert_eq!(total, 9, "plus one dictionaryVersion for the document");
+        assert_eq!(held, [(0, Warning), (2, Error), (2, Error)]);
+    }
+
+    /// How often [`Rendering`] was asked to render rather than count.
+    static RENDERED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// One `info` finding per line, and a count of the times it was rendered.
+    struct Rendering;
+
+    impl crate::rules::Rule for Rendering {
+        fn id(&self) -> &'static str {
+            "rendering"
+        }
+        fn precondition(&self) -> crate::rules::Precondition {
+            crate::rules::Precondition::Fields
+        }
+        fn default_severity(&self) -> crate::config::Severity {
+            crate::config::Severity::Info
+        }
+        fn check(
+            &self,
+            _ctx: &crate::rules::LineCtx,
+            severity: crate::config::Severity,
+        ) -> Vec<Diag> {
+            RENDERED.fetch_add(1, Ordering::Relaxed);
+            vec![Diag {
+                code: self.id(),
+                rule: self.id(),
+                start: crate::codec::ByteOffset::new(0),
+                end: crate::codec::ByteOffset::new(1),
+                message: String::new(),
+                severity,
+                document_key: None,
+            }]
+        }
+        fn count(&self, _ctx: &crate::rules::LineCtx) -> Option<usize> {
+            Some(1)
+        }
+    }
+
+    /// Once the cap holds two `info` findings, the next three lines are counted
+    /// and never rendered.
+    #[test]
+    fn the_walk_stops_rendering_what_the_cap_refuses() {
+        let lines = ["55=X|"; 5].join("\n");
+        let mut job = job(&lines, Arc::new(AtomicBool::new(false)), 2);
+        job.snapshot.rules = Arc::new(Registry::of_rules(
+            vec![(&Rendering, crate::config::Severity::Info)],
+            None,
+        ));
+        let (total, held) = kept_after(&job);
+        assert_eq!(total, 5);
+        assert_eq!(held.len(), 2);
+        assert_eq!(RENDERED.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn more_errors_than_the_cap_keep_the_first_in_line_order() {
+        use crate::config::Severity::*;
+        let lines = [BAD, BAD, BAD].join("\n");
+        let (total, held) = kept_after(&job(&lines, Arc::new(AtomicBool::new(false)), 3));
+        assert_eq!(total, 6);
+        assert_eq!(held, [(0, Error), (0, Error), (1, Error)]);
     }
 
     /// The guarantee the `Drop` exists for: every begun sequence is ended, on

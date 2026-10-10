@@ -13,7 +13,7 @@ mod harness;
 
 use std::time::Duration;
 
-use harness::{TestClient, PROGRESS_CREATE};
+use harness::{TestClient, Workspace, PROGRESS_CREATE};
 use serde_json::{json, Value};
 
 /// One BodyLength problem and one CheckSum problem; the same line as
@@ -262,6 +262,381 @@ fn the_cap_says_how_many_it_left_out() {
     let text = logged["message"].as_str().unwrap();
     assert!(text.contains("showing 1 problems of 6"), "{text}");
     assert!(text.contains("diagnosticsPerDocument"), "{text}");
+    client.shutdown();
+}
+
+/// Answer the server's pending configuration pull with `settings`.
+fn answer(client: &mut TestClient, settings: Value) {
+    let (id, _, _) = client.recv_server_request();
+    client.reply(id, json!([settings]));
+}
+
+/// Announce a configuration change and answer the pull it causes.
+fn pull(client: &mut TestClient, settings: Value) {
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": null }),
+    );
+    answer(client, settings);
+}
+
+/// `(code, severity, start line)` of every diagnostic in a publish.
+fn shown(publish: &Value) -> Vec<(String, u64, u64)> {
+    publish["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|diagnostic| {
+            (
+                diagnostic["code"].as_str().unwrap().to_owned(),
+                diagnostic["severity"].as_u64().unwrap(),
+                diagnostic["range"]["start"]["line"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// The message of the `code` diagnostic in a publish that mentions `needle`.
+fn message_on(publish: &Value, code: &str, needle: &str) -> String {
+    publish["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|diagnostic| diagnostic["code"] == code)
+        .map(|diagnostic| diagnostic["message"].as_str().unwrap().to_owned())
+        .find(|message| message.contains(needle))
+        .unwrap_or_else(|| panic!("{code} on {needle}: {publish}"))
+}
+
+/// The message of the last diagnostic, which the cap's `truncated` always is.
+fn truncated_message(publish: &Value) -> &str {
+    publish["diagnostics"].as_array().unwrap().last().unwrap()["message"]
+        .as_str()
+        .unwrap()
+}
+
+/// Findings regraded to hint fill the cap first; the errors further down still
+/// take it, and what they displaced is counted, not lost.
+#[test]
+fn the_cap_keeps_the_most_severe_problems() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    // Two fragments reported by `beginString`, then one line with two errors.
+    let text = ["55=BTCUSD|", "55=BTCUSD|", BAD_BOTH].join("\n");
+    pull(
+        &mut client,
+        json!({
+            "limits": { "diagnosticsPerDocument": 2 },
+            "diagnostics": { "rules": { "beginString": { "severity": "hint" } } },
+        }),
+    );
+    client.did_open(URI, &text, 1);
+
+    let notes = client.drain_notifications(QUIET);
+    let last = last_publish(&notes, URI).expect("published");
+    assert_eq!(
+        shown(&last),
+        [
+            ("bodyLength".to_owned(), 1, 2),
+            ("checkSum".to_owned(), 1, 2),
+            ("truncated".to_owned(), 3, 0),
+        ]
+    );
+    assert_eq!(truncated_message(&last), "2 more problems not shown");
+    client.shutdown();
+}
+
+/// A desk's FIX.4.4 dictionary that defines Symbol(55) and nothing else.
+const DESK_44: &str = "<fix type='FIX' major='4' minor='4' servicepack='0'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
+<field number='55' name='Symbol' type='STRING'/></fields></fix>";
+
+/// Side(54) is standard FIX.4.4 and missing from `DESK_44`.
+const DESK_LINE: &str = "8=FIX.4.4|35=0|55=X|54=1|";
+
+/// Settings pulled in turn; what `unknownTag` says about Side(54) after each.
+fn messages_under(settings: &[Value]) -> Vec<String> {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    let mut said = Vec::new();
+    for (at, fix) in settings.iter().enumerate() {
+        if at > 0 {
+            pull(&mut client, fix.clone());
+        } else {
+            answer(&mut client, fix.clone());
+        }
+        if at == 0 {
+            client.did_open(URI, DESK_LINE, 1);
+        }
+        let last = last_publish(&client.drain_notifications(QUIET), URI).expect("published");
+        said.push(message_on(&last, "unknownTag", "Side(54)"));
+    }
+    client.shutdown();
+    said
+}
+
+#[test]
+fn an_undefined_tag_is_published_in_the_desks_name() {
+    let workspace = Workspace::new("unknown-tag-desk");
+    let said = messages_under(&[workspace.desk_dictionary(DESK_44)]);
+    assert_eq!(
+        said,
+        ["\"desk\" does not define Side(54); standard FIX.4.4"]
+    );
+}
+
+/// A rename republishes because the registry's identity covers names. A
+/// default moved between two names for one file changes no dictionary and no
+/// identity: only the comparison of names makes the walk run again.
+#[test]
+fn a_new_name_for_the_same_dictionary_republishes() {
+    let workspace = Workspace::new("unknown-tag-rename");
+    let path = workspace.write("desk.xml", DESK_44);
+    let named = |entries: Value| json!({ "allowDictionaryPath": true, "dictionaries": entries });
+    let said = messages_under(&[
+        named(json!([{ "path": path, "name": "desk", "default": true }])),
+        named(json!([{ "path": path, "name": "book", "default": true }])),
+    ]);
+    assert_eq!(
+        said[1],
+        "\"book\" does not define Side(54); standard FIX.4.4"
+    );
+
+    let said = messages_under(&[
+        named(json!([
+            { "path": path, "name": "alpha", "default": true },
+            { "path": path, "name": "beta" },
+        ])),
+        named(json!([
+            { "path": path, "name": "alpha" },
+            { "path": path, "name": "beta", "default": true },
+        ])),
+    ]);
+    assert_eq!(
+        said,
+        [
+            "\"alpha\" does not define Side(54); standard FIX.4.4",
+            "\"beta\" does not define Side(54); standard FIX.4.4",
+        ]
+    );
+}
+
+/// A venue's own message type carrying a venue tag: one finding for each
+/// rule, beside the integrity errors of a line without a trailer.
+const VENUE_LINE: &str = "8=FIX.4.4|35=U1|9000=x|";
+
+/// `(code, severity, rule)` of the publish's `unknownTag` and `unknownMsgType`
+/// findings, sorted.
+fn unknown_findings(publish: &Value) -> Vec<(String, u64, String)> {
+    let mut found: Vec<(String, u64, String)> = publish["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic["code"] == "unknownTag" || diagnostic["code"] == "unknownMsgType"
+        })
+        .map(|diagnostic| {
+            (
+                diagnostic["code"].as_str().unwrap().to_owned(),
+                diagnostic["severity"].as_u64().unwrap(),
+                diagnostic["data"]["rule"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+fn finding(code: &str, severity: u64) -> (String, u64, String) {
+    (code.to_owned(), severity, code.to_owned())
+}
+
+#[test]
+fn bundled_dictionaries_without_a_session_layer_publish_no_unknown_message_types() {
+    let mut client = TestClient::start();
+    open(
+        &mut client,
+        "8=FIX.5.0|35=0|\n8=FIX.5.0|35=U1|\n8=FIX.5.0SP1|35=A|\n8=FIX.5.0SP1|35=U1|",
+    );
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    assert_eq!(unknown_findings(&published), []);
+    client.shutdown();
+}
+
+#[test]
+fn an_application_only_custom_dictionary_publishes_unknown_message_types() {
+    let workspace = Workspace::new("unknown-message-type-application");
+    let dictionary = "<fix version='FIX.4.4'><messages>\
+        <message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
+        <field number='8' name='BeginString' type='STRING'/>\
+        <field number='35' name='MsgType' type='STRING'/></fields></fix>";
+    let mut client = workspace.client(workspace.desk_dictionary(dictionary));
+    client.did_open(URI, "8=FIX.4.4|35=U1|", 1);
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    assert_eq!(unknown_findings(&published), [finding("unknownMsgType", 3)]);
+    assert_eq!(
+        message_on(&published, "unknownMsgType", "U1"),
+        "\"desk\" does not define MsgType(35) = U1"
+    );
+    let diagnostic = published["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "unknownMsgType")
+        .unwrap();
+    assert_eq!(
+        diagnostic["range"],
+        json!({ "start": { "line": 0, "character": 13 }, "end": { "line": 0, "character": 15 } })
+    );
+
+    client.did_change_full(URI, "8=FIX.4.4|35=D|", 2);
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    assert_eq!(published["version"], 2);
+    assert_eq!(unknown_findings(&published), []);
+    client.shutdown();
+}
+
+#[test]
+fn the_two_rules_are_toggled_and_regraded_apart() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    client.did_open(URI, VENUE_LINE, 1);
+    let first = client.wait_for("textDocument/publishDiagnostics");
+    assert_eq!(
+        unknown_findings(&first),
+        [finding("unknownMsgType", 3), finding("unknownTag", 3)],
+        "information by default"
+    );
+    assert_eq!(
+        message_on(&first, "unknownMsgType", "U1"),
+        "FIX.4.4 does not define MsgType(35) = U1"
+    );
+    assert_eq!(
+        message_on(&first, "unknownTag", "9000"),
+        "FIX.4.4 does not define tag 9000"
+    );
+
+    for (rules, expected) in [
+        (
+            json!({ "unknownTag": false }),
+            vec![finding("unknownMsgType", 3)],
+        ),
+        (
+            json!({ "unknownTag": { "severity": "hint" } }),
+            vec![finding("unknownMsgType", 3), finding("unknownTag", 4)],
+        ),
+        (
+            json!({ "unknownMsgType": false }),
+            vec![finding("unknownTag", 3)],
+        ),
+        (
+            json!({ "unknownMsgType": { "severity": "hint" } }),
+            vec![finding("unknownMsgType", 4), finding("unknownTag", 3)],
+        ),
+    ] {
+        pull(&mut client, json!({ "diagnostics": { "rules": rules } }));
+        let last = last_publish(&client.drain_notifications(QUIET), URI).expect("republished");
+        assert_eq!(last["version"], 1, "the document did not move");
+        assert_eq!(unknown_findings(&last), expected, "{rules}");
+    }
+    client.shutdown();
+}
+
+/// Each modeline is read with the edit that writes it, and governs only the
+/// rule it names.
+#[test]
+fn a_modeline_toggles_and_regrades_each_rule_apart() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    client.did_open(URI, VENUE_LINE, 1);
+    for (version, setting, expected) in [
+        (2, "unknownTag=false", vec![finding("unknownMsgType", 3)]),
+        (
+            3,
+            "unknownTag.severity=hint",
+            vec![finding("unknownMsgType", 3), finding("unknownTag", 4)],
+        ),
+        (4, "unknownMsgType=false", vec![finding("unknownTag", 3)]),
+        (
+            5,
+            "unknownMsgType.severity=hint",
+            vec![finding("unknownMsgType", 4), finding("unknownTag", 3)],
+        ),
+    ] {
+        let text = format!("# fix: diagnostics.rules.{setting}\n{VENUE_LINE}");
+        client.did_change_full(URI, &text, version);
+        let last = last_publish(&client.drain_notifications(QUIET), URI).expect("published");
+        assert_eq!(last["version"], version, "{setting}");
+        assert_eq!(unknown_findings(&last), expected, "{setting}");
+    }
+    client.shutdown();
+}
+
+/// Hover and the diagnostic say the same thing about one tag.
+#[test]
+fn the_diagnostic_and_hover_agree_on_a_tag() {
+    let workspace = Workspace::new("unknown-tag-hover");
+    let mut client = workspace.client(workspace.desk_dictionary(DESK_44));
+    let line = "8=FIX.4.4|35=0|55=X|1328=x|";
+    client.did_open(URI, line, 1);
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    let said = message_on(&published, "unknownTag", "RejectText(1328)");
+    let start = line.find("1328=").unwrap() as u32;
+    let hover = client.hover(URI, 0, start).expect("answered");
+    let markdown = hover["contents"]["value"].as_str().unwrap();
+    assert!(markdown.contains("*Not defined by \"desk\"*"), "{markdown}");
+    let note = "not in FIX.4.4, introduced in FIX.5.0SP1";
+    assert!(
+        markdown.contains("*Not in FIX.4.4, introduced in FIX.5.0SP1*"),
+        "{markdown}"
+    );
+    assert_eq!(
+        said,
+        format!("\"desk\" does not define RejectText(1328); {note}")
+    );
+    client.shutdown();
+}
+
+/// `line` with BodyLength(9) and CheckSum(10) set right by the server's own
+/// repair, as `tests/fixtures.rs` frames its lines.
+fn repaired(line: &str) -> String {
+    let ctx = harness::test_ctx();
+    let analysis = fix_lsp::ctx::analyze(line.as_bytes(), &ctx);
+    let message = analysis.message().expect("a message");
+    let repair =
+        fix_lsp::rules::integrity::repair(&fix_lsp::rules::LineCtx::new(line.as_bytes(), message))
+            .expect("a repair");
+    String::from_utf8(harness::apply_edits(line.as_bytes(), &repair.edits)).unwrap()
+}
+
+/// `info` findings fill the cap first and keep arriving after it is full;
+/// the errors further down still take it.
+#[test]
+fn info_findings_never_keep_an_error_out() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    let venue = repaired("8=FIX.4.4|9=0|35=0|9000=a|9000=b|10=000|");
+    let text = [venue.as_str(), &venue, BAD_BOTH, &venue].join("\n");
+    pull(
+        &mut client,
+        json!({ "limits": { "diagnosticsPerDocument": 3 } }),
+    );
+    client.did_open(URI, &text, 1);
+
+    let last = last_publish(&client.drain_notifications(QUIET), URI).expect("published");
+    assert_eq!(
+        shown(&last),
+        [
+            ("unknownTag".to_owned(), 3, 0),
+            ("bodyLength".to_owned(), 1, 2),
+            ("checkSum".to_owned(), 1, 2),
+            ("truncated".to_owned(), 3, 0),
+        ]
+    );
+    assert_eq!(truncated_message(&last), "5 more problems not shown");
     client.shutdown();
 }
 

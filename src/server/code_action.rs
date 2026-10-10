@@ -13,7 +13,7 @@ use super::dispatch::{Dispatched, HandlerResult, Notices, RequestTask, Snapshot}
 use super::ServerState;
 use crate::ctx::analyze;
 use crate::document::{Columns, LineNo, LineRange};
-use crate::rules::{integrity, Diag, Edit, LineCtx, Rule};
+use crate::rules::{integrity, Edit, LineCtx, Rule, Scope};
 
 impl ServerState {
     pub(super) fn code_action_task(&mut self, params: &Value) -> Dispatched {
@@ -76,13 +76,16 @@ fn answer(params: &CodeActionParams, cap: usize, snapshot: &Snapshot) -> Handler
         // nothing will re-read these, so a wide selection would populate the
         // cache for one keystroke.
         let analysis = analyze(&line.bytes, &snapshot.ctx);
-        let claimed: Vec<(LineNo, Diag)> = snapshot
-            .rules
-            .check_line(&line.bytes, &analysis)
-            .into_iter()
-            .filter(|diag| diag.rule == integrity::Integrity.id())
-            .map(|diag| (number, diag))
-            .collect();
+        // The label the walk passed too, so the claimed diagnostics stay
+        // byte-identical to the published ones whatever the rule prints.
+        let scope = Scope {
+            label: analysis
+                .message()
+                .and_then(|message| snapshot.names.of(&message.version)),
+            only: Some(integrity::Integrity.id()),
+            ..Scope::default()
+        };
+        let claimed = snapshot.rules.check(&line.bytes, &analysis, &scope).diags;
         // No integrity diagnostic, no action: one switch governs the report and
         // the repair, so there is no configuration under which an action can
         // claim a problem the user asked not to hear about.
@@ -100,7 +103,10 @@ fn answer(params: &CodeActionParams, cap: usize, snapshot: &Snapshot) -> Handler
             "kind": CodeActionKind::QuickFix,
             // Rendered by the publisher, so they are byte-identical to the
             // marks the client is already showing and match by range.
-            "diagnostics": render(&claimed, snapshot),
+            "diagnostics": render(
+                &claimed.iter().map(|diag| (number, diag)).collect::<Vec<_>>(),
+                snapshot,
+            ),
             "isPreferred": true,
             "edit": { "documentChanges": [{
                 "textDocument": { "uri": uri, "version": snapshot.version },

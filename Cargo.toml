@@ -54,6 +54,10 @@ name = "lens_list"
 harness = false
 
 [[bench]]
+name = "tokens"
+harness = false
+
+[[bench]]
 name = "hint_payload"
 harness = false
 

@@ -579,8 +579,12 @@ impl ServerState {
             });
             let interpretation =
                 previous.is_none_or(|previous| !Arc::ptr_eq(&previous.ctx, &document.ctx));
+            // A name is no input to the analysis, so a change here moves no
+            // interpretation; it changes what hints and diagnostics print.
+            let renamed = previous.is_none_or(|previous| !previous.names.same_as(&document.names));
             let config = &document.resolved.config;
             hints |= interpretation
+                || renamed
                 || previous.is_none_or(|previous| {
                     previous.resolved.config.inlay_hints != config.inlay_hints
                         || previous.resolved.config.message_summary != config.message_summary
@@ -602,6 +606,7 @@ impl ServerState {
                 self.tokens.remove(&input.uri);
             }
             if interpretation
+                || renamed
                 || previous.is_none_or(|previous| {
                     previous.resolved.config.diagnostics != config.diagnostics
                         || previous.resolved.config.limits != config.limits

@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Synthetic FIX Repository-layout fixture written for this project (Apache-2.0); no third-party data. -->
-<Messages version="FIX.4.4">
-  <Message added="FIX.4.0"><ComponentID>10</ComponentID><MsgType>0</MsgType><Name>Heartbeat</Name><CategoryID>Session</CategoryID><Description>Synthetic Heartbeat message.</Description></Message>
-  <Message added="FIX.4.0"><ComponentID>11</ComponentID><MsgType>D</MsgType><Name>NewOrderSingle</Name><CategoryID>SingleGeneralOrderHandling</CategoryID><Description>Synthetic NewOrderSingle message.</Description></Message>
-  <Message added="FIX.4.0"><ComponentID>12</ComponentID><MsgType>W</MsgType><Name>MarketDataSnapshotFullRefresh</Name><CategoryID>MarketData</CategoryID><Description>Synthetic MarketDataSnapshotFullRefresh message.</Description></Message>
-</Messages>

@@ -206,7 +206,8 @@ FIX.5.0SP1*, and the raw value. Under a custom dictionary a line above the
 note says the dictionary lacks it — *Not defined by "desk"*. Nothing else is
 claimed: no datatype, description or lifecycle line, and a versioned link only
 where the tag is standard in the line's version. A tag neither source knows,
-or one the sources dispute, has no hover.
+or one the sources dispute, has no hover; the `unknownTag` diagnostic
+([Diagnostics](#diagnostics)) still says the dictionary lacks it.
 
 For a tag no line carries, [`fix.describeTag`](#fixdescribetag) answers from
 the newest version that defines it, with that tag's lifespan in place of a
@@ -466,20 +467,20 @@ configuration files sparse so higher layers only override intended settings.
 }
 ```
 
-An empty `diagnostics.rules` uses each rule's defaults: all four rules are
+An empty `diagnostics.rules` uses each rule's defaults: all six rules are
 enabled, with severities listed under [Diagnostics](#diagnostics).
 `inlayHints.groupPaths.enabled` changes tag labels; it produces no hints
 while tag-name hints are disabled.
 
 There is no explicit `dictionary` selection by default: BeginString(8)
 selects the version, using `defaultVersion` when it cannot.
-`files` has no filter by default. Dictionary-entry defaults are
-`mode = "auto"` and `default = false`; `name` and `path` are required.
+`files` has no filter by default. A dictionary entry defaults to
+`default = false`; `name` and `path` are required.
 
 | Limit | Effect |
 | --- | --- |
 | `dictionaryBytes` | Maximum bytes per external XML file; default 16 MiB. |
-| `diagnosticsPerDocument` | Maximum FIX diagnostics per document. |
+| `diagnosticsPerDocument` | Maximum FIX diagnostics per document. Filled by severity: a less severe problem never keeps a more severe one out; within one severity the first in line order are kept. |
 | `rangeLines` | Maximum lines for hints, range tokens, and code actions; total selected lines for `fix.decode`; distinct cursor lines for selection expansion. |
 | `codeLensLines` | Maximum document size for code-lens summaries. |
 | `documentSymbolItems` | Outline symbol budget, including fields and groups. |
@@ -537,27 +538,61 @@ Hover compares each field of a custom dictionary with standard FIX for the
 line's version and marks the ones that version does not define; see
 [Hover](#hover).
 
-### Supported formats
+### Supported format
 
-| Format | Input | Contents |
-| --- | --- | --- |
-| QuickFIX XML | One file rooted at `<fix>`. | Fields, enums, header/trailer membership, messages, components, and nested groups. Component references are expanded. |
-| FIX Repository 2010 Edition | Directory, its `Fields.xml`, or a directory containing `Base/`. | `Fields.xml` and `Enums.xml` are required. `Messages.xml`, `MsgContents.xml`, and `Components.xml` add message/group structure when all three are present. |
+A custom dictionary is one QuickFIX XML file rooted at `<fix>`: fields,
+enums, header and trailer with their own groups, messages, components, and
+nested groups, with component references expanded. A directory is refused.
 
-QuickFIX requires `<fields>` and declarations for referenced field names.
-The first member of a group defines its entry delimiter. Repository inputs
-without the complete optional structure set still provide field and enum
-lookups.
+The dictionary is read as the whole truth about what it declares. A message
+or group listed with no members is complete and empty, not missing
+information; an empty `<group/>` is still a group, so its counter is marked
+as a count. The first member of a group defines its entry delimiter.
+
+A dictionary with one of these defects is refused. The error starts with the
+file's path and says where the defect is. Other dictionaries in the same
+configuration still load.
+
+| Defect | Error |
+|---|---|
+| Malformed XML | the XML parser's message |
+| No `<fix>` root, or no `<fields>` section | `expected <fix> root element`, `expected <fields> root element` |
+| A field number that is not a number | `tag is not a number: "abc"` |
+| A field numbered 0 or 4294967295 | `field A has number 0, outside the tag range 1 to 4294967294` |
+| A group counter or component that the file does not define, referenced from any component, used or not | `component AttrbGrp refers to group counter "NoInstrAttrib", which the file does not define` |
+| A component that contains itself | `component A contains itself (A → B → A)` |
+| A message without `msgtype`, without `name`, or without both | `message NewOrderSingle has no msgtype`, `the message with MsgType(35) = D has no name`, `a message has neither a name nor a msgtype` |
+| No `<messages>` section, or an empty one | `declares no messages` |
+| Components and groups nested deeper than 32 levels | `component/group nesting deeper than 32` |
+| A dictionary that expands to more than 1 048 576 member declarations | `expands to more than 1048576 member declarations` |
+| More than 65 535 fields, messages or groups, or as many members or component rows in one scope | `too many fields (more than 65535)` |
+| More than 65 535 enum values in one field | `field 35 has too many enum values (more than 65535)` |
+
+A dictionary with one of these defects loads, and each defect is reported.
+It is an error when the server drops or chooses something the file says,
+and a warning when nothing the file says is lost:
+`dictionary "x.xml" loaded with an error: …` or
+`dictionary "x.xml" loaded with a warning: …`. Up to 20 are listed, errors
+first, then `… and N more`, as severe as the worst one it counts.
+
+| Defect | What the server does | Severity | Message |
+|---|---|---|---|
+| A reference to a field that the file does not define, from any component, used or not | Skips the reference | Error | `message MarketDataRequest refers to field "PriceAggregation", which the file does not define; skipped` |
+| A field name defined with two numbers | The name refers to the last number; both tags stay defined | Error | `field TargetStrategy is defined with two numbers, TargetStrategy(847) and TargetStrategy(50001); the name refers to TargetStrategy(50001)` |
+| A message type defined more than once | Merges every definition, named after the first | Warning under one name, error when a definition has another name | `message NewOrderSingle, MsgType(35) = D, is defined twice; merged into one`, `message NewOrderSingle, MsgType(35) = D, is defined 3 times, also as OrderSingle, NOS; merged into one under NewOrderSingle` |
+| A tag listed twice in one header, trailer, message or group entry, directly or through components | Keeps one member at the first position, with the strictest declaration's requiredness, group and components; a field marked `repeating="Y"` may be listed again, identically, without a report | Warning when every declaration is the same, error when they differ | `message RegistrationInstructions, MsgType(35) = o, lists OwnershipType(517) twice; merged into one` |
+| A group counter listed in one scope both as a plain field and as a group | Keeps the group, with its requiredness and components, at the first position | Warning | `message ExecutionReport, MsgType(35) = 8, lists NoPartyIDs(453) as a plain field and as a group; the group is kept` |
+
+One discrepancy loads without a report: a tag number defined under two
+names keeps the last definition, and both names resolve.
 
 The FIX version comes from XML metadata, for example
-`<fix type="FIX" major="4" minor="4">` or
-`<Fields version="FIX.4.4">`. It is not inferred from filenames, and there
-is no `dictionaries[].version` option. Direct loading of FIX Orchestra XML
-is not supported; Orchestra is used to build bundled metadata.
+`<fix type="FIX" major="4" minor="4">`. It is not inferred from filenames,
+and there is no `dictionaries[].version` option. Direct loading of FIX
+Orchestra XML is not supported; Orchestra is used to build bundled metadata.
 
-Working synthetic examples are included in
-[QuickFIX format](xml/custom/synthetic/oe-fix44.xml) and
-[Repository format](xml/custom/synthetic/repository/FIX.4.4/Base/).
+A working synthetic example is
+[included](xml/custom/synthetic/oe-fix44.xml).
 
 ### Registering and selecting dictionaries
 
@@ -571,7 +606,6 @@ The following is a global LSP `fix` section:
     {
       "name": "custom44",
       "path": "/path/to/custom-fix44.xml",
-      "mode": "quickfix",
       "default": true
     }
   ]
@@ -579,9 +613,6 @@ The following is a global LSP `fix` section:
 ```
 
 Every definition requires a nonblank, unique `name` and a `path`.
-`mode` accepts `auto`, `quickfix`, or `repository`. In `auto` mode,
-directories and paths named `Fields.xml` use the Repository loader;
-other files use QuickFIX.
 
 `default = true` makes a dictionary the fallback for messages of its
 declared FIX version. Registration alone does not replace the bundled
@@ -596,12 +627,10 @@ dictionary = "custom44"
 [[dictionaries]]
 name = "custom44"
 path = "dict/custom-fix44.xml"
-mode = "quickfix"
 
 [[dictionaries]]
-name = "repository44"
-path = "dict/FIX.4.4/Base"
-mode = "repository"
+name = "venue44"
+path = "dict/venue-fix44.xml"
 ```
 
 This is an alternative to global registration, not an additional declaration
@@ -745,7 +774,7 @@ version defines but FIX Latest knows is answered with its name and when it
 arrived, which is all that source carries.
 
 A tag no bundled version and not FIX Latest defines fails with
-`fix.describeTag: no dictionary defines tag N`. Until the client's
+`fix.describeTag: no bundled dictionary defines tag N`. Until the client's
 configuration has been answered and committed the command fails with
 `configuration is not ready, retry later`, because the reference link is
 configurable; a client that fires it on `initialized` retries.
@@ -843,9 +872,10 @@ are emitted only when the client advertises `overlappingTokenSupport`.
 Style either those overlays or the individual group-modified fields to avoid
 applying the same group background twice.
 
-Group structure comes from message definitions, including expanded components.
-Groups declared only inside a QuickFIX header are not reconstructed as groups,
-although their fields retain header membership.
+Group structure comes from the message definition, including expanded
+components, and from the header and trailer: a group declared there, such as
+NoHops(627), is reconstructed like a message group. When the message and the
+header declare a group with the same counter, the message's group is used.
 
 Range requests above `limits.rangeLines` return empty token data and a log
 message. Full/delta requests cover a bounded prefix, controlled by
@@ -855,7 +885,7 @@ output without reconnecting.
 
 ## Diagnostics
 
-Four FIX rules are implemented. All are enabled by default:
+Six FIX rules are implemented. All are enabled by default:
 
 | Rule | Default severity | Diagnostic code(s) | Condition |
 | --- | --- | --- | --- |
@@ -863,6 +893,8 @@ Four FIX rules are implemented. All are enabled by default:
 | `unknownVersion` | `warning` | `unknownVersion` | BeginString(8) cannot select its declared version; decoding uses the fallback. |
 | `dictionaryVersion` | `warning` | `dictionaryVersion` | The selected dictionary is incompatible with the resolved message version. Reported once per mismatching version in a document. |
 | `integrity` | `error` | `bodyLength`, `checkSum` | Missing or incorrect BodyLength(9) or CheckSum(10). |
+| `unknownMsgType` | `info` | `unknownMsgType` | The line's dictionary does not list its MsgType(35). |
+| `unknownTag` | `info` | `unknownTag` | The line's dictionary does not define a tag. Every occurrence is reported. |
 
 Each `diagnostics.rules.<rule>` accepts a boolean or an object with
 `enabled` and `severity`. For example:
@@ -883,9 +915,31 @@ A quick fix corrects or inserts both dependent values together, preserves the
 line's separator, and uses a versioned edit. Disabling diagnostics or the
 integrity rule also disables its quick fix.
 
+`unknownTag` and `unknownMsgType` state what the line's dictionary lacks, by
+its configured name (else its file name) or, for bundled tables, by version: `FIX.4.4 does not
+define tag 9000`, `"desk" does not define MsgType(35) = U1`. After a tag
+standard FIX knows comes how it stands there, in hover's words:
+`FIX.5.0 does not define RejectText(1328); introduced in FIX.5.0SP1`. Both
+run only on a line whose dictionary was chosen — by its BeginString(8), or,
+on a fragment without one, by an explicit selection that decoded it. A line
+decoded by fallback, such as `8=FIX.9.9`, is not checked against it.
+
+Known limits:
+
+- A `8=FIXT.1.1` message is always checked as FIX.5.0SP2; ApplVerID(1128)
+  is not consulted. The bundled
+  FIX.5.0 and FIX.5.0SP1 tables have no session layer, so under them
+  `unknownMsgType` stays silent and session fields such as HeartBtInt(108)
+  are reported by `unknownTag`.
+- A custom dictionary is taken as the full list of messages, session
+  messages included. One that declares only application messages reports
+  every session message, such as MsgType(35) = A, as unknown; a custom FIX 5
+  dictionary cannot yet be paired with a separate session dictionary.
+
 This is not full FIX schema validation: there are no rules for required
-fields, unknown tags or enum values, group-count consistency, or sequence
-gaps. Configuration errors are reported separately from these four rules and
+fields, tags not allowed in their message or group, enum values, group-count
+consistency, or sequence gaps, and a tag repeated outside a group is not
+reported. Configuration errors are reported separately from these rules and
 are not suppressed by `diagnostics.enabled`.
 
 ## Bundled dictionary sources
@@ -1000,9 +1054,8 @@ after a configuration refresh that re-enables access. The setting does not
 prevent reading TOML configuration files.
 
 Paths are canonicalized, dictionary input must be a regular file, and DTDs
-are rejected. XML reads are bounded by `limits.dictionaryBytes` per file,
-including each file in a Repository dictionary. Configuration TOML has a
-fixed 1 MiB limit. FIFOs and devices are refused.
+are rejected. XML reads are bounded by `limits.dictionaryBytes` per file.
+Configuration TOML has a fixed 1 MiB limit. FIFOs and devices are refused.
 
 ### Local logging
 

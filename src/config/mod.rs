@@ -348,28 +348,12 @@ impl Default for SummaryChannels {
     }
 }
 
-/// How an external dictionary path is interpreted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum DictionaryMode {
-    /// Detect a QuickFIX XML file or repository directory from the path.
-    #[default]
-    Auto,
-    /// Load one QuickFIX XML dictionary.
-    Quickfix,
-    /// Load a repository containing versioned dictionary files.
-    Repository,
-}
-
 /// One `fix.dictionaries[]` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DictionarySpec {
-    /// File or directory path, resolved relative to the defining layer.
+    /// One QuickFIX XML file, resolved relative to the defining layer.
     pub path: String,
-    /// Parser and layout expected at `path`.
-    #[serde(default)]
-    pub mode: DictionaryMode,
     /// Stable selector used by configuration and commands.
     pub name: String,
     /// A named definition changes version defaults only when explicitly enabled.
@@ -461,13 +445,39 @@ pub enum Severity {
     Hint,
 }
 
+impl Severity {
+    /// Most severe first; [`Severity::rank`] indexes it.
+    pub const ALL: [Severity; 4] = [
+        Severity::Error,
+        Severity::Warning,
+        Severity::Info,
+        Severity::Hint,
+    ];
+
+    /// 0 for the most severe. An index rather than `Ord`, under which `Error <
+    /// Hint` would read as "an error is less".
+    pub fn rank(self) -> usize {
+        self as usize
+    }
+}
+
+// `ALL` and `rank` index each other; reordering the variants must not
+// silently break that.
+const _: () = {
+    let mut rank = 0;
+    while rank < Severity::ALL.len() {
+        assert!(Severity::ALL[rank] as usize == rank);
+        rank += 1;
+    }
+};
+
 /// Bounds on external input, retained analysis and LSP response sizes.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Limits {
-    /// Per-file cap for dictionary XML (repository mode: each of its files),
+    /// Per-file cap for dictionary XML,
     /// checked on stat before opening and re-checked after a bounded read. A
-    /// file over the cap is never parsed: the entry is dropped with one warning
+    /// file over the cap is never parsed: the entry is refused with an error
     /// and its version falls back to the bundled dictionary.
     pub dictionary_bytes: u64,
     /// Cap on the diagnostics published for one document; beyond it the walker
@@ -662,19 +672,18 @@ mod tests {
     }
 
     #[test]
-    fn dictionary_entries_parse_with_lowercase_modes() {
+    fn dictionary_entries_parse() {
         let cfg: Config = serde_json::from_value(json!({
             "dictionaries": [
                 { "path": "a.xml", "name": "a" },
-                { "path": "b", "mode": "repository", "name": "nine", "default": true }
+                { "path": "b.xml", "name": "nine", "default": true }
             ],
             "limits": {
                 "dictionaryBytes": 10, "rangeLines": 40, "codeLensLines": 5,
             }
         }))
         .unwrap();
-        assert_eq!(cfg.dictionaries[0].mode, DictionaryMode::Auto);
-        assert_eq!(cfg.dictionaries[1].mode, DictionaryMode::Repository);
+        assert_eq!(cfg.dictionaries[0].path, "a.xml");
         assert_eq!(cfg.dictionaries[1].name, "nine");
         // `default` is the key that says whether an entry answers for every
         // line of its version; absent, it does not — answering for a whole
@@ -761,7 +770,7 @@ mod tests {
         assert!(config.overrides.project_config);
     }
 
-    /// The four built-in ids; `Registry::from_config` is what turns these into
+    /// The built-in ids; `Registry::from_config` is what turns these into
     /// rules, and this only checks the configuration reaches it intact.
     #[test]
     fn diagnostics_default_to_every_rule_at_its_own_severity() {
@@ -836,15 +845,32 @@ mod tests {
         assert!(serde_json::from_value::<Config>(json!({ "diagnostics": "off" })).is_err());
     }
 
+    /// One format is read, so nothing is left for `mode` to choose; an entry still
+    /// setting it is as wrong as any other unknown key.
+    #[test]
+    fn mode_is_not_a_dictionary_key() {
+        let error = serde_json::from_value::<Config>(json!({
+            "dictionaries": [{ "path": "venue.xml", "name": "venue", "mode": "quickfix" }]
+        }))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field `mode`"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn malformed_dictionaries_fail_the_whole_config() {
         assert!(serde_json::from_value::<Config>(json!({ "dictionaries": "nonsense" })).is_err());
+        // An entry without `name` or `path`, or with a mistyped field.
         assert!(
-            serde_json::from_value::<Config>(json!({ "dictionaries": [{ "mode": "auto" }] }))
-                .is_err()
+            serde_json::from_value::<Config>(json!({ "dictionaries": [{ "path": "x" }] })).is_err()
+        );
+        assert!(
+            serde_json::from_value::<Config>(json!({ "dictionaries": [{ "name": "x" }] })).is_err()
         );
         assert!(serde_json::from_value::<Config>(
-            json!({ "dictionaries": [{ "path": "x", "mode": "Auto" }] })
+            json!({ "dictionaries": [{ "path": "x", "name": "x", "default": "yes" }] })
         )
         .is_err());
     }

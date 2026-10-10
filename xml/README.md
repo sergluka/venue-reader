@@ -156,6 +156,5 @@ the value masks above already mix the two witnesses.
 ## Test fixtures (`custom/`)
 
 Synthetic dictionaries written for this project's tests (Apache-2.0), in
-QuickFIX format and in the FIX Repository directory layout; see
-`custom/README.md`, including how to run the parser over real broker
-dictionaries you download yourself.
+QuickFIX format; see `custom/README.md`, including how to run the parser over
+real broker dictionaries you download yourself.

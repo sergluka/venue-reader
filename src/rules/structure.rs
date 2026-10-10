@@ -146,10 +146,15 @@ mod tests {
         let context = crate::ctx::Ctx::for_test("FIX.4.4");
         let analysis = crate::ctx::analyze(line.as_bytes(), &context);
         crate::rules::Registry::with_selected_version(config, Some(selected))
-            .check_line(line.as_bytes(), &analysis)
-            .into_iter()
-            .filter(|diagnostic| diagnostic.rule == "dictionaryVersion")
-            .collect()
+            .check(
+                line.as_bytes(),
+                &analysis,
+                &crate::rules::Scope {
+                    only: Some("dictionaryVersion"),
+                    ..Default::default()
+                },
+            )
+            .diags
     }
 
     #[test]

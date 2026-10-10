@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use super::bundle::release_of;
-use super::model::{Datatype, EnumDef, FieldDef, GroupDef, MessageDef, ParsedDict};
+use super::model::{Datatype, EnumDef, Fault, FieldDef, GroupDef, MessageDef, ParsedDict};
+pub use super::schema::{GroupIdx, MsgIdx};
+use super::schema::{Schema, Scope};
 use super::statics::{
     EnumOverride, EnumRecord, FieldOverride, StaticDict, StaticGroup, StaticMessage, TagRecord,
     VersionMask, BUNDLED as BUNDLED_TABLES, TAGS,
@@ -165,10 +167,6 @@ fn removed_in(presence: VersionMask, bit: u8) -> Option<&'static str> {
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct FieldIdx(u32);
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct GroupIdx(u16);
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct MsgIdx(u16);
 
 /// Position of an enum value within its field's enum list.
 ///
@@ -311,42 +309,56 @@ impl Dict {
 
     /// Depth-first search over a message's groups and their nested groups.
     pub fn group_by_count_tag(&self, msg: MsgIdx, count_tag: u32) -> Option<GroupIdx> {
-        let mut stack: Vec<GroupIdx> = self.message(msg).groups().collect();
-        while let Some(idx) = stack.pop() {
-            let group = self.group(idx);
-            if group.count_tag() == count_tag {
-                return Some(idx);
+        let schema = self.schema();
+        let opened = |scope: Scope<'_>| {
+            scope
+                .groups()
+                .filter_map(|(tag, member)| Some((tag, member.group()?)))
+                .collect::<Vec<_>>()
+        };
+        let mut stack = opened(schema.message(msg.0));
+        while let Some((tag, group)) = stack.pop() {
+            if tag == count_tag {
+                return Some(GroupIdx(group));
             }
-            stack.extend(group.nested());
+            stack.extend(opened(schema.group(group)));
         }
         None
     }
 
-    /// A session-layer tag, as the dictionary declares its own header.
-    /// A binary search, not a scan: the parser sorts these, and the classifier
-    /// asks once per field per line. `contains` over a forty-tag header is
-    /// millions of comparisons across a whole-document answer.
+    /// A session-layer tag, as the dictionary declares its own header,
+    /// groups entered from it included.
     pub fn is_header(&self, tag: u32) -> bool {
-        self.session_tags(|d| d.header, |d| &d.header)
-            .binary_search(&tag)
-            .is_ok()
+        let schema = self.schema();
+        schema.header().reaches(&schema, tag)
     }
 
     pub fn is_trailer(&self, tag: u32) -> bool {
-        self.session_tags(|d| d.trailer, |d| &d.trailer)
-            .binary_search(&tag)
-            .is_ok()
+        let schema = self.schema();
+        schema.trailer().reaches(&schema, tag)
     }
 
-    fn session_tags(
-        &self,
-        stat: fn(&'static StaticDict) -> &'static [u32],
-        owned: fn(&ParsedDict) -> &[u32],
-    ) -> &[u32] {
+    /// The one place structure is read through either form.
+    pub fn schema(&self) -> Schema<'_> {
         match self {
-            Dict::Static(d) => stat(d),
-            Dict::Owned(d) => owned(d),
+            Dict::Static(d) => d.schema,
+            Dict::Owned(d) => d.schema.as_schema(),
         }
+    }
+
+    /// False only for bundled FIX.5.0 and FIX.5.0SP1, whose header, trailer and
+    /// session messages are not there to check against.
+    pub fn has_session_layer(&self) -> bool {
+        match self {
+            Dict::Static(d) => d.session_layer,
+            Dict::Owned(_) => true,
+        }
+    }
+
+    /// A component's name, by its index into the schema's name table.
+    pub fn component_name(&self, name: u16) -> &str {
+        let names = self.schema().names;
+        &names[usize::from(name)]
     }
 
     /// The exact per-version view as an owned dictionary (tests, parity).
@@ -355,8 +367,6 @@ impl Dict {
             Dict::Owned(d) => (**d).clone(),
             Dict::Static(d) => ParsedDict {
                 version: Some(d.version.to_owned()),
-                header: d.header.to_vec(),
-                trailer: d.trailer.to_vec(),
                 fields: TAGS
                     .iter()
                     .filter(|r| r.presence.contains(d.mask_bit))
@@ -378,7 +388,18 @@ impl Dict {
                     .iter()
                     .map(|m| MessageView::Static(m).to_owned_def())
                     .collect(),
+                schema: d.schema.to_buf(),
+                // `build.rs` refuses a bundled file with any.
+                faults: Vec::new(),
             },
+        }
+    }
+
+    /// The defects this dictionary loaded with; none for a bundled one.
+    pub fn faults(&self) -> &[Fault] {
+        match self {
+            Dict::Static(_) => &[],
+            Dict::Owned(d) => &d.faults,
         }
     }
 }
@@ -436,19 +457,30 @@ impl<'a> FieldView<'a> {
         self.resolved(|o| o.description, |r| r.description, |f| &f.description)
     }
 
-    pub fn added(&self) -> &'a str {
-        self.resolved(|o| o.added, |r| r.added, |f| &f.added)
+    /// Whether values outside the listed ones are allowed (`allowOtherValues`).
+    pub fn allows_other_values(&self) -> bool {
+        match self {
+            FieldView::Static { rec, bit } => rec.allows_other_values.contains(*bit),
+            FieldView::Owned(f) => f.allows_other_values,
+        }
     }
 
+    /// Empty for an owned dictionary: a custom dictionary is QuickFIX XML,
+    /// which dates nothing.
+    pub fn added(&self) -> &'a str {
+        self.resolved(|o| o.added, |r| r.added, |_| "")
+    }
+
+    /// Empty for an owned dictionary, as `added`.
     pub fn deprecated(&self) -> &'a str {
-        self.resolved(|o| o.deprecated, |r| r.deprecated, |f| &f.deprecated)
+        self.resolved(|o| o.deprecated, |r| r.deprecated, |_| "")
     }
 
     /// The extension pack recorded against `added()`, 0 when none is.
     pub fn added_ep(&self) -> u16 {
         match self {
             FieldView::Static { rec, .. } => rec.added_ep,
-            FieldView::Owned(f) => f.added_ep,
+            FieldView::Owned(_) => 0,
         }
     }
 
@@ -462,18 +494,17 @@ impl<'a> FieldView<'a> {
     /// `added` is the release, not the pack's base: `FIX.5.0 EP55` entered the
     /// protocol in FIX.5.0SP1, which is the file that first has the tag. A date
     /// the files contradict is hover's to drop, not this method's.
+    ///
+    /// Nothing for an owned dictionary, which carries no dates.
     pub fn lifecycle(&self) -> Lifecycle<'a> {
+        let FieldView::Static { rec, bit } = self else {
+            return Lifecycle::default();
+        };
         let some = |text: &'a str| (!text.is_empty()).then_some(text);
         Lifecycle {
             added: release_of(self.added(), self.added_ep()),
             deprecated: some(self.deprecated()),
-            removed_in: match self {
-                FieldView::Static { rec, bit } => removed_in(rec.presence, *bit),
-                // An owned dictionary is one version; it has no "later" to
-                // speak of, and claiming a boundary from a single edition
-                // would be inventing one.
-                FieldView::Owned(_) => None,
-            },
+            removed_in: removed_in(rec.presence, *bit),
         }
     }
 
@@ -525,6 +556,7 @@ impl<'a> FieldView<'a> {
             added: self.added().to_owned(),
             deprecated: self.deprecated().to_owned(),
             added_ep: self.added_ep(),
+            allows_other_values: self.allows_other_values(),
             enums: self.enums().map(|e| e.to_owned_def()).collect(),
         }
     }
@@ -589,15 +621,16 @@ impl<'a> EnumView<'a> {
         self.resolved(|o| o.description, |r| r.description, |e| &e.description)
     }
 
+    /// As `FieldView::added`: empty for an owned dictionary.
     pub fn added(&self) -> &'a str {
-        self.resolved(|o| o.added, |r| r.added, |e| &e.added)
+        self.resolved(|o| o.added, |r| r.added, |_| "")
     }
 
     /// As `FieldView::added_ep`.
     pub fn added_ep(&self) -> u16 {
         match self {
             EnumView::Static { rec, .. } => rec.added_ep,
-            EnumView::Owned(e) => e.added_ep,
+            EnumView::Owned(_) => 0,
         }
     }
 
@@ -647,19 +680,11 @@ impl<'a> MessageView<'a> {
         }
     }
 
-    /// Administrative rather than application traffic: `Session` in a
-    /// repository, `admin` in a QuickFIX file.
+    /// Administrative rather than application traffic: `Session` in the bundled
+    /// tables, whose categories come from Orchestra, `admin` in a QuickFIX file.
     pub fn is_session(&self) -> bool {
         let category = self.category();
         category.eq_ignore_ascii_case("session") || category.eq_ignore_ascii_case("admin")
-    }
-
-    pub fn groups(&self) -> impl Iterator<Item = GroupIdx> + 'a {
-        let slice: &'a [u16] = match self {
-            MessageView::Static(m) => m.groups,
-            MessageView::Owned(m) => &m.groups,
-        };
-        slice.iter().copied().map(GroupIdx)
     }
 
     pub fn to_owned_def(&self) -> MessageDef {
@@ -668,7 +693,6 @@ impl<'a> MessageView<'a> {
             name: self.name().to_owned(),
             category: self.category().to_owned(),
             description: self.description().to_owned(),
-            groups: self.groups().map(|g| g.0).collect(),
         }
     }
 }
@@ -701,28 +725,11 @@ impl<'a> GroupView<'a> {
         }
     }
 
-    pub fn members(&self) -> &'a [u32] {
-        match self {
-            GroupView::Static(g) => g.members,
-            GroupView::Owned(g) => &g.members,
-        }
-    }
-
-    pub fn nested(&self) -> impl Iterator<Item = GroupIdx> + 'a {
-        let slice: &'a [u16] = match self {
-            GroupView::Static(g) => g.nested,
-            GroupView::Owned(g) => &g.nested,
-        };
-        slice.iter().copied().map(GroupIdx)
-    }
-
     pub fn to_owned_def(&self) -> GroupDef {
         GroupDef {
             name: self.name().to_owned(),
             count_tag: self.count_tag(),
             delimiter_tag: self.delimiter_tag(),
-            members: self.members().to_vec(),
-            nested: self.nested().map(|g| g.0).collect(),
         }
     }
 }
@@ -730,7 +737,7 @@ impl<'a> GroupView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dictionary::bundle::{enrich, parse_metadata};
+    use crate::dictionary::bundle::{assemble, parse_metadata};
     use crate::dictionary::parse::{parse_quickfix, Source};
     use std::path::Path;
     use std::sync::LazyLock;
@@ -741,9 +748,11 @@ mod tests {
     static FIX44_DIRECT: LazyLock<ParsedDict> = LazyLock::new(|| {
         let standard = Path::new(XML).join("standard");
         let meta = Source::read(standard.join("FIXLatest-metadata.xml")).unwrap();
-        let mut dict = parse_quickfix(&standard.join("FIX44.xml")).unwrap();
-        enrich(&mut dict, &parse_metadata(&meta).unwrap(), "FIX.4.4");
-        dict
+        let session = parse_quickfix(&standard.join("FIXT11.xml")).unwrap();
+        let dict = parse_quickfix(&standard.join("FIX44.xml")).unwrap();
+        assemble("FIX.4.4", dict, &session, &parse_metadata(&meta).unwrap())
+            .unwrap()
+            .dict
     });
 
     fn stat(v: Version) -> Dict {
@@ -793,6 +802,37 @@ mod tests {
             ("Price".to_owned(), Datatype::Numeric)
         );
         assert_eq!(of(Version::Fix44, 6), ("Price".to_owned(), Datatype::Price));
+    }
+
+    /// A multiple-value type is the version's own, not FIX Latest's:
+    /// OpenCloseSettleFlag(286) is one CHAR in FIX.4.2, a space-separated list
+    /// from FIX.4.3 on, of strings there and of characters from FIX.5.0.
+    #[test]
+    fn a_multiple_value_class_follows_the_version() {
+        let class = |version| {
+            let dict = stat(version);
+            let idx = dict.field_idx(286).expect("OpenCloseSettleFlag");
+            dict.field(idx).datatype_class()
+        };
+        assert_eq!(class(Version::Fix42), Datatype::Character);
+        assert_eq!(class(Version::Fix43), Datatype::MultipleString);
+        assert_eq!(class(Version::Fix50), Datatype::MultipleChar);
+    }
+
+    /// An open value list: the listed values are examples, not the only ones.
+    #[test]
+    fn other_values_are_allowed_where_the_version_says_so() {
+        let open = |version, tag| {
+            let dict = stat(version);
+            let idx = dict.field_idx(tag).expect("present");
+            dict.field(idx).allows_other_values()
+        };
+        assert!(open(Version::Fix44, 65), "SymbolSfx(65)");
+        assert!(!open(Version::Fix44, 27), "IOIQty(27) is closed in FIX.4.4");
+        for version in [Version::Fix50, Version::Fix50Sp1, Version::Fix50Sp2] {
+            assert!(open(version, 27), "IOIQty(27) under {version:?}");
+        }
+        assert!(!open(Version::Fix44, 54), "Side(54)");
     }
 
     /// A group counter is its own class: the parser tells a group apart by it.
@@ -925,6 +965,7 @@ mod tests {
             added_ep: 0,
             // Bits 0 and 2 set, 1 clear: present, absent, present.
             presence: VersionMask(0b101),
+            allows_other_values: VersionMask(0),
             overrides: &[],
             enums: &[],
         };
@@ -1026,12 +1067,25 @@ mod tests {
             .group_by_count_tag(order, 453)
             .expect("NoPartyIDs via Parties");
         assert_eq!(dict.group(parties).delimiter_tag(), 448);
-        assert_eq!(dict.group(parties).members(), [448, 447, 452, 802]);
+        // The delimiter is the first member the schema declares.
+        let declared: Vec<u32> = dict
+            .schema()
+            .group(parties.0)
+            .declared()
+            .map(|(tag, _)| tag)
+            .collect();
+        assert_eq!(declared, [448, 447, 452, 802]);
 
         let owned = Dict::Owned(Arc::new(FIX44_DIRECT.clone()));
         let order = owned.message_idx("D").unwrap();
         let parties = owned.group_by_count_tag(order, 453).unwrap();
-        let sub_ids = owned.group(parties).nested().next().expect("NoPartySubIDs");
+        let (_, sub_ids) = owned
+            .schema()
+            .group(parties.0)
+            .groups()
+            .next()
+            .expect("NoPartySubIDs");
+        let sub_ids = GroupIdx(sub_ids.group().unwrap());
         assert_eq!(owned.group(sub_ids).count_tag(), 802);
         assert_eq!(owned.group(sub_ids).delimiter_tag(), 523);
     }
@@ -1043,19 +1097,34 @@ mod tests {
         let order = dict.message_idx("D").unwrap();
         let allocs = dict.group_by_count_tag(order, 78).expect("NoAllocs");
         assert_eq!(dict.group(allocs).delimiter_tag(), 79);
-        assert_eq!(dict.group(allocs).members(), [79, 80]);
+        let declared: Vec<u32> = dict
+            .schema()
+            .group(allocs.0)
+            .declared()
+            .map(|(tag, _)| tag)
+            .collect();
+        assert_eq!(declared, [79, 80]);
     }
 
     #[test]
     fn static_and_owned_lookup_agree() {
         let stat = stat(Version::Fix44);
         let owned = Dict::Owned(Arc::new(FIX44_DIRECT.clone()));
+        // Dates aside: an owned view answers none, even over an enriched copy.
+        let undated = |mut def: FieldDef| {
+            (def.added, def.deprecated, def.added_ep) = (String::new(), String::new(), 0);
+            for value in &mut def.enums {
+                (value.added, value.added_ep) = (String::new(), 0);
+            }
+            def
+        };
         for tag in [8, 35, 54, 268] {
             let (a, b) = (
                 stat.field(stat.field_idx(tag).unwrap()),
                 owned.field(owned.field_idx(tag).unwrap()),
             );
-            assert_eq!(a.to_owned_def(), b.to_owned_def(), "tag {tag}");
+            assert_eq!(undated(a.to_owned_def()), b.to_owned_def(), "tag {tag}");
+            assert_eq!(b.lifecycle(), Lifecycle::default(), "tag {tag}");
         }
         let (a, b) = (stat.field_idx(54).unwrap(), owned.field_idx(54).unwrap());
         assert_eq!(
@@ -1075,9 +1144,65 @@ mod tests {
             stat.group_by_count_tag(wa, 268).unwrap(),
             owned.group_by_count_tag(wb, 268).unwrap(),
         );
-        assert_eq!(stat.group(ga).members(), owned.group(gb).members());
+        let declared = |dict: &Dict, group: GroupIdx| -> Vec<u32> {
+            dict.schema()
+                .group(group.0)
+                .declared()
+                .map(|(tag, _)| tag)
+                .collect()
+        };
+        assert_eq!(declared(&stat, ga), declared(&owned, gb));
         assert_eq!(stat.group(ga).delimiter_tag(), 269);
+        assert_eq!(stat.schema(), owned.schema());
+        assert_eq!(stat.has_session_layer(), owned.has_session_layer());
         assert_eq!(owned.to_parsed(), *FIX44_DIRECT);
+    }
+
+    /// Bundled FIX.5.0 and FIX.5.0SP1 keep QuickFIX/J's empty session blocks.
+    #[test]
+    fn the_session_layer_mark_is_off_only_for_fix50_and_sp1() {
+        for version in Version::ALL {
+            let expected = !matches!(version, Version::Fix50 | Version::Fix50Sp1);
+            assert_eq!(stat(version).has_session_layer(), expected, "{version:?}");
+        }
+        let owned = Dict::Owned(Arc::new(ParsedDict::default()));
+        assert!(owned.has_session_layer());
+    }
+
+    /// NewOrderSingle's component rows.
+    fn order_rows<'a>(
+        schema: &Schema<'a>,
+        dict: &Dict,
+    ) -> impl Iterator<Item = &'a crate::dictionary::schema::ComponentRow> {
+        let span = schema.spans[2 + usize::from(dict.message_idx("D").unwrap().0)];
+        let start = span.components_start as usize;
+        schema.components[start..start + usize::from(span.components_len)].iter()
+    }
+
+    /// FIX.4.4's header reaches NoHops(627) through no component, and
+    /// NewOrderSingle reaches Symbol(55) through Instrument.
+    #[test]
+    fn a_component_name_is_read_from_the_schema() {
+        for dict in [
+            stat(Version::Fix44),
+            Dict::Owned(Arc::new(FIX44_DIRECT.clone())),
+        ] {
+            let schema = dict.schema();
+            let header = schema.header();
+            let hops = header.find(627).expect("NoHops(627) is in the header");
+            assert!(hops.group().is_some());
+            assert!(header.component(hops).is_none());
+
+            let order = schema.message(dict.message_idx("D").unwrap().0);
+            let symbol = order.find(55).expect("Symbol(55)");
+            let instrument = order.component(symbol).expect("through Instrument");
+            assert_eq!(instrument.name(), "Instrument");
+            assert!(instrument.required());
+            let names: Vec<&str> = order_rows(&schema, &dict)
+                .map(|row| dict.component_name(row.name))
+                .collect();
+            assert!(names.contains(&"Instrument"), "{names:?}");
+        }
     }
 
     #[test]

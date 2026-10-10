@@ -5,9 +5,9 @@
 //! Fields and enums are merged across all bundled versions into one `TAGS`
 //! table: the base row holds the latest version's values, a presence mask says
 //! which versions define the tag, and sparse overrides record where an older
-//! version differs (name, type, description, lifecycle attributes). Groups and
-//! messages stay per version. The XML is the source of truth; the generated
-//! file is never committed.
+//! version differs (name, type, description, lifecycle attributes). Groups,
+//! messages and the scoped schema stay per version. The XML is the source of
+//! truth; the generated file is never committed.
 
 #[allow(dead_code)]
 #[path = "src/dictionary/bundle.rs"]
@@ -18,6 +18,9 @@ mod model;
 #[allow(dead_code)]
 #[path = "src/dictionary/parse.rs"]
 mod parse;
+#[allow(dead_code)]
+#[path = "src/dictionary/schema.rs"]
+mod schema;
 #[allow(dead_code)]
 #[path = "src/tag.rs"]
 mod tag;
@@ -44,9 +47,20 @@ const BUNDLED_VERSIONS: [(&str, &str); 8] = [
     ("FIX.5.0SP2", "FIX50SP2.xml"),
 ];
 
-/// The session layer `8=FIXT.1.1` needs; folded into the version the
-/// `FIXT.1.1` alias resolves to.
-const SESSION: (&str, &str) = ("FIX.5.0SP2", "FIXT11.xml");
+/// The session layer `8=FIXT.1.1` needs; `bundle::assemble` folds it into
+/// the version the `FIXT.1.1` alias resolves to.
+const SESSION: &str = "FIXT11.xml";
+
+/// The versions whose QuickFIX/J file declares a header and a trailer, or
+/// gets them from `SESSION`.
+const WITH_SESSION_LAYER: [&str; 6] = [
+    "FIX.4.0",
+    "FIX.4.1",
+    "FIX.4.2",
+    "FIX.4.3",
+    "FIX.4.4",
+    "FIX.5.0SP2",
+];
 
 const METADATA: &str = "FIXLatest-metadata.xml";
 
@@ -69,6 +83,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/dictionary/bundle.rs");
     println!("cargo:rerun-if-changed=src/dictionary/model.rs");
     println!("cargo:rerun-if-changed=src/dictionary/parse.rs");
+    println!("cargo:rerun-if-changed=src/dictionary/schema.rs");
 
     let found: BTreeSet<String> = fs::read_dir(&standard)
         .expect("read xml/standard/")
@@ -79,7 +94,7 @@ fn main() {
     let expected: BTreeSet<String> = BUNDLED_VERSIONS
         .iter()
         .map(|(_, file)| *file)
-        .chain([SESSION.1, METADATA])
+        .chain([SESSION, METADATA])
         .map(str::to_owned)
         .collect();
     assert_eq!(
@@ -89,23 +104,25 @@ fn main() {
 
     let metadata = bundle::parse_metadata(&read(&standard, METADATA))
         .unwrap_or_else(|e| panic!("bundled metadata: {e}"));
-    let session = parse::parse_quickfix_bytes(&read(&standard, SESSION.1))
+    let session = parse::parse_quickfix_bytes(&read(&standard, SESSION))
         .unwrap_or_else(|e| panic!("bundled session layer: {e}"));
+    assert_no_faults(SESSION, &session.faults);
 
     // The eight parses are independent and dominate the build script's time.
-    let dicts: Vec<ParsedDict> = std::thread::scope(|scope| {
+    let dicts: Vec<bundle::Assembled> = std::thread::scope(|scope| {
         let handles: Vec<_> = BUNDLED_VERSIONS
             .iter()
             .map(|&(version, file)| {
                 let (standard, metadata, session) = (&standard, &metadata, &session);
                 scope.spawn(move || {
-                    let mut dict = parse::parse_quickfix_bytes(&read(standard, file))
+                    let dict = parse::parse_quickfix_bytes(&read(standard, file))
                         .unwrap_or_else(|e| panic!("bundled dictionary {version}: {e}"));
-                    if version == SESSION.0 {
-                        bundle::merge_session(&mut dict, session);
-                    }
-                    bundle::enrich(&mut dict, metadata, version);
-                    dict
+                    assert_no_faults(file, &dict.faults);
+                    let assembled = bundle::assemble(version, dict, session, metadata)
+                        .unwrap_or_else(|e| panic!("bundled dictionary {version}: {e}"));
+                    assert_no_faults(file, &assembled.dict.faults);
+                    assert_session_layer(version, &assembled);
+                    assembled
                 })
             })
             .collect();
@@ -121,6 +138,35 @@ fn main() {
         xxhash_rust::xxh3::xxh3_64(generated.as_bytes())
     );
     fs::write(out_dir.join("dicts.rs"), source).expect("write dicts.rs");
+}
+
+/// A fault loads in a custom file because it is the user's to fix; in a
+/// bundled one it is ours.
+fn assert_no_faults(file: &str, faults: &[model::Fault]) {
+    let faults: Vec<String> = faults.iter().map(ToString::to_string).collect();
+    assert!(
+        faults.is_empty(),
+        "bundled {file} has faults:\n{}",
+        faults.join("\n")
+    );
+}
+
+/// FIX.5.0 and FIX.5.0SP1 have no session layer until FIX 5 handling; every
+/// other version has a header and a trailer.
+fn assert_session_layer(version: &str, assembled: &bundle::Assembled) {
+    let expected = WITH_SESSION_LAYER.contains(&version);
+    assert_eq!(
+        assembled.session_layer, expected,
+        "{version}: the session-layer mark"
+    );
+    let schema = assembled.dict.schema.as_schema();
+    for (part, scope) in [("header", schema.header()), ("trailer", schema.trailer())] {
+        assert_eq!(
+            scope.declared().next().is_some(),
+            expected,
+            "{version}: a {part} is declared exactly where the session layer is"
+        );
+    }
 }
 
 fn lit(s: &str) -> String {
@@ -276,7 +322,105 @@ fn latest_tables(
     .unwrap();
 }
 
-fn generate(dicts: &[ParsedDict], metadata: &bundle::Metadata) -> String {
+/// A `u16` index column, `NONE` spelled out so the reserved value is visible.
+fn index(value: u16) -> String {
+    if value == schema::NONE {
+        "NONE".to_owned()
+    } else {
+        value.to_string()
+    }
+}
+
+/// One version's schema as flat static slices, rows through `schema.rs`'s
+/// `const fn`s; returns the `Schema { .. }` expression over them.
+fn schema_tables(out: &mut String, id: &str, schema: &schema::SchemaBuf) -> String {
+    let rows = |out: &mut String, name: &str, ty: &str, items: Vec<String>| {
+        writeln!(out, "static {name}_{id}: &[{ty}] = &[{}];", items.join(",")).unwrap();
+    };
+    rows(
+        out,
+        "SPANS",
+        "ScopeSpan",
+        schema
+            .spans
+            .iter()
+            .map(|span| {
+                format!(
+                    "span({},{},{},{},{},{})",
+                    span.start,
+                    span.len,
+                    span.nested_start,
+                    span.nested_len,
+                    span.components_start,
+                    span.components_len
+                )
+            })
+            .collect(),
+    );
+    rows(
+        out,
+        "SCOPE_TAGS",
+        "u32",
+        schema.tags.iter().map(u32::to_string).collect(),
+    );
+    rows(
+        out,
+        "MEMBERS",
+        "Member",
+        schema
+            .members
+            .iter()
+            .map(|member| {
+                format!(
+                    "member({},{},{},{})",
+                    member.position,
+                    index(member.group),
+                    index(member.component),
+                    member.flags
+                )
+            })
+            .collect(),
+    );
+    rows(
+        out,
+        "ORDER",
+        "u16",
+        schema.order.iter().map(u16::to_string).collect(),
+    );
+    rows(
+        out,
+        "NESTED",
+        "u16",
+        schema.nested.iter().map(u16::to_string).collect(),
+    );
+    rows(
+        out,
+        "COMPONENTS",
+        "ComponentRow",
+        schema
+            .components
+            .iter()
+            .map(|row| format!("row({},{},{})", row.name, index(row.parent), row.flags))
+            .collect(),
+    );
+    rows(
+        out,
+        "NAMES",
+        "Cow<'static, str>",
+        schema
+            .names
+            .iter()
+            .map(|name| format!("Cow::Borrowed({})", lit(name)))
+            .collect(),
+    );
+    format!(
+        "Schema {{ spans: SPANS_{id}, tags: SCOPE_TAGS_{id}, members: MEMBERS_{id}, order: ORDER_{id}, nested: NESTED_{id}, components: COMPONENTS_{id}, names: NAMES_{id}, messages: {} }}",
+        schema.messages
+    )
+}
+
+fn generate(assembled: &[bundle::Assembled], metadata: &bundle::Metadata) -> String {
+    let dicts: Vec<&ParsedDict> = assembled.iter().map(|assembled| &assembled.dict).collect();
     let mut out = String::new();
     writeln!(out, "// @generated by build.rs from xml/ — do not edit.").unwrap();
 
@@ -322,6 +466,10 @@ fn generate(dicts: &[ParsedDict], metadata: &bundle::Metadata) -> String {
                 "tag {tag}: QuickFIX/J-only and above the user-defined range"
             ),
         }
+        let allows_other_values = present
+            .iter()
+            .filter(|(_, f)| f.allows_other_values)
+            .fold(0u16, |mask, (i, _)| mask | (1 << i));
         let (presence, overrides) = merge(&present, |f, base| FieldDiff {
             name: diff(&f.name, &base.name),
             datatype: diff(&f.datatype, &base.datatype),
@@ -333,9 +481,9 @@ fn generate(dicts: &[ParsedDict], metadata: &bundle::Metadata) -> String {
 
         writeln!(
             out,
-            "    TagRecord {{ tag: {tag}, name: {}, datatype: {}, datatype_class: {}, description: {}, added: {}, deprecated: {}, added_ep: {}, presence: {}, overrides: &[",
+            "    TagRecord {{ tag: {tag}, name: {}, datatype: {}, datatype_class: {}, description: {}, added: {}, deprecated: {}, added_ep: {}, presence: {}, allows_other_values: {}, overrides: &[",
             lit(&base.name), lit(&base.datatype), class(base.datatype_class), lit(&base.description), lit(&base.added), lit(&base.deprecated),
-            one_extension_pack(&format!("tag {tag}"), present.iter().map(|(_, f)| f.added_ep)), mask(presence)
+            one_extension_pack(&format!("tag {tag}"), present.iter().map(|(_, f)| f.added_ep)), mask(presence), mask(allows_other_values)
         )
         .unwrap();
         for (d, m) in &overrides {
@@ -398,14 +546,18 @@ fn generate(dicts: &[ParsedDict], metadata: &bundle::Metadata) -> String {
     latest_tables(&mut out, &tags, metadata, &latest_names);
 
     // --- per-version groups, messages, dict ------------------------------
-    for (ordinal, ((version, _), dict)) in BUNDLED_VERSIONS.iter().zip(dicts).enumerate() {
+    for (ordinal, ((version, _), bundled)) in BUNDLED_VERSIONS.iter().zip(assembled).enumerate() {
+        let dict = &bundled.dict;
         let id = ident(version);
+        let schema = schema_tables(&mut out, &id, &dict.schema);
         writeln!(out, "static GROUPS_{id}: &[StaticGroup] = &[").unwrap();
         for g in &dict.groups {
             writeln!(
                 out,
-                "    StaticGroup {{ name: {}, count_tag: {}, delimiter_tag: {}, members: &{:?}, nested: &{:?} }},",
-                lit(&g.name), g.count_tag, g.delimiter_tag, g.members, g.nested
+                "    StaticGroup {{ name: {}, count_tag: {}, delimiter_tag: {} }},",
+                lit(&g.name),
+                g.count_tag,
+                g.delimiter_tag
             )
             .unwrap();
         }
@@ -414,16 +566,19 @@ fn generate(dicts: &[ParsedDict], metadata: &bundle::Metadata) -> String {
         for m in &dict.messages {
             writeln!(
                 out,
-                "    StaticMessage {{ msg_type: {}, name: {}, category: {}, description: {}, groups: &{:?} }},",
-                lit(&m.msg_type), lit(&m.name), lit(&m.category), lit(&m.description), m.groups
+                "    StaticMessage {{ msg_type: {}, name: {}, category: {}, description: {} }},",
+                lit(&m.msg_type),
+                lit(&m.name),
+                lit(&m.category),
+                lit(&m.description)
             )
             .unwrap();
         }
         writeln!(out, "];").unwrap();
         writeln!(
             out,
-            "pub static DICT_{id}: StaticDict = StaticDict {{ version: {}, mask_bit: {ordinal}, header: &{:?}, trailer: &{:?}, groups: GROUPS_{id}, messages: MESSAGES_{id} }};",
-            lit(version), dict.header, dict.trailer
+            "pub static DICT_{id}: StaticDict = StaticDict {{ version: {}, mask_bit: {ordinal}, schema: {schema}, session_layer: {}, groups: GROUPS_{id}, messages: MESSAGES_{id} }};",
+            lit(version), bundled.session_layer
         )
         .unwrap();
     }

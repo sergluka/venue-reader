@@ -20,15 +20,8 @@
         "properties": {
           "path": {
             "type": "string",
-            "minLength": 1
-          },
-          "mode": {
-            "enum": [
-              "auto",
-              "quickfix",
-              "repository"
-            ],
-            "default": "auto"
+            "minLength": 1,
+            "description": "One QuickFIX XML file"
           },
           "name": {
             "type": "string",
@@ -175,6 +168,30 @@
                 "severity": "warning"
               },
               "description": "Selected dictionary and resolved message version do not match; one finding per mismatching version in each diagnostic walk."
+            },
+            "unknownMsgType": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/rule"
+                }
+              ],
+              "default": {
+                "enabled": true,
+                "severity": "info"
+              },
+              "description": "A MsgType(35) the line's dictionary does not list. Silent under a dictionary that lists no session message, whose table cannot be trusted to be complete. Only on a line whose dictionary was chosen, not fallen back to."
+            },
+            "unknownTag": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/rule"
+                }
+              ],
+              "default": {
+                "enabled": true,
+                "severity": "info"
+              },
+              "description": "A tag the line's dictionary does not define, at every occurrence; says how standard FIX sees the tag as hover does. Only on a line whose dictionary was chosen, not fallen back to."
             }
           },
           "additionalProperties": false

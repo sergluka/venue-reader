@@ -15,7 +15,7 @@
 //! them, so they stay [`Standard::InVersion`], unchallenged.
 
 use super::bundle::{implied_first_release, release_of, FIRST_BUNDLED_RANK, USER_DEFINED};
-use super::dict::{tag_record, Version};
+use super::dict::{bundled, tag_record, Version};
 use super::statics::{LatestTag, TagRecord, LATEST_NAMES, LATEST_TAGS, LATEST_VERSIONS};
 
 /// How the two pinned sources see a tag, for one version.
@@ -79,9 +79,44 @@ impl StandardDef {
             .then(|| release_of(self.added, self.added_ep))
             .flatten()
     }
+
+    /// When it arrived or left, as one clause: the arrival when the files bear
+    /// it out, else the retirement.
+    pub fn clause(&self) -> Option<String> {
+        if let Some(release) = self.introduced() {
+            return Some(format!("introduced in {release}"));
+        }
+        match self.retirement? {
+            Retirement::After(release) => Some(format!("retired after {release}")),
+            Retirement::Gone => Some("retired".to_owned()),
+        }
+    }
 }
 
 impl Standard {
+    /// The definition standard FIX gives a tag this version lacks.
+    pub fn def(&self) -> Option<&StandardDef> {
+        match self {
+            Standard::OtherVersion(def) | Standard::Unbundled(def) => Some(def),
+            Standard::InVersion | Standard::Disputed | Standard::Nowhere => None,
+        }
+    }
+
+    /// What the standing says against `version`'s tables, in plain text, for
+    /// hover's note and the unknown-tag diagnostic alike. `None` where nothing
+    /// is claimed, and for a version without bundled tables, which cannot be
+    /// checked.
+    pub fn note(&self, version: Option<Version>) -> Option<String> {
+        let tables = bundled(version?).version;
+        if *self == Standard::InVersion {
+            return Some(format!("standard {tables}"));
+        }
+        Some(match self.def()?.clause() {
+            Some(clause) => format!("not in {tables}, {clause}"),
+            None => format!("not in {tables}"),
+        })
+    }
+
     /// `version` is the binding's, `None` when it has no bundled tables; then
     /// `InVersion` and `Disputed` are unreachable and `OtherVersion` means only
     /// that some bundled dictionary defines the tag.
@@ -136,13 +171,10 @@ pub fn standard_name(version: Option<Version>, tag: u32) -> Option<&'static str>
 
 /// [`standard_name`] for a standing already in hand.
 pub fn name_of(standing: &Standard, tag: u32) -> Option<&'static str> {
-    match standing {
-        Standard::OtherVersion(def) | Standard::Unbundled(def) => Some(def.name),
-        Standard::InVersion => {
-            latest_name(tag).or_else(|| tag_record(tag).map(|record| record.name))
-        }
-        Standard::Disputed | Standard::Nowhere => None,
+    if *standing == Standard::InVersion {
+        return latest_name(tag).or_else(|| tag_record(tag).map(|record| record.name));
     }
+    standing.def().map(|def| def.name)
 }
 
 /// Whether the bundled files bear out the date FIX Latest gives a bundled tag:
@@ -223,7 +255,6 @@ mod tests {
 
     use super::*;
     use crate::dictionary::bundle::{parse_metadata, rank, LAST_BUNDLED_RANK};
-    use crate::dictionary::dict::bundled;
     use crate::dictionary::parse::Source;
     use crate::dictionary::statics::TAGS;
     use crate::dictionary::Dict;
@@ -254,10 +285,9 @@ mod tests {
     const QUICKFIX_ONLY: [u32; 6] = [5450, 8000, 9000, 9001, 9002, 9995];
 
     fn def(standard: Standard) -> StandardDef {
-        match standard {
-            Standard::OtherVersion(def) | Standard::Unbundled(def) => def,
-            other => panic!("no definition: {other:?}"),
-        }
+        *standard
+            .def()
+            .unwrap_or_else(|| panic!("no definition: {standard:?}"))
     }
 
     fn all_tags() -> Vec<u32> {
@@ -424,6 +454,60 @@ mod tests {
         assert_eq!(Standard::of_tag(FIX50, 20), Standard::InVersion);
     }
 
+    /// The words hover's note and the unknown-tag diagnostic share.
+    #[test]
+    fn the_note_says_the_standing_in_plain_text() {
+        let note = |version, tag| Standard::of_tag(version, tag).note(version);
+        assert_eq!(note(FIX44, 55).as_deref(), Some("standard FIX.4.4"));
+        assert_eq!(
+            note(FIX50, 1328).as_deref(),
+            Some("not in FIX.5.0, introduced in FIX.5.0SP1")
+        );
+        assert_eq!(
+            note(FIX44, 2891).as_deref(),
+            Some("not in FIX.4.4, introduced in FIX Latest")
+        );
+        assert_eq!(
+            note(FIX44, 47).as_deref(),
+            Some("not in FIX.4.4, retired after FIX.4.3")
+        );
+        assert_eq!(
+            note(FIX50SP1, 20).as_deref(),
+            Some("not in FIX.5.0SP1, retired")
+        );
+        assert_eq!(note(FIX42, 51).as_deref(), Some("not in FIX.4.2"));
+        assert_eq!(
+            Standard::of_tag(FIX44, 1328)
+                .note(Some(Version::Fixt11))
+                .as_deref(),
+            Some("not in FIX.5.0SP2, introduced in FIX.5.0SP1"),
+            "a FIXT binding reads the FIX.5.0SP2 tables"
+        );
+    }
+
+    #[test]
+    fn no_note_where_nothing_can_be_claimed() {
+        assert_eq!(Standard::Disputed.note(FIX50SP1), None);
+        assert_eq!(Standard::Nowhere.note(FIX44), None);
+        assert_eq!(
+            Standard::of_tag(None, 1328).note(None),
+            None,
+            "no tables to name"
+        );
+    }
+
+    #[test]
+    fn the_clause_prefers_the_release_that_introduced_it() {
+        let clause = |version, tag| def(Standard::of_tag(version, tag)).clause();
+        assert_eq!(
+            clause(FIX44, 1328).as_deref(),
+            Some("introduced in FIX.5.0SP1")
+        );
+        assert_eq!(clause(FIX44, 47).as_deref(), Some("retired after FIX.4.3"));
+        assert_eq!(clause(FIX50SP1, 20).as_deref(), Some("retired"));
+        assert_eq!(clause(FIX42, 51), None);
+    }
+
     #[test]
     fn the_name_is_fix_latests() {
         assert_eq!(def(Standard::of_tag(FIX44, 1008)).name, "SideTrdSubType");
@@ -563,9 +647,9 @@ mod tests {
         for version in Version::BUNDLED {
             let tables = rank(version.as_str()).unwrap();
             for tag in all_tags() {
-                let def = match Standard::of_tag(Some(version), tag) {
-                    Standard::OtherVersion(def) | Standard::Unbundled(def) => def,
-                    _ => continue,
+                let standing = Standard::of_tag(Some(version), tag);
+                let Some(def) = standing.def() else {
+                    continue;
                 };
                 if def.date_holds && !def.retired() {
                     let release = implied_first_release(def.added, def.added_ep).unwrap();

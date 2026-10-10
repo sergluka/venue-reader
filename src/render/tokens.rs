@@ -9,7 +9,7 @@
 use std::ops::Range;
 
 use crate::codec::{ByteOffset, Field, LineAnalysis, MessageAnalysis};
-use crate::dictionary::{Datatype, GroupIdx};
+use crate::dictionary::Datatype;
 
 /// The names of an enum's `ALL`, and the proof that it is in discriminant order
 /// — which is what a token's index on the wire means. A variant listed out of
@@ -230,6 +230,10 @@ fn message_tokens(line: &[u8], message: &MessageAnalysis, overlays: bool, out: &
     // question asked of the instances directly.
     let spans = overlays.then(|| message.group_spans());
     let counters = counter_tags(message);
+    // Built once per line, not per field: building a scope costs about as
+    // much as searching it.
+    let schema = message.dict.schema();
+    let (header, trailer) = (schema.header(), schema.trailer());
     // An entry's first field is the one that raises the highest instance index
     // seen so far: instances are numbered as they are opened, so returning to a
     // parent after a nested group never looks like a new entry.
@@ -248,9 +252,9 @@ fn message_tokens(line: &[u8], message: &MessageAnalysis, overlays: bool, out: &
             }
             None => mods |= Mod::Unknown.bit(),
         }
-        if message.dict.is_header(field.tag) {
+        if header.reaches(&schema, field.tag) {
             mods |= Mod::Header.bit();
-        } else if message.dict.is_trailer(field.tag) {
+        } else if trailer.reaches(&schema, field.tag) {
             mods |= Mod::Trailer.bit();
         }
         if counters.binary_search(&field.tag).is_ok() {
@@ -292,22 +296,24 @@ fn message_tokens(line: &[u8], message: &MessageAnalysis, overlays: bool, out: &
     }
 }
 
-/// Which tags open a group in this message, sorted.
+/// Which tags open a group in this message, its header or its trailer, sorted.
 ///
 /// From the **dictionary**, not from what the line instantiated: `268=0` opens
 /// no entries and is still the field that counts them. A message type the
 /// dictionary does not know declares nothing, which is what it can honestly
-/// say.
+/// say — and the annotator enters no header group on such a line either.
 fn counter_tags(message: &MessageAnalysis) -> Vec<u32> {
     let Some(msg) = message.msg_type else {
         return Vec::new();
     };
+    let schema = message.dict.schema();
     let mut out = Vec::new();
-    let mut stack: Vec<GroupIdx> = message.dict.message(msg).groups().collect();
-    while let Some(idx) = stack.pop() {
-        let group = message.dict.group(idx);
-        out.push(group.count_tag());
-        stack.extend(group.nested());
+    let mut stack = vec![schema.message(msg.0), schema.header(), schema.trailer()];
+    while let Some(scope) = stack.pop() {
+        for (tag, member) in scope.groups() {
+            out.push(tag);
+            stack.extend(member.group().map(|group| schema.group(group)));
+        }
     }
     out.sort_unstable();
     out.dedup();
@@ -343,7 +349,9 @@ fn of_datatype(class: Datatype) -> Kind {
         Datatype::Timestamp => Kind::Timestamp,
         Datatype::Boolean
         | Datatype::Character
+        | Datatype::MultipleChar
         | Datatype::Text
+        | Datatype::MultipleString
         | Datatype::Data
         | Datatype::Unknown => Kind::String,
     }
@@ -400,9 +408,9 @@ mod tests {
         assert_eq!(Mod::Group3b.bit(), 1 << (MODIFIERS.len() - 1));
     }
 
-    fn tokens(line: &str, overlays: bool) -> (Vec<u8>, Vec<Token>) {
+    fn tokens(line: &str, overlays: bool, ctx: &Ctx) -> (Vec<u8>, Vec<Token>) {
         let bytes = line.as_bytes().to_vec();
-        let analysis = analyze(&bytes, &Ctx::for_test("FIX.4.4"));
+        let analysis = analyze(&bytes, ctx);
         let mut out = Vec::new();
         classify(&bytes, &analysis, overlays, &mut out);
         (bytes, out)
@@ -411,7 +419,11 @@ mod tests {
     /// Every token as `text:type:modifiers`, which is what a reader of a failing
     /// assertion actually wants to see.
     fn spelled(line: &str, overlays: bool) -> Vec<String> {
-        let (bytes, out) = tokens(line, overlays);
+        spelled_in(line, overlays, &Ctx::for_test("FIX.4.4"))
+    }
+
+    fn spelled_in(line: &str, overlays: bool, ctx: &Ctx) -> Vec<String> {
+        let (bytes, out) = tokens(line, overlays, ctx);
         out.iter()
             .map(|token| {
                 let text = String::from_utf8_lossy(
@@ -523,6 +535,71 @@ mod tests {
             short.contains(&"268:property:count".to_owned()),
             "{short:?}"
         );
+    }
+
+    /// NoHops(627) is a header group: its counter counts, and its members sit
+    /// in an entry and stay header tags.
+    #[test]
+    fn a_header_group_counter_is_marked() {
+        let out = spelled("8=FIX.4.4|35=0|627=1|628=A", false);
+        assert!(
+            out.contains(&"627:property:header+session+count".to_owned()),
+            "{out:?}"
+        );
+        assert!(
+            out.contains(&"628:property:header+session+group1a".to_owned()),
+            "{out:?}"
+        );
+    }
+
+    /// A trailer group counts and its members stay trailer tags.
+    #[test]
+    fn a_trailer_group_counter_is_marked() {
+        use crate::dictionary::parse::{fixtures::source, parse_quickfix_bytes};
+        let xml = "<fix major='4' minor='4'>\
+            <header><field name='BeginString' required='Y'/><field name='MsgType' required='Y'/></header>\
+            <trailer><group name='NoHops' required='N'><field name='HopCompID' required='N'/></group>\
+            <field name='CheckSum' required='Y'/></trailer>\
+            <messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages>\
+            <fields>\
+            <field number='8' name='BeginString' type='STRING'/>\
+            <field number='10' name='CheckSum' type='STRING'/>\
+            <field number='35' name='MsgType' type='STRING'/>\
+            <field number='627' name='NoHops' type='NUMINGROUP'/>\
+            <field number='628' name='HopCompID' type='STRING'/>\
+            </fields></fix>";
+        let parsed = parse_quickfix_bytes(&source("custom.xml", xml.to_owned())).unwrap();
+        let ctx = Ctx::for_test_with_dict("FIX.4.4", parsed);
+        let out = spelled_in("8=FIX.4.4|35=D|627=1|628=H|10=000", false, &ctx);
+        assert!(
+            out.contains(&"627:property:trailer+count".to_owned()),
+            "{out:?}"
+        );
+        assert!(
+            out.contains(&"628:property:trailer+group1a".to_owned()),
+            "{out:?}"
+        );
+    }
+
+    /// An empty `<group/>` still declares its counter, so the counter counts
+    /// though it can open no entry.
+    #[test]
+    fn an_empty_group_counter_in_a_custom_dictionary_is_marked() {
+        use crate::dictionary::parse::{fixtures::source, parse_quickfix_bytes};
+        let xml = "<fix major='4' minor='4'><header/><trailer/><messages>\
+            <message name='NewOrderSingle' msgtype='D' msgcat='app'>\
+            <field name='ClOrdID' required='Y'/><group name='NoAllocs' required='N'/>\
+            </message></messages><fields>\
+            <field number='11' name='ClOrdID' type='STRING'/>\
+            <field number='35' name='MsgType' type='STRING'/>\
+            <field number='78' name='NoAllocs' type='NUMINGROUP'/>\
+            </fields></fix>";
+        let parsed = parse_quickfix_bytes(&source("custom.xml", xml.to_owned())).unwrap();
+        let ctx = Ctx::for_test_with_dict("FIX.4.4", parsed);
+        let out = spelled_in("8=FIX.4.4|35=D|11=a|78=0", false, &ctx);
+        assert!(out.contains(&"78:property:count".to_owned()), "{out:?}");
+        assert!(out.contains(&"0:number:count".to_owned()), "{out:?}");
+        assert!(out.contains(&"11:property:".to_owned()), "{out:?}");
     }
 
     /// The overlay follows the entry's first tag, so a client that declared

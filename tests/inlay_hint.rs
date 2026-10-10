@@ -505,6 +505,47 @@ fn a_change_that_alters_the_channels_asks_for_a_refresh() {
     }
 }
 
+/// An eager tooltip names the dictionary. Moving `default` between two names
+/// for one file changes no dictionary and no interpretation, only that name.
+#[test]
+fn a_new_name_for_the_same_dictionary_refreshes_the_hints() {
+    let workspace = Workspace::new("inlay-rename");
+    let path = workspace.write(
+        "desk.xml",
+        "<fix type='FIX' major='4' minor='4' servicepack='0'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
+         <field number='55' name='Symbol' type='STRING'/></fields></fix>",
+    );
+    let named = |default: &str| {
+        json!({
+            "allowDictionaryPath": true,
+            "dictionaries": [
+                { "path": path, "name": "alpha", "default": default == "alpha" },
+                { "path": path, "name": "beta", "default": default == "beta" },
+            ],
+        })
+    };
+    let mut client = TestClient::start();
+    client.initialize_caps(refresh_caps());
+    let (id, _, _) = client.recv_server_request();
+    client.reply(id, json!([named("alpha")]));
+    client.did_open(URI, HEARTBEAT, 1);
+    client.drain_server_methods(std::time::Duration::from_millis(20));
+
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": null }),
+    );
+    let (id, _, _) = client.recv_server_request();
+    client.reply(id, json!([named("beta")]));
+    let asked: Vec<String> = client
+        .drain_server_methods(std::time::Duration::from_millis(500))
+        .into_iter()
+        .filter(|method| method.ends_with("/refresh"))
+        .collect();
+    assert_eq!(asked, ["workspace/inlayHint/refresh"]);
+    client.shutdown();
+}
+
 /// Two ways to be asked nothing, and they are different reasons: the client
 /// cannot take a refresh, or nothing it draws would change.
 ///
@@ -665,7 +706,7 @@ fn resolving_client_with(text: &str, fix: Value) -> TestClient {
 fn a_custom_tags_tooltip_says_it_is_not_standard() {
     let workspace = Workspace::new("hint-desk");
     let mut fix = workspace.desk_dictionary(
-        "<fix type='FIX' major='4' minor='4' servicepack='0'><fields>\
+        "<fix type='FIX' major='4' minor='4' servicepack='0'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields>\
          <field number='20001' name='DeskMode' type='INT'/></fields></fix>",
     );
     fix["inlayHints"] = hints_on()["inlayHints"].take();

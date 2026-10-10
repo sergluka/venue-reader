@@ -68,13 +68,31 @@ follows is what is easy to get wrong here and not visible from any one file.
   bound on the two *merged* unions it generates — `Dict::field_idx` and
   `Dict::enum_idx` index into those, so checking each source dictionary proves
   nothing about them.
+- **`schema::pack` is the only producer of a `Schema`.** Header, trailer, every
+  message and every group are spans over the same flat arrays, and `pack` is
+  where the sorting, the `order` and `nested` tables, the name interning and the
+  count bounds happen once; the parser makes every index with a checked
+  conversion before `pack` sees it. `build.rs` includes `schema.rs` by `#[path]`
+  like `model.rs` and `parse.rs`, so the bundled tables and a custom dictionary
+  come out of the same function — and `schema.rs` stays std-only. Consumers read
+  structure through `Dict::schema()` and the per-scope facts the parser derives
+  from it (`GroupDef::delimiter_tag`); any other table built beside it (a reach
+  set, a counter list) is a cache of the schema, never a source. The dictionary
+  is the whole truth: a scope declared empty *is* empty, a file that would have
+  left a part undescribed was refused or loaded with a `Fault`, and there is no
+  completeness flag for a consumer to consult. The one exception is
+  `has_session_layer()`, a build-time mark on bundled FIX.5.0 and FIX.5.0SP1
+  that goes with FIX 5 handling.
 - **Positions are bytes inside the crate** and become LSP `Position`s only at the
   protocol boundary, under the encoding negotiated in `initialize`. A span that
   leaks out unconverted is wrong for every non-ASCII line.
 
-- **Rules are a pure function of `LineAnalysis` plus configuration.** That is
-  why `diagnostics.rules.*` is not a `CtxFingerprint` input: toggling a rule or
-  regrading its severity invalidates no cached line. A rule that needs
+- **Rules are a pure function of `LineAnalysis` plus configuration** — the
+  rule settings, and the name of the dictionary that decoded the line, which
+  the caller passes because a name, like a rule setting, is not a
+  `CtxFingerprint` input. That is why `diagnostics.rules.*` is not one either:
+  toggling a rule, regrading its severity or renaming a dictionary invalidates
+  no cached line. A rule that needs
   something the analysis does not carry is a signal to re-read the analysis,
   not to widen the rule.
 - **Background results reach the client only through the main loop.** The

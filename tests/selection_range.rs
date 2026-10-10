@@ -406,3 +406,31 @@ fn group_levels_are_columns_under_utf16() {
     );
     client.shutdown();
 }
+
+/// NoHops(627) is a header group: a hop's value expands through its entry and
+/// the group under FIX.4.4 and under `8=FIXT.1.1`.
+#[test]
+fn a_header_group_field_expands_through_its_entry_then_the_group() {
+    for line in [
+        "8=FIX.4.4|35=0|627=2|628=A|630=1|628=B|630=2|112=T",
+        "8=FIXT.1.1|35=0|627=2|628=A|630=1|628=B|630=2|112=T",
+    ] {
+        let mut client = open(line);
+        let cursor = at_of(line, "628=B", 4);
+        let found = at(&mut client, &[(0, cursor)]);
+        let entry = (at_of(line, "628=B", 0), at_of(line, "630=2", 5));
+        let group = (at_of(line, "627=2", 0), at_of(line, "630=2", 5));
+        assert_eq!(
+            levels(&found[0]),
+            vec![
+                (cursor as u64, cursor as u64 + 1),
+                (entry.0 as u64, entry.0 as u64 + 5),
+                (entry.0 as u64, entry.1 as u64),
+                (group.0 as u64, group.1 as u64),
+                (0, line.len() as u64),
+            ],
+            "{line}: value, field, entry, group, line"
+        );
+        client.shutdown();
+    }
+}

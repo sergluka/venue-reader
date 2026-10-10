@@ -2,7 +2,10 @@
 //! the merged layout). Everything here is `'static` data; `Dict` views resolve a
 //! version's exact values through the presence masks and overrides.
 
+use std::borrow::Cow;
+
 use super::model::Datatype;
+use super::schema::{member, row, span, ComponentRow, Member, Schema, ScopeSpan, NONE};
 
 /// Bit `i` = the bundled version whose `StaticDict::mask_bit` is `i` (the
 /// ordinal `build.rs` assigns, in `BUNDLED_VERSIONS` order).
@@ -35,6 +38,8 @@ pub struct TagRecord {
     /// this cannot differ between them, and `build.rs` asserts it.
     pub added_ep: u16,
     pub presence: VersionMask,
+    /// The versions whose value list is open (`allowOtherValues`).
+    pub allows_other_values: VersionMask,
     pub overrides: &'static [FieldOverride],
     /// Sorted by `value`; each carries its own presence mask.
     pub enums: &'static [EnumRecord],
@@ -76,8 +81,6 @@ pub struct StaticGroup {
     pub name: &'static str,
     pub count_tag: u32,
     pub delimiter_tag: u32,
-    pub members: &'static [u32],
-    pub nested: &'static [u16],
 }
 
 #[derive(Debug)]
@@ -86,7 +89,6 @@ pub struct StaticMessage {
     pub name: &'static str,
     pub category: &'static str,
     pub description: &'static str,
-    pub groups: &'static [u16],
 }
 
 /// One bundled version: its mask bit into `TAGS` plus its own groups/messages.
@@ -94,9 +96,10 @@ pub struct StaticMessage {
 pub struct StaticDict {
     pub version: &'static str,
     pub mask_bit: u8,
-    /// Sorted session-layer tags, for `Dict::is_header`/`is_trailer`.
-    pub header: &'static [u32],
-    pub trailer: &'static [u32],
+    pub schema: Schema<'static>,
+    /// False for FIX.5.0 and FIX.5.0SP1, which carry no header, trailer or
+    /// session messages until FIX 5 handling.
+    pub session_layer: bool,
     pub groups: &'static [StaticGroup],
     pub messages: &'static [StaticMessage],
 }

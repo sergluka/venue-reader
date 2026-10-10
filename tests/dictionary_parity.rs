@@ -8,10 +8,11 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use fix_lsp::dictionary::bundle::{enrich, merge_session, parse_metadata};
+use fix_lsp::dictionary::bundle::{assemble, parse_metadata};
 use fix_lsp::dictionary::parse::Source;
+use fix_lsp::dictionary::schema::{Schema, Scope};
 use fix_lsp::dictionary::statics::TAGS;
-use fix_lsp::dictionary::{bundled, parse_quickfix, Dict, Version};
+use fix_lsp::dictionary::{bundled, parse_quickfix, Dict, ParsedDict, Version};
 
 const XML: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/xml");
 
@@ -31,8 +32,9 @@ fn standard_file(version: Version) -> &'static str {
 /// The static side reconstructs each version through presence masks and
 /// overrides; the runtime side assembles each version on its own and never
 /// merges across versions. For fields and enums this independently validates
-/// the merge codegen. Groups and messages share the parsing algorithm with
-/// build.rs, so the fixture below covers them.
+/// the merge codegen. Groups, messages and the schema share the parsing
+/// algorithm with build.rs, so the fixtures below cover them; here they prove
+/// the generated tables say what the parser said.
 #[test]
 fn runtime_parse_equals_static_tables_for_every_version() {
     let standard = Path::new(XML).join("standard");
@@ -40,12 +42,11 @@ fn runtime_parse_equals_static_tables_for_every_version() {
         parse_metadata(&Source::read(standard.join("FIXLatest-metadata.xml")).unwrap()).unwrap();
     let session = parse_quickfix(&standard.join("FIXT11.xml")).unwrap();
     for v in Version::BUNDLED {
-        let mut direct = parse_quickfix(&standard.join(standard_file(v))).unwrap();
-        if v == Version::Fix50Sp2 {
-            merge_session(&mut direct, &session);
-        }
-        enrich(&mut direct, &meta, v.as_str());
-        let reconstructed = Dict::Static(bundled(v)).to_parsed();
+        let parsed = parse_quickfix(&standard.join(standard_file(v))).unwrap();
+        let assembled = assemble(v.as_str(), parsed, &session, &meta).unwrap();
+        let direct = assembled.dict;
+        let stat = Dict::Static(bundled(v));
+        let reconstructed = stat.to_parsed();
         assert_eq!(reconstructed.version.as_deref(), Some(v.as_str()));
         assert_eq!(
             reconstructed.fields.len(),
@@ -57,11 +58,44 @@ fn runtime_parse_equals_static_tables_for_every_version() {
         }
         assert_eq!(reconstructed.groups, direct.groups, "{v:?}: groups");
         assert_eq!(reconstructed.messages, direct.messages, "{v:?}: messages");
-        assert_eq!(reconstructed.header, direct.header, "{v:?}: header");
-        assert_eq!(reconstructed.trailer, direct.trailer, "{v:?}: trailer");
+
+        let (ours, theirs) = (
+            reconstructed.schema.as_schema().to_defs(),
+            direct.schema.as_schema().to_defs(),
+        );
+        assert_eq!(ours.header, theirs.header, "{v:?}: header scope");
+        assert_eq!(ours.trailer, theirs.trailer, "{v:?}: trailer scope");
+        assert_eq!(ours.messages.len(), theirs.messages.len(), "{v:?}");
+        for (i, (ours_message, theirs_message)) in
+            ours.messages.iter().zip(&theirs.messages).enumerate()
+        {
+            let msg_type = &direct.messages[i].msg_type;
+            assert_eq!(
+                ours_message, theirs_message,
+                "{v:?}: MsgType(35) = {msg_type}"
+            );
+        }
+        assert_eq!(ours.groups.len(), theirs.groups.len(), "{v:?}");
+        for (i, (ours_group, theirs_group)) in ours.groups.iter().zip(&theirs.groups).enumerate() {
+            assert_eq!(
+                ours_group, theirs_group,
+                "{v:?}: group {i}, {}",
+                direct.groups[i].name
+            );
+        }
+        assert_eq!(reconstructed.schema, direct.schema, "{v:?}: packed schema");
+
         // QuickFIX/J keeps the 5.x session layer in FIXT11.xml alone.
         let has_session = !matches!(v, Version::Fix50 | Version::Fix50Sp1);
-        assert_eq!(!direct.header.is_empty(), has_session, "{v:?}: header");
+        assert_eq!(stat.has_session_layer(), assembled.session_layer, "{v:?}");
+        assert_eq!(assembled.session_layer, has_session, "{v:?}");
+        assert_eq!(
+            theirs.header.members.is_empty(),
+            !has_session,
+            "{v:?}: header scope"
+        );
+        assert_eq!(stat.faults(), &direct.faults[..], "{v:?}: faults");
+        assert!(direct.faults.is_empty(), "{v:?}: {:?}", direct.faults);
     }
 }
 
@@ -85,47 +119,71 @@ fn hand_written_session_layer_fix44() {
     assert!(!d.is_header(55) && !d.is_trailer(55), "Symbol is neither");
 }
 
+fn message<'a>(parsed: &'a ParsedDict, msg_type: &str) -> Scope<'a> {
+    let index = u16::try_from(parsed.message_index(msg_type).unwrap()).unwrap();
+    parsed.schema.as_schema().message(index)
+}
+
+/// The entries of the group `scope` opens with `count_tag`.
+fn entry<'a>(schema: Schema<'a>, scope: Scope<'a>, count_tag: u32) -> Scope<'a> {
+    let group = scope.find(count_tag).and_then(|member| member.group());
+    schema.group(group.expect("a group counter"))
+}
+
+/// Member tags in declared order, counters of nested groups included.
+fn tags(scope: Scope<'_>) -> Vec<u32> {
+    scope.declared().map(|(tag, _)| tag).collect()
+}
+
+/// The count tags of the groups a scope opens, in declared order.
+fn counters(scope: Scope<'_>) -> Vec<u32> {
+    scope.groups().map(|(tag, _)| tag).collect()
+}
+
 /// Transcribed by hand from `xml/standard/FIX44.xml` (message W's `NoMDEntries`;
 /// the `Parties` component for message AN), not produced by any parser.
 #[test]
 fn hand_written_group_structure_fix44() {
     let d = Dict::Static(bundled(Version::Fix44));
+    let parsed = d.to_parsed();
+    let schema = parsed.schema.as_schema();
 
     let w = d.message_idx("W").unwrap();
     let md = d.group(d.group_by_count_tag(w, 268).expect("NoMDEntries"));
     assert_eq!(md.name(), "NoMDEntries");
     assert_eq!(md.delimiter_tag(), 269);
+    let md = entry(schema, message(&parsed, "W"), 268);
     assert_eq!(
-        md.members(),
+        tags(md),
         &[
             269, 270, 15, 271, 272, 273, 274, 275, 336, 625, 276, 277, 282, 283, 284, 286, 59, 432,
             126, 110, 18, 287, 37, 299, 288, 289, 346, 290, 546, 811, 58, 354, 355
         ]
     );
-    assert_eq!(md.nested().count(), 0);
+    assert_eq!(md.groups().count(), 0);
 
     let an = d.message_idx("AN").unwrap();
     let parties = d.group(d.group_by_count_tag(an, 453).expect("NoPartyIDs"));
     assert_eq!(parties.name(), "NoPartyIDs");
     assert_eq!(parties.delimiter_tag(), 448);
-    assert_eq!(parties.members(), &[448, 447, 452, 802]);
-    let nested: Vec<_> = parties.nested().collect();
-    assert_eq!(nested.len(), 1);
-    let subs = d.group(nested[0]);
-    assert_eq!(subs.name(), "NoPartySubIDs");
-    assert_eq!((subs.count_tag(), subs.delimiter_tag()), (802, 523));
-    assert_eq!(subs.members(), &[523, 803]);
-    assert_eq!(subs.nested().count(), 0);
+    let parties = entry(schema, message(&parsed, "AN"), 453);
+    assert_eq!(tags(parties), &[448, 447, 452, 802]);
+    assert_eq!(counters(parties), [802]);
+    let nested = parties.find(802).and_then(|member| member.group()).unwrap();
+    let subs = &parsed.groups[usize::from(nested)];
+    assert_eq!(subs.name, "NoPartySubIDs");
+    assert_eq!((subs.count_tag, subs.delimiter_tag), (802, 523));
+    let subs = entry(schema, parties, 802);
+    assert_eq!(tags(subs), &[523, 803]);
+    assert_eq!(subs.groups().count(), 0);
     // AN's top-level groups in document order. Components are spliced inline,
     // so their groups surface here too: NoPartyIDs (453) from Parties,
     // NoSecurityAltID (454) and NoEvents (864) from Instrument. The header is
     // declared apart from the messages, so NoHops is not among them.
-    let counts: Vec<u32> = d
-        .message(an)
-        .groups()
-        .map(|g| d.group(g).count_tag())
-        .collect();
-    assert_eq!(counts, vec![453, 454, 864, 555, 711, 386]);
+    assert_eq!(
+        counters(message(&parsed, "AN")),
+        vec![453, 454, 864, 555, 711, 386]
+    );
 }
 
 /// Per-version counters through the views plus merge-level counters. The
@@ -133,16 +191,19 @@ fn hand_written_group_structure_fix44() {
 /// update or a codegen regression.
 #[test]
 fn snapshot_counters() {
-    // (version, fields, enums, messages, groups)
+    // (version, fields, enums, messages, groups). The header's NoHops(627) is
+    // a group in FIX.4.3, FIX.4.4 and FIX.5.0SP2; FIX.4.3's NoRelatedSym(146)
+    // and FIX.4.4's NoUnderlyings(711) are two groups each, one per
+    // requiredness of the component inside.
     let expected = [
         (Version::Fix40, 138, 230, 27, 7),
         (Version::Fix41, 208, 337, 28, 8),
         (Version::Fix42, 403, 625, 46, 29),
-        (Version::Fix43, 655, 1222, 67, 51),
-        (Version::Fix44, 916, 1814, 92, 91),
+        (Version::Fix43, 655, 1222, 67, 53),
+        (Version::Fix44, 916, 1814, 92, 93),
         (Version::Fix50, 1132, 2442, 93, 100),
         (Version::Fix50Sp1, 1353, 2598, 105, 134),
-        (Version::Fix50Sp2, 1452, 2821, 115, 145),
+        (Version::Fix50Sp2, 1452, 2821, 115, 146),
     ];
     let mut actual = Vec::new();
     for (version, ..) in expected {
@@ -170,7 +231,7 @@ fn snapshot_counters() {
     let merged = (TAGS.len(), field_overrides, enum_overrides);
     assert_eq!(
         merged,
-        (1498, 210, 25),
+        (1498, 212, 25),
         "(TAGS union, field override rows, enum override rows)"
     );
 }

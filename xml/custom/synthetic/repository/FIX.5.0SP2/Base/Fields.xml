@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Synthetic FIX Repository-layout fixture written for this project (Apache-2.0); no third-party data. -->
-<Fields version="FIX.5.0SP2">
-  <Field added="FIX.5.0"><Tag>8</Tag><Name>BeginString</Name><Type>String</Type><Description>Synthetic description of BeginString.</Description></Field>
-  <Field added="FIX.5.0"><Tag>35</Tag><Name>MsgType</Name><Type>String</Type><Description>Synthetic description of MsgType.</Description></Field>
-  <Field added="FIX.5.0"><Tag>1128</Tag><Name>ApplVerID</Name><Type>String</Type><Description>Synthetic description of ApplVerID.</Description></Field>
-</Fields>

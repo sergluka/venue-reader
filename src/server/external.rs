@@ -14,8 +14,8 @@ use lsp_types::Uri;
 use crate::config::{self, Severity};
 use crate::ctx::Ctx;
 use crate::dictionary::{
-    looks_like_path, BuildContext, DictionaryChoice, DictionaryLayer, DictionaryStore, LoadError,
-    Registry,
+    fault_events, looks_like_path, BuildContext, DictionaryChoice, DictionaryLayer,
+    DictionaryStore, LoadError, Registry, RegistryEvent,
 };
 use crate::overrides::{self, project, Origin, Resolved, SettingsLayer, SourceKind, Warning};
 use crate::render::Options;
@@ -428,18 +428,19 @@ fn dictionary_layers<'a>(
 
 fn append_events(
     warnings: &mut Vec<Warning>,
-    events: Vec<crate::dictionary::RegistryEvent>,
+    events: Vec<RegistryEvent>,
     layers: &[SettingsLayer],
     origin: &Origin,
 ) {
     warnings.extend(events.into_iter().map(|event| {
-        use crate::dictionary::RegistryEvent;
         let source = layers
             .iter()
             .rev()
             .find(|layer| {
                 layer.dictionaries.iter().any(|spec| match &event {
                     RegistryEvent::LoadFailed { path, .. }
+                    | RegistryEvent::DictionaryFault { path, .. }
+                    | RegistryEvent::MoreDictionaryFaults { path, .. }
                     | RegistryEvent::DuplicateDefault { path, .. }
                     | RegistryEvent::BlankName { path } => spec.path == *path,
                     RegistryEvent::BadName { name, .. } => spec.name == *name,
@@ -447,17 +448,29 @@ fn append_events(
                 })
             })
             .map_or(origin, |layer| &layer.origin);
-        Warning {
-            key: "dictionaries".into(),
-            message: event.message(),
-            origin: source.clone(),
-            severity: if event.is_error() {
-                Severity::Error
-            } else {
-                Severity::Warning
-            },
-        }
+        event_warning(&event, "dictionaries", source.clone())
     }));
+}
+
+fn event_warning(event: &RegistryEvent, key: &str, origin: Origin) -> Warning {
+    Warning {
+        key: key.into(),
+        message: event.message(),
+        origin,
+        severity: if event.is_error() {
+            Severity::Error
+        } else {
+            Severity::Warning
+        },
+    }
+}
+
+/// A selector's outcome. `by_path` when the file was read for this selection
+/// alone: no registry build saw it, so its faults and its failure are
+/// reported here.
+struct Selected {
+    by_path: bool,
+    outcome: Result<DictionaryChoice, LoadError>,
 }
 
 fn select(
@@ -467,17 +480,24 @@ fn select(
     enabled: bool,
     layers: &[SettingsLayer],
     store: &DictionaryStore,
-) -> Result<DictionaryChoice, LoadError> {
+) -> Selected {
+    let refused = |error| Selected {
+        by_path: false,
+        outcome: Err(error),
+    };
     let reserved = crate::dictionary::is_reserved_selector(raw);
     if let Some(choice) = registry.choice(raw) {
-        return if reserved || enabled {
-            Ok(choice)
-        } else {
-            Err(LoadError::PathsDisabled)
+        return Selected {
+            by_path: false,
+            outcome: if reserved || enabled {
+                Ok(choice)
+            } else {
+                Err(LoadError::PathsDisabled)
+            },
         };
     }
     if reserved {
-        return Err(LoadError::InvalidVersion {
+        return refused(LoadError::InvalidVersion {
             path: PathBuf::from(raw),
             version: raw.into(),
         });
@@ -486,12 +506,15 @@ fn select(
         .iter()
         .any(|layer| layer.dictionaries.iter().any(|spec| spec.name == raw));
     if declared || !looks_like_path(raw) {
-        return Err(LoadError::UnknownName { name: raw.into() });
+        return refused(LoadError::UnknownName { name: raw.into() });
     }
     if !enabled {
-        return Err(LoadError::PathsDisabled);
+        return refused(LoadError::PathsDisabled);
     }
-    store.load_choice(raw, context)
+    Selected {
+        by_path: true,
+        outcome: store.load_choice(raw, context),
+    }
 }
 
 fn blocked_dictionaries(layers: &[SettingsLayer], label: &str, origin: &Origin) -> Option<Warning> {
@@ -640,7 +663,7 @@ fn prepare_document(
             SourceKind::Modeline => path.as_deref().and_then(Path::parent),
             _ => input.dictionary_root.as_deref(),
         };
-        let selected = select(
+        let Selected { by_path, outcome } = select(
             raw,
             &registry,
             &BuildContext {
@@ -651,8 +674,15 @@ fn prepare_document(
             &layers,
             store,
         );
-        match selected {
+        match outcome {
             Ok(choice) => {
+                if by_path {
+                    resolved.warnings.extend(
+                        fault_events(raw, choice.dict.faults())
+                            .iter()
+                            .map(|event| event_warning(event, "dictionary", origin.clone())),
+                    );
+                }
                 selection = Some(Selection {
                     raw: raw.into(),
                     origin: origin.clone(),
@@ -661,6 +691,17 @@ fn prepare_document(
                 break;
             }
             Err(error) if error.is_fatal() => return Err(error.to_string()),
+            // A file that was read and refused is an error, like one a
+            // `dictionaries` entry names; a selector that names nothing
+            // usable only falls through.
+            Err(error) if by_path => resolved.warnings.push(event_warning(
+                &RegistryEvent::LoadFailed {
+                    path: raw.into(),
+                    detail: error.to_string(),
+                },
+                "dictionary",
+                origin.clone(),
+            )),
             Err(error) => resolved.warnings.push(Warning::new(
                 "dictionary",
                 error.to_string(),
