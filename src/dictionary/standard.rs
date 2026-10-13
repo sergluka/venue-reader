@@ -15,8 +15,10 @@
 //! them, so they stay [`Standard::InVersion`], unchallenged.
 
 use super::bundle::{implied_first_release, release_of, FIRST_BUNDLED_RANK, USER_DEFINED};
-use super::dict::{bundled, tag_record, Version};
-use super::statics::{LatestTag, TagRecord, LATEST_NAMES, LATEST_TAGS, LATEST_VERSIONS};
+use super::dict::{bundled, tag_record, Dict, Version};
+use super::statics::{
+    LatestTag, StandaloneField, StaticFields, TagRecord, LATEST_NAMES, LATEST_TAGS, LATEST_VERSIONS,
+};
 
 /// How the two pinned sources see a tag, for one version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,11 +119,29 @@ impl Standard {
         })
     }
 
+    /// Custom sources are checked against the bundled witness for their identity.
+    pub fn of_source(dict: &Dict, tag: u32) -> Standard {
+        Self::of_tag(dict.version().and_then(Version::parse), tag)
+    }
+
     /// `version` is the binding's, `None` when it has no bundled tables; then
     /// `InVersion` and `Disputed` are unreachable and `OtherVersion` means only
     /// that some bundled dictionary defines the tag.
     pub fn of_tag(version: Option<Version>, tag: u32) -> Standard {
+        let transport = transport_field(tag);
+        if version == Some(Version::Fixt11) && transport.is_some() {
+            return Standard::InVersion;
+        }
         let Some(record) = tag_record(tag) else {
+            if let Some(field) = transport {
+                return Standard::OtherVersion(StandardDef {
+                    name: latest_name(tag).unwrap_or(field.name),
+                    added: field.added,
+                    added_ep: field.added_ep,
+                    date_holds: false,
+                    retirement: None,
+                });
+            }
             return match latest_tag(tag) {
                 Some(latest) => Standard::Unbundled(StandardDef {
                     name: latest.name,
@@ -139,10 +159,20 @@ impl Standard {
         if !latest_knows && USER_DEFINED.contains(&tag) {
             return Standard::Nowhere;
         }
-        if let Some(version) = version {
+        let application_version = version.filter(|version| *version != Version::Fixt11);
+        let separate_transport = application_version.is_some_and(|version| {
+            transport.is_some()
+                && matches!(
+                    version,
+                    Version::Fix50 | Version::Fix50Sp1 | Version::Fix50Sp2
+                )
+                && !record.presence.contains(ordinal(version))
+        });
+        if let Some(version) = application_version {
             let listed = record.presence.contains(ordinal(version));
             // Where FIX Latest dates the tag, the date must agree with the file.
-            let dated_in = latest_knows.then(|| dated_into(record, version));
+            let dated_in =
+                (latest_knows && !separate_transport).then(|| dated_into(record, version));
             match (listed, dated_in) {
                 (true, Some(false)) | (false, Some(true)) => return Standard::Disputed,
                 (true, _) => return Standard::InVersion,
@@ -153,11 +183,11 @@ impl Standard {
             name: latest_name(tag).unwrap_or(record.name),
             added: record.added,
             added_ep: record.added_ep,
-            date_holds: date_holds(tag),
-            retirement: if latest_knows {
+            date_holds: version != Some(Version::Fixt11) && date_holds(tag) && !separate_transport,
+            retirement: if latest_knows || transport.is_some() || version == Some(Version::Fixt11) {
                 None
             } else {
-                retirement(record, version)
+                retirement(record, application_version)
             },
         })
     }
@@ -172,7 +202,9 @@ pub fn standard_name(version: Option<Version>, tag: u32) -> Option<&'static str>
 /// [`standard_name`] for a standing already in hand.
 pub fn name_of(standing: &Standard, tag: u32) -> Option<&'static str> {
     if *standing == Standard::InVersion {
-        return latest_name(tag).or_else(|| tag_record(tag).map(|record| record.name));
+        return latest_name(tag)
+            .or_else(|| tag_record(tag).map(|record| record.name))
+            .or_else(|| transport_field(tag).map(|field| field.name));
     }
     standing.def().map(|def| def.name)
 }
@@ -185,6 +217,14 @@ pub fn date_holds(tag: u32) -> bool {
         let implied = implied_first_release(record.added, record.added_ep);
         implied.is_some() && implied == first_release(record)
     })
+}
+
+fn transport_field(tag: u32) -> Option<&'static StandaloneField> {
+    let StaticFields::Standalone(fields) = bundled(Version::Fixt11).fields else {
+        unreachable!("FIXT uses standalone storage")
+    };
+    let index = fields.binary_search_by_key(&tag, |field| field.tag).ok()?;
+    Some(&fields[index])
 }
 
 fn latest_tag(tag: u32) -> Option<&'static LatestTag> {
@@ -204,11 +244,10 @@ fn latest_name(tag: u32) -> Option<&'static str> {
 /// A bundled version's mask ordinal: its position in `Version::BUNDLED`, which
 /// `build.rs` assigns bits in — asserted by the tests.
 fn ordinal(version: Version) -> u8 {
-    let version = version.resolve_alias();
     let at = Version::BUNDLED
         .iter()
         .position(|bundled| *bundled == version)
-        .expect("every Version resolves to a bundled one");
+        .expect("application version has a chronology ordinal");
     at as u8
 }
 
@@ -264,7 +303,11 @@ mod tests {
     #[test]
     fn mask_ordinals_follow_bundled_order_and_ranks_are_contiguous() {
         for (at, version) in Version::BUNDLED.into_iter().enumerate() {
-            assert_eq!(usize::from(bundled(version).mask_bit), at, "{version:?}");
+            assert_eq!(
+                usize::from(bundled(version).mask_bit().unwrap()),
+                at,
+                "{version:?}"
+            );
             assert_eq!(usize::from(ordinal(version)), at);
             assert_eq!(
                 rank(version.as_str()),
@@ -272,7 +315,49 @@ mod tests {
                 "{version:?}"
             );
         }
-        assert_eq!(ordinal(Version::Fixt11), ordinal(Version::Fix50Sp2));
+        assert_eq!(bundled(Version::Fixt11).mask_bit(), None);
+    }
+
+    #[test]
+    fn custom_transport_uses_the_standalone_standard_witness() {
+        let mut custom = crate::dictionary::ParsedDict {
+            version: Some("FIXT.1.1".to_owned()),
+            ..crate::dictionary::ParsedDict::default()
+        };
+        custom.fields.push(crate::dictionary::FieldDef {
+            tag: 9999,
+            name: "SyntheticPrivateField".to_owned(),
+            ..crate::dictionary::FieldDef::default()
+        });
+        let custom = Dict::Owned(std::sync::Arc::new(custom));
+        assert_eq!(Standard::of_source(&custom, 1407), Standard::InVersion);
+        assert_eq!(Standard::of_source(&custom, 9999), Standard::Nowhere);
+        let application_only = Standard::of_source(&custom, 55);
+        assert!(matches!(application_only, Standard::OtherVersion(_)));
+        assert_eq!(application_only.def().unwrap().introduced(), None);
+        assert_eq!(
+            Standard::of_source(&custom, 1407)
+                .note(Some(Version::Fixt11))
+                .as_deref(),
+            Some("standard FIXT.1.1")
+        );
+    }
+
+    #[test]
+    fn transport_absence_from_application_files_is_no_retirement() {
+        for version in [Version::Fix50, Version::Fix50Sp1, Version::Fix50Sp2] {
+            for tag in [108, 1137, 1407] {
+                let source = Dict::Static(bundled(version));
+                let standing = Standard::of_source(&source, tag);
+                if source.field_idx(tag).is_some() {
+                    assert_eq!(standing, Standard::InVersion);
+                    continue;
+                }
+                let definition = standing.def().unwrap();
+                assert_eq!(definition.retirement, None, "{version:?} {tag}");
+                assert_eq!(definition.introduced(), None, "{version:?} {tag}");
+            }
+        }
     }
 
     const FIX42: Option<Version> = Some(Version::Fix42);
@@ -304,9 +389,9 @@ mod tests {
         assert_eq!(Standard::of_tag(FIX50SP1, 1400), Standard::InVersion);
         assert_eq!(Standard::of_tag(FIX50SP2, 1426), Standard::InVersion);
         assert_eq!(
-            Standard::of_tag(Some(Version::Fixt11), 1328),
+            Standard::of_tag(Some(Version::Fixt11), 1407),
             Standard::InVersion,
-            "a FIXT line reads the FIX.5.0SP2 tables"
+            "standalone FIXT defines DefaultApplExtID(1407)"
         );
     }
 
@@ -331,7 +416,10 @@ mod tests {
         assert_eq!(Standard::of_tag(FIX42, 220), Standard::Disputed);
         // Session tags FIX Latest dates earlier, missing from the SP1 file.
         for tag in [108, 1137, 1407] {
-            assert_eq!(Standard::of_tag(FIX50SP1, tag), Standard::Disputed, "{tag}");
+            assert!(
+                matches!(Standard::of_tag(FIX50SP1, tag), Standard::OtherVersion(_)),
+                "{tag}"
+            );
         }
         assert_eq!(Standard::of_tag(FIX44, 809), Standard::Disputed);
         // ApplReportType(1426): in the SP1 file, dated SP2.
@@ -417,7 +505,7 @@ mod tests {
     #[test]
     fn every_retirement_boundary_is_before_the_version_asked() {
         for version in Version::ALL {
-            let asked = rank(version.resolve_alias().as_str()).unwrap();
+            let asked = rank(version.as_str()).unwrap();
             for record in TAGS {
                 let Standard::OtherVersion(def) = Standard::of_tag(Some(version), record.tag)
                 else {
@@ -436,7 +524,9 @@ mod tests {
                     Some(release),
                     Version::BUNDLED
                         .into_iter()
-                        .rfind(|release| record.presence.contains(bundled(*release).mask_bit))
+                        .rfind(|release| record
+                            .presence
+                            .contains(bundled(*release).mask_bit().unwrap()))
                         .map(Version::as_str),
                     "the last release that declares it"
                 );
@@ -480,8 +570,8 @@ mod tests {
             Standard::of_tag(FIX44, 1328)
                 .note(Some(Version::Fixt11))
                 .as_deref(),
-            Some("not in FIX.5.0SP2, introduced in FIX.5.0SP1"),
-            "a FIXT binding reads the FIX.5.0SP2 tables"
+            Some("not in FIXT.1.1, introduced in FIX.5.0SP1"),
+            "the note uses the physical source identity"
         );
     }
 
@@ -616,18 +706,14 @@ mod tests {
             240, 241, 242, 244, 245, 246, 247, 248, 249, 251, 252, 253, 254, 255, 256, 257, 258,
             259, 260,
         ];
-        let session_and_1426 = vec![
-            7, 16, 36, 98, 108, 112, 123, 141, 371, 373, 383, 384, 385, 464, 789, 1137, 1407, 1408,
-            1409, 1410, 1426,
-        ];
         let expected = BTreeMap::from([
             ("FIX.4.2", benchmark_block),
             ("FIX.4.4", vec![809]),
             ("FIX.5.0", vec![809]),
-            ("FIX.5.0SP1", session_and_1426),
+            ("FIX.5.0SP1", vec![1426]),
         ]);
         assert_eq!(disputed, expected);
-        assert_eq!(disputed.values().map(Vec::len).sum::<usize>(), 59);
+        assert_eq!(disputed.values().map(Vec::len).sum::<usize>(), 39);
     }
 
     #[test]
@@ -637,7 +723,9 @@ mod tests {
             .filter(|record| !record.added.is_empty() && !date_holds(record.tag))
             .map(|record| record.tag)
             .collect();
-        assert_eq!(failing.len(), 42, "{failing:?}");
+        // DefaultApplExtID(1407), DefaultCstmApplVerID(1408), SessionStatus(1409)
+        // and DefaultVerIndicator(1410) now belong only to standalone FIXT.
+        assert_eq!(failing.len(), 38, "{failing:?}");
         assert!(failing.contains(&226) && failing.contains(&1426));
     }
 
@@ -708,6 +796,7 @@ mod tests {
             .all(|latest| tag_record(latest.tag).is_none()));
         for tag in meta.fields.keys() {
             let known = tag_record(*tag).is_some()
+                || transport_field(*tag).is_some()
                 || LATEST_TAGS
                     .binary_search_by_key(tag, |latest| latest.tag)
                     .is_ok();

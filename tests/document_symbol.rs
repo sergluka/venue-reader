@@ -363,3 +363,22 @@ fn a_header_group_nests_in_the_outline() {
         client.shutdown();
     }
 }
+
+#[test]
+fn fixt_outline_names_groups_and_values_from_their_own_sources() {
+    const LINE: &str = "8=FIXT.1.1|35=D|1128=9|453=1|448=P|447=D|452=1|802=1|523=S|803=1|54=1|";
+    let mut client = open_with(nesting_client(), LINE);
+    let tree = shape(&outline(&mut client));
+    for expected in [
+        "NewOrderSingle (D)",
+        "BeginString (8) = FIXT.1.1",
+        "MsgType (35) = D (NewOrderSingle)",
+        "NoPartyIDs (453) = 1",
+        "NoPartySubIDs (802) = 1",
+        "PartySubIDType (803) = 1 (Firm)",
+        "Side (54) = 1 (Buy)",
+    ] {
+        assert!(tree.contains(expected), "{tree}");
+    }
+    client.shutdown();
+}

@@ -220,9 +220,9 @@ fn collect(
         let entries: Vec<DictionarySpec> = serde_json::from_value(value.clone())
             .map_err(|error| format!("dictionaries: {error}"))?;
         for entry in &entries {
-            if entry.name.trim().is_empty() || entry.path.trim().is_empty() {
-                return Err("dictionaries: name and path must not be blank".into());
-            }
+            entry
+                .validate_shape()
+                .map_err(|error| format!("dictionaries: {error}"))?;
         }
         layer.dictionaries = entries;
         return Ok(());
@@ -419,6 +419,51 @@ mod tests {
     use super::*;
 
     const KNOWN_RULES: &[&str] = &["beginString", "dictionaryVersion", "integrity"];
+
+    #[test]
+    fn application_defaults_merge_globally_and_per_document_including_null() {
+        let global = parse_client(json!({"defaultApplVerID":"FIX.5.0"})).unwrap();
+        let project = parse_structured(
+            json!({"defaultApplVerID":"FIX.5.0SP2"}),
+            Origin::new(SourceKind::Project, "project"),
+            true,
+        )
+        .unwrap();
+        let modeline = modeline::parse(&[b"# fix: defaultApplVerID=null"], "file:///test.fix");
+        assert!(modeline.warnings.is_empty());
+        let resolved = merge(&[global.clone(), project.clone()], KNOWN_RULES).unwrap();
+        assert_eq!(
+            resolved.config.default_appl_ver_id.as_deref(),
+            Some("FIX.5.0SP2")
+        );
+        assert_eq!(
+            resolved.sources["defaultApplVerID"].layer,
+            SourceKind::Project
+        );
+        let cleared = merge(&[global, project, modeline], KNOWN_RULES).unwrap();
+        assert_eq!(cleared.config.default_appl_ver_id, None);
+        assert_eq!(cleared.values["defaultApplVerID"], Value::Null);
+        assert!(!cleared.values.contains_key("defaultVersion"));
+    }
+
+    #[test]
+    fn default_version_is_an_unknown_key_without_a_deprecated_alias() {
+        assert!(catalog::find("defaultVersion").is_none());
+        let client = parse_client(json!({"defaultVersion":"FIX.4.2"})).unwrap();
+        assert!(client.candidates.is_empty());
+        let resolved = merge(&[client], KNOWN_RULES).unwrap();
+        assert!(!resolved.values.contains_key("defaultVersion"));
+        assert!(parse_structured(
+            json!({"defaultVersion":"FIX.4.2"}),
+            Origin::new(SourceKind::UserFile, "user"),
+            true
+        )
+        .is_err());
+        let modeline = modeline::parse(&[b"# fix: defaultVersion=FIX.4.2"], "file:///test.fix");
+        assert!(modeline.candidates.is_empty());
+        assert_eq!(modeline.warnings.len(), 1);
+        assert!(modeline.warnings[0].message.contains("unknown setting"));
+    }
 
     #[test]
     fn defaults_have_every_catalog_leaf_without_foreign_settings() {

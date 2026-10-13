@@ -90,7 +90,7 @@ fn render_placeholder(
         return;
     };
     if fmt == Fmt::Name {
-        if let Some(label) = analysis.enum_label(field) {
+        if let Some(label) = super::value_name(analysis, field) {
             out.push_str(label);
             return;
         }
@@ -110,7 +110,7 @@ fn raw<'a>(line: &'a [u8], analysis: &MessageAnalysis, tag: u32) -> Option<&'a s
 
 /// Per-MsgType detail line.
 pub fn details(line: &[u8], analysis: &MessageAnalysis) -> Option<String> {
-    let msg_name = analysis.label(tag::MSG_TYPE)?;
+    let msg_name = analysis.message_definition()?.name();
 
     let text_of = |tag: u32| raw(line, analysis, tag);
     let label_of = |tag: u32| analysis.label(tag);

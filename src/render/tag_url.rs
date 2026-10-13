@@ -19,8 +19,6 @@ const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 /// for 2.7 or 3.0. A table rather than a derivation, because the site's
 /// spelling (`5.0.SP1`) is not a function of the protocol's (`FIX.5.0SP1`).
 ///
-/// `FIXT.1.1` maps to `5.0.SP2`, the tables it resolves to: that tree documents
-/// the session tags as well, while the site's own `fixt1.1` tree has only them.
 fn segment(version: &str) -> Option<&'static str> {
     Some(match version {
         "FIX.4.0" => "4.0",
@@ -30,7 +28,8 @@ fn segment(version: &str) -> Option<&'static str> {
         "FIX.4.4" => "4.4",
         "FIX.5.0" => "5.0",
         "FIX.5.0SP1" => "5.0.SP1",
-        "FIX.5.0SP2" | "FIXT.1.1" => "5.0.SP2",
+        "FIX.5.0SP2" => "5.0.SP2",
+        "FIXT.1.1" => "fixt1.1",
         _ => return None,
     })
 }
@@ -109,6 +108,10 @@ impl TagUrl {
         self.versioned
     }
 
+    pub fn requires_version(&self) -> bool {
+        self.versioned || self.template.contains(FIX_VERSION)
+    }
+
     /// `None` when the template needs a version segment the default site does
     /// not publish, or when the template is empty — which is how a user turns
     /// the link off without turning off hover.
@@ -177,14 +180,12 @@ mod tests {
         }
     }
 
-    /// FIXT.1.1 links into the SP2 tree, the tables it reads — the site's own
-    /// FIXT tree lacks application tags. Asserted separately because its table
-    /// entry is the one that is easy to miss.
+    /// FIXT transport fields link to their own reference pages.
     #[test]
-    fn fixt_links_to_the_tables_it_reads() {
+    fn fixt_links_to_transport_pages() {
         assert_eq!(
             onixs().of("FIXT.1.1", 8).as_deref(),
-            Some("https://www.onixs.biz/fix-dictionary/5.0.SP2/tagNum_8.html")
+            Some("https://www.onixs.biz/fix-dictionary/fixt1.1/tagNum_8.html")
         );
     }
 
@@ -223,17 +224,11 @@ mod tests {
         );
     }
 
-    /// Why `{fixVersion}` exists beside `{version}`: the site's spelling sends
-    /// `FIXT.1.1` to the SP2 tree it reads, and names no version the site does
-    /// not publish. The protocol's own spelling keeps both.
+    /// Both placeholders preserve transport and application identities.
     #[test]
     fn fix_version_keeps_what_the_sites_spelling_drops() {
         let onixs = onixs();
-        assert_eq!(
-            onixs.of("FIXT.1.1", 1),
-            onixs.of("FIX.5.0SP2", 1),
-            "the site's spelling reads FIXT as its tables"
-        );
+        assert_ne!(onixs.of("FIXT.1.1", 1), onixs.of("FIX.5.0SP2", 1));
 
         let own = TagUrl::new("https://fix.internal/{fixVersion}/{tag}");
         assert_eq!(
@@ -247,7 +242,7 @@ mod tests {
         assert_eq!(
             own.of("FIXT.1.1", 1).as_deref(),
             Some("https://fix.internal/FIXT.1.1/1"),
-            "and FIXT keeps its own name rather than the tables it reads"
+            "FIXT keeps its own name"
         );
     }
 

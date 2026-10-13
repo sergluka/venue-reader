@@ -12,6 +12,7 @@ pub enum Scope {
 pub enum Kind {
     Boolean,
     String,
+    ApplicationVersion,
     Unsigned,
     Depth,
     Severity,
@@ -34,7 +35,7 @@ macro_rules! settings {
 }
 
 settings! {
-    ("defaultVersion", Global, String),
+    ("defaultApplVerID", Document, ApplicationVersion),
     ("allowDictionaryPath", Global, Boolean),
     ("documentLink.url", Global, String),
     ("overrides.modeline", Global, Boolean),
@@ -125,6 +126,12 @@ pub fn validate(path: &str, kind: Kind, value: &Value) -> Result<(), String> {
     let valid = match kind {
         Kind::Boolean => value.is_boolean(),
         Kind::String => value.is_string(),
+        Kind::ApplicationVersion => {
+            value.is_null()
+                || value
+                    .as_str()
+                    .is_some_and(|version| crate::dictionary::binding::to_wire(version).is_some())
+        }
         Kind::Unsigned => value.as_u64().is_some(),
         Kind::Depth => matches!(value.as_str(), Some("messages" | "fields" | "full")),
         Kind::Severity => matches!(value.as_str(), Some("error" | "warning" | "info" | "hint")),
@@ -136,9 +143,7 @@ pub fn validate(path: &str, kind: Kind, value: &Value) -> Result<(), String> {
     if path == "limits.documentSymbolItems" && value.as_u64() == Some(0) {
         return Err(format!("{path}: must be at least 1"));
     }
-    if matches!(path, "dictionary" | "defaultVersion")
-        && value.as_str().is_some_and(|text| text.trim().is_empty())
-    {
+    if path == "dictionary" && value.as_str().is_some_and(|text| text.trim().is_empty()) {
         return Err(format!("{path}: must not be blank"));
     }
     if let Some(text) = value.as_str() {

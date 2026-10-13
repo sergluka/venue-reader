@@ -24,7 +24,7 @@ use crate::render::{symbol, Options};
 /// levels of JSON — past the 128 a default `serde_json` accepts, and that is
 /// the parser on both sides of this wire. Anything deeper attaches to the last
 /// representable ancestor instead of growing the tree.
-const MAX_NESTING: u16 = 24;
+const MAX_NESTING: u8 = 24;
 
 /// What the outline needs from configuration, gathered where the config lives.
 #[derive(Clone)]
@@ -502,7 +502,7 @@ fn field_symbol(line: &[u8], message: &MessageAnalysis, at: usize, wanted: &Want
 }
 
 /// One deeper than the instance the count field sits in.
-fn group_depth(message: &MessageAnalysis, owner: Option<u32>) -> u16 {
+fn group_depth(message: &MessageAnalysis, owner: Option<u32>) -> u8 {
     owner.map_or(1, |idx| message.groups[idx as usize].depth + 1)
 }
 

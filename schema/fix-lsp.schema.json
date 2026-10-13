@@ -6,12 +6,6 @@
   "type": "object",
   "additionalProperties": true,
   "properties": {
-    "defaultVersion": {
-      "type": "string",
-      "default": "FIX.4.4",
-      "description": "FIX version used when a message has no (or an unknown) BeginString (tag 8).",
-      "x-fix-lsp-scope": "user-global"
-    },
     "dictionaries": {
       "type": "array",
       "default": [],
@@ -21,7 +15,8 @@
           "path": {
             "type": "string",
             "minLength": 1,
-            "description": "One QuickFIX XML file"
+            "pattern": "\\S",
+            "description": "One QuickFIX XML file: conventional FIX4, FIX5 application with bundled FIXT, or combined FIXT with explicit applicationVersion."
           },
           "name": {
             "type": "string",
@@ -32,16 +27,128 @@
           "default": {
             "type": "boolean",
             "default": false,
-            "description": "Make this definition the version default in this source's scope. FIX version comes only from XML."
+            "description": "Use this binding as an exact identity default after layer precedence. All conflicting effective claims are disabled; named selections remain available."
+          },
+          "transport": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "Bundled identifier or QuickFIX XML file supplying the transport role; registration names are not sources."
+          },
+          "application": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "Bundled identifier or QuickFIX XML file supplying the application role; registration names are not sources."
+          },
+          "applicationVersion": {
+            "type": "string",
+            "enum": [
+              "FIX.2.7",
+              "FIX.3.0",
+              "FIX.4.0",
+              "FIX.4.1",
+              "FIX.4.2",
+              "FIX.4.3",
+              "FIX.4.4",
+              "FIX.5.0",
+              "FIX.5.0SP1",
+              "FIX.5.0SP2",
+              "FIX.Latest"
+            ],
+            "description": "Canonical application release; required for combined FIXT sources. Must agree with application XML release metadata."
+          },
+          "extensionPack": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "Exact application extension pack; absence differs from zero."
+          },
+          "customVersion": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "Exact custom application identity."
           }
         },
         "required": [
-          "path",
           "name"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "path"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "transport"
+                  ]
+                },
+                {
+                  "required": [
+                    "application"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "required": [
+              "transport"
+            ],
+            "not": {
+              "required": [
+                "path"
+              ]
+            }
+          }
+        ],
+        "allOf": [
+          {
+            "if": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "path"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "application"
+                    ]
+                  }
+                ]
+              }
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "applicationVersion"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "extensionPack"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "customVersion"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
       },
-      "description": "External XML definitions require global allowDictionaryPath. Definitions accumulate under unique names; a stronger source may replace a version default under a distinct name."
+      "description": "Bindings accumulate under unique names. A stronger source replaces claims for the same exact identity before conflict checks. File sources require global allowDictionaryPath; bundled sources do not."
     },
     "inlayHints": {
       "type": "object",
@@ -317,6 +424,29 @@
       "default": false,
       "description": "Global-only filesystem permission for every external dictionary. Project TOML and modelines cannot enable it.",
       "x-fix-lsp-scope": "user-global"
+    },
+    "defaultApplVerID": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        null,
+        "FIX.2.7",
+        "FIX.3.0",
+        "FIX.4.0",
+        "FIX.4.1",
+        "FIX.4.2",
+        "FIX.4.3",
+        "FIX.4.4",
+        "FIX.5.0",
+        "FIX.5.0SP1",
+        "FIX.5.0SP2",
+        "FIX.Latest"
+      ],
+      "default": null,
+      "description": "Canonical application release used when ApplVerID(1128) is absent. A selected complete pair supplies its identity first. No application default is built in.",
+      "x-fix-lsp-scope": "user-document"
     }
   },
   "$defs": {

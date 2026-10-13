@@ -21,11 +21,11 @@ follows is what is easy to get wrong here and not visible from any one file.
 
 ## Invariants
 
-- **`codec/` is configuration-free.** Bytes and a `Dict` in, a `LineAnalysis`
+- **`codec/` is configuration-free.** Bytes and resolved dictionary sources in, a `LineAnalysis`
   out. Anything that needs `Config` or the `Registry` belongs in `ctx.rs`, which
-  is the glue that picks the dictionary for a line.
+  resolves transport/application identity for a line.
 - **`LineAnalysis` holds no rendered strings** — only spans, dictionary indices,
-  and the `Dict` they were resolved against. Names, enum labels, group paths,
+  and the source owners they were resolved against. Names, enum labels, group paths,
   summaries and hover markdown are produced at request time. This is what keeps
   rendering options out of the cache key; putting a `String` in there quietly
   breaks that.
@@ -54,10 +54,10 @@ follows is what is easy to get wrong here and not visible from any one file.
   unbounded, and the forty-screen sequence 1.77×, which the bound does not
   reach. `benches/rss_scroll.rs` gates the scroll as a budget.
 - **A `FieldIdx`, `GroupIdx` or `EnumIdx` means nothing except against the `Dict`
-  that produced it.** That dictionary is a per-*line* fact, taken from
-  BeginString(8), so one document holds analyses resolved against different
-  ones. `LineAnalysis` carries its own; never pair an index with a dictionary
-  from somewhere else.
+  that produced it.** Every reference carries a transport/application owner;
+  `LineAnalysis` retains both sources. FIX4 may use the same physical source
+  twice; FIXT resolves application identity separately. Never pair an index
+  with a dictionary from another source or line.
 - **`xml/` is the source of truth for the bundled dictionaries.** `build.rs`
   generates the static tables into `OUT_DIR`; the generated code is never
   committed, and editing `xml/` is what changes them.
@@ -65,9 +65,8 @@ follows is what is easy to get wrong here and not visible from any one file.
   index is stored in 16 bits with the top value reserved (`codec::Packed16`),
   so a dictionary collection that would overrun it is refused while parsing,
   where the message can name the file and the tag. `build.rs` asserts the same
-  bound on the two *merged* unions it generates — `Dict::field_idx` and
-  `Dict::enum_idx` index into those, so checking each source dictionary proves
-  nothing about them.
+  bound on the compressed application unions and standalone transport tables
+  it generates. Source ownership consumes no packed-index bits.
 - **`schema::pack` is the only producer of a `Schema`.** Header, trailer, every
   message and every group are spans over the same flat arrays, and `pack` is
   where the sorting, the `order` and `nested` tables, the name interning and the
@@ -80,9 +79,8 @@ follows is what is easy to get wrong here and not visible from any one file.
   set, a counter list) is a cache of the schema, never a source. The dictionary
   is the whole truth: a scope declared empty *is* empty, a file that would have
   left a part undescribed was refused or loaded with a `Fault`, and there is no
-  completeness flag for a consumer to consult. The one exception is
-  `has_session_layer()`, a build-time mark on bundled FIX.5.0 and FIX.5.0SP1
-  that goes with FIX 5 handling.
+  completeness flag for a consumer to consult. Transport scopes are read from
+  the transport source; application scopes are read from the application source.
 - **Positions are bytes inside the crate** and become LSP `Position`s only at the
   protocol boundary, under the encoding negotiated in `initialize`. A span that
   leaks out unconverted is wrong for every non-ASCII line.
@@ -103,6 +101,16 @@ follows is what is easy to get wrong here and not visible from any one file.
   cannot tell them apart. An edit made while a batch that includes its document
   is in flight is held and walked once at the commit, so no walk runs under
   rules the batch is about to replace.
+
+## Comments
+
+- Document public structs and their public fields with brief `///` comments when
+  their meaning is not clear from the names and types. Explain what the data
+  represents, not merely what the declaration says.
+- Skip comments for self-documenting code. For example, `pub tag: u32` needs no
+  `// tag` comment, while `pub added: &'static str` needs to explain what was
+  introduced and what the string represents, such as
+  `/// FIX release that introduced this field.`
 
 ## Naming a tag
 

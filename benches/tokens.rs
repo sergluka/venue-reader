@@ -1,5 +1,4 @@
-//! Semantic-token classification over a viewport: `analyze` does not reach it, and the per-field
-//! header and trailer check (`Scope::reaches`) is paid here.
+//! Classification over a viewport using source ownership resolved during analysis.
 
 mod common;
 

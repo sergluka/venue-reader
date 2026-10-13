@@ -356,9 +356,10 @@ fn walk(job: &Job, reports: &Sender<Report>) -> usize {
         // populate the cache. This is the caller that rule exists for.
         let analysis = analyze(&line.bytes, &job.snapshot.ctx);
         let scope = Scope {
-            label: analysis
+            labels: analysis
                 .message()
-                .and_then(|message| job.snapshot.names.of(&message.version)),
+                .map(|message| job.snapshot.names.of_analysis(message))
+                .unwrap_or_default(),
             // What the cap would refuse is only counted. Fixed for the whole
             // line, so one line still renders all it finds.
             count_from: quota.refused_from(),
@@ -844,7 +845,7 @@ mod tests {
         let doc = Document::open(text.as_bytes(), 1, ctx);
         Snapshot {
             names: Arc::new(crate::ctx::DictionaryNames::new(
-                Arc::new(crate::dictionary::Registry::bundled_only()),
+                &crate::dictionary::Registry::bundled_only(),
                 None,
             )),
             lines: doc.lines.clone(),
@@ -1007,6 +1008,7 @@ mod tests {
             "integrity".into(),
             crate::config::RuleSetting::Enabled(false),
         );
+        job.snapshot.ctx = crate::ctx::Ctx::for_test_selected("FIX.4.3");
         job.snapshot.rules = Arc::new(Registry::with_selected_version(&config, Some("FIX.4.3")));
         for _ in 0..2 {
             let (sender, receiver) = unbounded();
@@ -1127,6 +1129,9 @@ mod tests {
     }
 
     fn with_rules(mut job: Job, config: &Diagnostics, selected: Option<&str>) -> Job {
+        if let Some(selected) = selected {
+            job.snapshot.ctx = crate::ctx::Ctx::for_test_selected(selected);
+        }
         job.snapshot.rules = Arc::new(Registry::with_selected_version(config, selected));
         job
     }

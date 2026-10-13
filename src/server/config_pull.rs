@@ -1,7 +1,7 @@
 //! Configuration batches commit only fully prepared snapshots.
 //!
 //! The main loop owns the committed configuration and permits one batch at a
-//! time. [`super::external`] reads filesystem-backed sources on its worker;
+//! time. `super::external` reads filesystem-backed sources on its worker;
 //! results return here for freshness checks and atomic commit. Document changes
 //! wait behind the active batch, while global updates coalesce to the newest
 //! request. Invalid client configuration keeps the last committed state live.
@@ -582,7 +582,7 @@ impl ServerState {
                     )
             };
             let names = Arc::new(crate::ctx::DictionaryNames::new(
-                document.project.registry.clone(),
+                &document.project.registry,
                 document.choice.as_ref(),
             ));
             let document = Arc::new(DocumentConfig {
@@ -813,7 +813,7 @@ impl ServerState {
         self.config.session = Some(raw);
         self.config.session_choice = Some(choice.clone());
         self.config.session_revision += 1;
-        let result = json!({"name":choice.name,"version":choice.version,"source":choice.source});
+        let result = super::execute_command::dictionary_details(&choice);
         self.config.waiting.extend(self.docs.keys().cloned());
         self.start_waiting_documents();
         Ok(result)

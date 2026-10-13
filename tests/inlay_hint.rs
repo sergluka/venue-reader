@@ -6,7 +6,7 @@
 
 mod harness;
 
-use harness::{TestClient, Workspace};
+use harness::{hint_labels, TestClient, Workspace};
 use serde_json::{json, Value};
 
 const URI: &str = "file:///a.fix";
@@ -54,20 +54,6 @@ fn over(client: &mut TestClient, from: (u32, u32), to: (u32, u32)) -> Vec<Value>
         .as_array()
         .cloned()
         .unwrap_or_default()
-}
-
-fn labels(hints: &[Value]) -> Vec<String> {
-    hints
-        .iter()
-        .map(|hint| match &hint["label"] {
-            Value::String(text) => text.clone(),
-            Value::Array(parts) => parts
-                .iter()
-                .map(|part| part["value"].as_str().unwrap_or_default())
-                .collect(),
-            other => panic!("a label is a string or parts: {other}"),
-        })
-        .collect()
 }
 
 #[test]
@@ -136,7 +122,7 @@ fn a_tag_the_dictionary_does_not_define_draws_nothing() {
     );
     let hints = over(&mut client, (0, 0), (0, 400));
     assert_eq!(
-        labels(&hints),
+        hint_labels(&hints),
         ["<BeginString>", "<MsgType>", "<CheckSum>"],
         "9999 is on the line and has no label"
     );
@@ -148,7 +134,7 @@ fn a_tag_the_dictionary_does_not_define_draws_nothing() {
 /// its eager tooltip is the hover of the same field, which explains the mark.
 #[test]
 fn a_tag_standard_fix_names_and_the_dictionary_lacks_is_marked() {
-    const LINE: &str = "8=FIX.5.0|35=0|1328=x|10=1|";
+    const LINE: &str = "8=FIXT.1.1|35=D|1128=7|1328=x|10=1|";
     let mut client = open_with(
         json!({ "inlayHints": { "tagNames": { "enabled": true, "format": "<{}>" } } }),
         plain_caps(),
@@ -156,8 +142,14 @@ fn a_tag_standard_fix_names_and_the_dictionary_lacks_is_marked() {
     );
     let hints = over(&mut client, (0, 0), (0, 400));
     assert_eq!(
-        labels(&hints),
-        ["<BeginString>", "<MsgType>", "<RejectText?>", "<CheckSum>"]
+        hint_labels(&hints),
+        [
+            "<BeginString>",
+            "<MsgType>",
+            "<ApplVerID>",
+            "<RejectText?>",
+            "<CheckSum>"
+        ]
     );
     let tag_end = LINE.find("1328=").unwrap() as u32 + 4;
     let marked = hints
@@ -178,7 +170,7 @@ fn a_tag_standard_fix_names_and_the_dictionary_lacks_is_marked() {
 /// The same hint through `inlayHint/resolve`, when the client defers tooltips.
 #[test]
 fn a_marked_hints_tooltip_resolves_to_the_hover() {
-    const LINE: &str = "8=FIX.5.0|35=0|1328=x|10=1|";
+    const LINE: &str = "8=FIXT.1.1|35=D|1128=7|1328=x|10=1|";
     let mut client = TestClient::start();
     client.initialize_with(json!({
         "capabilities": {
@@ -221,7 +213,7 @@ fn a_marked_tag_inside_a_group_draws_the_mark_not_a_path() {
     );
     let hints = over(&mut client, (0, 0), (0, 400));
     assert_eq!(
-        labels(&hints),
+        hint_labels(&hints),
         [
             "<BeginString>",
             "<MsgType>",
@@ -294,7 +286,7 @@ fn the_summary_is_its_own_hint_when_the_channel_is_on() {
         .expect("a summary hint");
     assert_eq!(summary["position"]["character"], 0);
     assert_eq!(summary["paddingRight"], true);
-    assert!(!labels(std::slice::from_ref(summary))[0].is_empty());
+    assert!(!hint_labels(std::slice::from_ref(summary))[0].is_empty());
     client.shutdown();
 }
 
@@ -459,20 +451,26 @@ fn a_change_that_alters_the_channels_asks_for_a_refresh() {
             "the reference link an eager tooltip embeds",
         ),
         (
-            // A new dictionary renames every label without touching a setting;
-            // `defaultVersion` is the cheapest way to move the interpretation,
-            // feeding `CtxFingerprint` and nothing else the comparison holds.
-            json!({ "defaultVersion": "FIX.4.2" }),
+            // An application default changes FIXT interpretation.
+            json!({ "defaultApplVerID": "FIX.5.0SP2" }),
             "how the line is interpreted",
         ),
     ];
 
     for (settings, what) in cases {
-        let changes_context = settings.get("defaultVersion").is_some();
+        let changes_context = settings.get("defaultApplVerID").is_some();
         let mut client = TestClient::start();
         client.initialize_caps(refresh_caps());
         client.answer_base_pull();
-        client.did_open(URI, HEARTBEAT, 1);
+        client.did_open(
+            URI,
+            if changes_context {
+                "8=FIXT.1.1|35=D|54=1|"
+            } else {
+                HEARTBEAT
+            },
+            1,
+        );
         client.drain_server_methods(std::time::Duration::from_millis(20));
 
         client.notify(
@@ -794,5 +792,52 @@ fn a_column_is_not_a_byte_offset_when_the_line_is_not_ascii() {
         prefix.len(),
         "the fixture must make bytes and columns differ, or it proves nothing"
     );
+    client.shutdown();
+}
+
+#[test]
+fn fixt_value_hints_and_summary_use_the_application_message() {
+    for code in ["7", "8", "9"] {
+        let line = format!("8=FIXT.1.1|35=D|1128={code}|54=1|38=2|55=SYNTHETIC|40=2|59=0|44=10|");
+        let mut client = open_with(
+            json!({
+                "inlayHints": { "enumValues": { "enabled": true } },
+                "messageSummary": { "channels": { "inlayHints": true }, "template": "{35:name} ({35})" },
+            }),
+            plain_caps(),
+            &line,
+        );
+        let hints = over(&mut client, (0, 0), (0, 400));
+        let names = hint_labels(&hints);
+        assert!(names.contains(&"(NewOrderSingle)".to_owned()), "{names:?}");
+        assert!(names.contains(&"(Buy)".to_owned()), "{names:?}");
+        assert!(
+            names.iter().any(|name| name.contains("NewOrderSingle (D)")),
+            "{names:?}"
+        );
+        client.shutdown();
+    }
+}
+
+#[test]
+fn unresolved_application_does_not_inherit_a_transport_msg_type_enum() {
+    const LINE: &str = "8=FIXT.1.1|35=D|54=1|";
+    let mut client = open_with(
+        json!({
+            "inlayHints": { "enumValues": { "enabled": true } },
+            "messageSummary": {"channels": {"inlayHints": true}, "template": "{35:name|unresolved}"},
+        }),
+        plain_caps(),
+        LINE,
+    );
+    let hints = over(&mut client, (0, 0), (0, 400));
+    let names = hint_labels(&hints);
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.contains("NewOrderSingle") || name.contains("Buy")),
+        "{names:?}"
+    );
+    assert_eq!(names, ["D"]);
     client.shutdown();
 }

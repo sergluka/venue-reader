@@ -22,7 +22,7 @@ fn examples(language: &str) -> Vec<&'static str> {
 #[test]
 fn readme_toml_examples_match_current_source_parsers() {
     let blocks = examples("toml");
-    assert_eq!(blocks.len(), 5);
+    assert_eq!(blocks.len(), 11);
     for example in blocks {
         // Dispatch on the project file name, which is fixed. The personal file's
         // location is not, so the example header must stay free to change.
@@ -91,4 +91,54 @@ fn readme_modelines_are_valid_together_at_one_level() {
         layer.get("dictionary"),
         Some(&Value::String("FIX.4.4".into()))
     );
+}
+
+#[test]
+fn readme_registration_examples_cover_each_binding_form() {
+    let example = examples("toml")
+        .into_iter()
+        .find(|example| example.contains("name = \"custom-pair\""))
+        .expect("binding examples");
+    let parsed =
+        project::parse(example, Path::new("/work/.fix-lsp.toml")).expect("project bindings");
+    assert!(parsed.layer.warnings.is_empty());
+
+    let entries = &parsed.layer.dictionaries;
+    let named = |name: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .expect("documented binding")
+    };
+    assert_eq!(
+        named("custom44").path.as_deref(),
+        Some("dict/custom-fix44.xml")
+    );
+    assert_eq!(
+        named("custom-sp2").path.as_deref(),
+        Some("dict/FIX50SP2.xml")
+    );
+
+    let pair = named("custom-pair");
+    assert!(pair.path.is_none());
+    assert_eq!(pair.transport.as_deref(), Some("dict/FIXT11.xml"));
+    assert_eq!(pair.application.as_deref(), Some("dict/FIX50SP2.xml"));
+
+    let family = named("custom-transport");
+    assert!(family.path.is_none());
+    assert_eq!(family.transport.as_deref(), Some("dict/FIXT11.xml"));
+    assert!(family.application.is_none());
+    assert!(family.application_version.is_none());
+
+    let combined = named("combined");
+    assert_eq!(combined.path.as_deref(), Some("dict/combined.xml"));
+    assert_eq!(combined.application_version.as_deref(), Some("FIX.5.0SP2"));
+    assert!(combined.extension_pack.is_none());
+    assert!(combined.custom_version.is_none());
+
+    let modern = named("fix44-latest");
+    assert_eq!(modern.transport.as_deref(), Some("FIX.4.4"));
+    assert_eq!(modern.application.as_deref(), Some("dict/latest.xml"));
+    assert_eq!(modern.application_version.as_deref(), Some("FIX.Latest"));
+    assert!(entries.iter().all(|entry| !entry.default));
 }

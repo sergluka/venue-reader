@@ -472,7 +472,7 @@ fn finding(code: &str, severity: u64) -> (String, u64, String) {
 }
 
 #[test]
-fn bundled_dictionaries_without_a_session_layer_publish_no_unknown_message_types() {
+fn unsupported_dictionary_names_on_the_wire_publish_no_unknown_message_types() {
     let mut client = TestClient::start();
     open(
         &mut client,
@@ -480,6 +480,13 @@ fn bundled_dictionaries_without_a_session_layer_publish_no_unknown_message_types
     );
     let published = client.wait_for("textDocument/publishDiagnostics");
     assert_eq!(unknown_findings(&published), []);
+    assert_eq!(
+        codes(&published)
+            .iter()
+            .filter(|code| code.as_str() == "unknownVersion")
+            .count(),
+        4
+    );
     client.shutdown();
 }
 
@@ -724,7 +731,7 @@ fn info_findings_never_keep_an_error_out() {
     let mut client = TestClient::start();
     client.initialize_caps(TestClient::caps_with_pull());
     client.answer_base_pull();
-    let venue = repaired("8=FIX.4.4|9=0|35=0|9000=a|9000=b|10=000|");
+    let venue = repaired("8=FIX.4.4|9=0|35=D|9000=a|9000=b|10=000|");
     let text = [venue.as_str(), &venue, BAD_BOTH, &venue].join("\n");
     pull(
         &mut client,
@@ -900,6 +907,145 @@ fn no_publish_ever_carries_a_version_the_document_has_left() {
                 "a publish about text that has moved: {params}"
             );
         }
+    }
+    client.shutdown();
+}
+
+#[test]
+fn fixt_application_tables_publish_unknown_types_without_a_session_layer() {
+    let mut client = TestClient::start();
+    open(
+        &mut client,
+        "8=FIXT.1.1|35=U1|1128=7|\n8=FIXT.1.1|35=U1|1128=8|\n8=FIXT.1.1|35=U1|1128=9|",
+    );
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    assert_eq!(
+        unknown_findings(&published),
+        [
+            finding("unknownMsgType", 3),
+            finding("unknownMsgType", 3),
+            finding("unknownMsgType", 3)
+        ]
+    );
+    assert!(!codes(&published)
+        .iter()
+        .any(|code| code == "unknownVersion"));
+    client.shutdown();
+}
+
+#[test]
+fn a_logon_does_not_supply_an_application_default_to_another_line() {
+    let mut client = TestClient::start();
+    open(
+        &mut client,
+        "8=FIXT.1.1|35=A|1137=9|\n8=FIXT.1.1|35=D|55=X|9000=x|",
+    );
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    assert_eq!(unknown_findings(&published), []);
+    let problems = published["diagnostics"].as_array().unwrap();
+    let version_problems: Vec<_> = problems
+        .iter()
+        .filter(|diagnostic| diagnostic["code"] == "unknownVersion")
+        .collect();
+    assert_eq!(version_problems.len(), 1);
+    assert_eq!(version_problems[0]["range"]["start"]["line"], 1);
+    client.shutdown();
+}
+
+#[test]
+fn administrative_selectors_are_reported_without_an_application_default() {
+    let mut client = TestClient::start();
+    open(&mut client, "8=FIXT.1.1|35=0|1128=9|");
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    let problems = published["diagnostics"].as_array().unwrap();
+    let problem = problems
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "unknownVersion")
+        .unwrap();
+    assert_eq!(
+        problem["message"],
+        "ApplVerID(1128) is prohibited on an administrative message"
+    );
+    assert_eq!(unknown_findings(&published), []);
+    client.shutdown();
+}
+
+#[test]
+fn missing_message_type_and_integrity_fields_keep_their_existing_rule_controls() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    client.did_open(URI, "8=FIX.4.4|55=X|", 1);
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    let mut found = codes(&published);
+    found.sort();
+    assert_eq!(found, ["bodyLength", "checkSum", "missingMsgType"]);
+    let problem = published["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "missingMsgType")
+        .unwrap();
+    assert_eq!(problem["data"]["rule"], "unknownMsgType");
+    pull(
+        &mut client,
+        json!({"diagnostics": {"rules": {"unknownMsgType": false}}}),
+    );
+    let notes = client.drain_notifications(QUIET);
+    let published = last_publish(&notes, URI).expect("republished");
+    let mut found = codes(&published);
+    found.sort();
+    assert_eq!(found, ["bodyLength", "checkSum"]);
+    client.shutdown();
+}
+
+#[test]
+fn disabling_resolution_diagnostics_never_selects_an_application() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    client.did_open(URI, "8=FIXT.1.1|35=U1|9000=x|", 1);
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    assert!(codes(&published)
+        .iter()
+        .any(|code| code == "unknownVersion"));
+    assert_eq!(unknown_findings(&published), []);
+    pull(
+        &mut client,
+        json!({"diagnostics": {"rules": {"unknownVersion": false}}}),
+    );
+    let notes = client.drain_notifications(QUIET);
+    let published = last_publish(&notes, URI).expect("republished");
+    assert!(!codes(&published)
+        .iter()
+        .any(|code| code == "unknownVersion"));
+    assert_eq!(unknown_findings(&published), []);
+    client.shutdown();
+}
+
+#[test]
+fn invalid_and_repeated_selectors_publish_resolution_errors_without_body_guesses() {
+    let lines = [
+        "8=FIXT.1.1|35=D|1128=99|9000=x|",
+        "8=FIXT.1.1|35=D|1128=9|1128=9|9000=x|",
+        "8=FIX.4.4|8=FIX.4.4|35=D|9000=x|",
+        "8=FIX.4.4|35=D|35=D|9000=x|",
+        "8=FIXT.1.1|35=D|1128=9|1156=0|1156=0|9000=x|",
+        "8=FIXT.1.1|35=D|1128=9|1129=sample|1129=sample|9000=x|",
+        "8=FIXT.1.1|35=D|1128=9|1156=4294967295|9000=x|",
+    ];
+    let mut client = TestClient::start();
+    open(&mut client, &lines.join("\n"));
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    assert_eq!(unknown_findings(&published), []);
+    let problems = published["diagnostics"].as_array().unwrap();
+    let version_problems: Vec<_> = problems
+        .iter()
+        .filter(|diagnostic| diagnostic["code"] == "unknownVersion")
+        .collect();
+    assert_eq!(version_problems.len(), lines.len());
+    for (line, problem) in version_problems.iter().enumerate() {
+        assert_eq!(problem["range"]["start"]["line"], line);
     }
     client.shutdown();
 }

@@ -2,12 +2,13 @@
 //! dictionaries for structure, enriched with metadata projected from FIX
 //! Orchestra (see `xml/README.md`).
 //!
-//! Fields and enums are merged across all bundled versions into one `TAGS`
-//! table: the base row holds the latest version's values, a presence mask says
+//! Application fields and enums share a `TAGS` table across eight releases:
+//! the base row holds the latest version's values, a presence mask says
 //! which versions define the tag, and sparse overrides record where an older
 //! version differs (name, type, description, lifecycle attributes). Groups,
 //! messages and the scoped schema stay per version. The XML is the source of
-//! truth; the generated file is never committed.
+//! truth; the generated file is never committed. FIXT has independent field/enum
+//! tables and reuses the same schema generator without a chronology mask.
 
 #[allow(dead_code)]
 #[path = "src/dictionary/bundle.rs"]
@@ -47,20 +48,8 @@ const BUNDLED_VERSIONS: [(&str, &str); 8] = [
     ("FIX.5.0SP2", "FIX50SP2.xml"),
 ];
 
-/// The session layer `8=FIXT.1.1` needs; `bundle::assemble` folds it into
-/// the version the `FIXT.1.1` alias resolves to.
+/// Standalone transport, outside the application chronology.
 const SESSION: &str = "FIXT11.xml";
-
-/// The versions whose QuickFIX/J file declares a header and a trailer, or
-/// gets them from `SESSION`.
-const WITH_SESSION_LAYER: [&str; 6] = [
-    "FIX.4.0",
-    "FIX.4.1",
-    "FIX.4.2",
-    "FIX.4.3",
-    "FIX.4.4",
-    "FIX.5.0SP2",
-];
 
 const METADATA: &str = "FIXLatest-metadata.xml";
 
@@ -104,25 +93,23 @@ fn main() {
 
     let metadata = bundle::parse_metadata(&read(&standard, METADATA))
         .unwrap_or_else(|e| panic!("bundled metadata: {e}"));
-    let session = parse::parse_quickfix_bytes(&read(&standard, SESSION))
+    let mut transport = parse::parse_quickfix_bytes(&read(&standard, SESSION))
         .unwrap_or_else(|e| panic!("bundled session layer: {e}"));
-    assert_no_faults(SESSION, &session.faults);
+    assert_no_faults(SESSION, &transport.faults);
 
     // The eight parses are independent and dominate the build script's time.
-    let dicts: Vec<bundle::Assembled> = std::thread::scope(|scope| {
+    let dicts: Vec<ParsedDict> = std::thread::scope(|scope| {
         let handles: Vec<_> = BUNDLED_VERSIONS
             .iter()
             .map(|&(version, file)| {
-                let (standard, metadata, session) = (&standard, &metadata, &session);
+                let (standard, metadata) = (&standard, &metadata);
                 scope.spawn(move || {
-                    let dict = parse::parse_quickfix_bytes(&read(standard, file))
+                    let mut dict = parse::parse_quickfix_bytes(&read(standard, file))
                         .unwrap_or_else(|e| panic!("bundled dictionary {version}: {e}"));
                     assert_no_faults(file, &dict.faults);
-                    let assembled = bundle::assemble(version, dict, session, metadata)
-                        .unwrap_or_else(|e| panic!("bundled dictionary {version}: {e}"));
-                    assert_no_faults(file, &assembled.dict.faults);
-                    assert_session_layer(version, &assembled);
-                    assembled
+                    bundle::enrich(&mut dict, metadata, version);
+                    assert_no_faults(file, &dict.faults);
+                    dict
                 })
             })
             .collect();
@@ -130,7 +117,8 @@ fn main() {
     });
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-    let generated = generate(&dicts, &metadata);
+    bundle::enrich(&mut transport, &metadata, "FIXT.1.1");
+    let generated = generate(&dicts, &transport, &metadata);
     // The analysis cache keys on this: editing `xml/` regenerates the tables
     // without moving the crate version, and stale caches would survive.
     let source = format!(
@@ -149,24 +137,6 @@ fn assert_no_faults(file: &str, faults: &[model::Fault]) {
         "bundled {file} has faults:\n{}",
         faults.join("\n")
     );
-}
-
-/// FIX.5.0 and FIX.5.0SP1 have no session layer until FIX 5 handling; every
-/// other version has a header and a trailer.
-fn assert_session_layer(version: &str, assembled: &bundle::Assembled) {
-    let expected = WITH_SESSION_LAYER.contains(&version);
-    assert_eq!(
-        assembled.session_layer, expected,
-        "{version}: the session-layer mark"
-    );
-    let schema = assembled.dict.schema.as_schema();
-    for (part, scope) in [("header", schema.header()), ("trailer", schema.trailer())] {
-        assert_eq!(
-            scope.declared().next().is_some(),
-            expected,
-            "{version}: a {part} is declared exactly where the session layer is"
-        );
-    }
 }
 
 fn lit(s: &str) -> String {
@@ -419,8 +389,7 @@ fn schema_tables(out: &mut String, id: &str, schema: &schema::SchemaBuf) -> Stri
     )
 }
 
-fn generate(assembled: &[bundle::Assembled], metadata: &bundle::Metadata) -> String {
-    let dicts: Vec<&ParsedDict> = assembled.iter().map(|assembled| &assembled.dict).collect();
+fn generate(dicts: &[ParsedDict], transport: &ParsedDict, metadata: &bundle::Metadata) -> String {
     let mut out = String::new();
     writeln!(out, "// @generated by build.rs from xml/ — do not edit.").unwrap();
 
@@ -543,12 +512,28 @@ fn generate(assembled: &[bundle::Assembled], metadata: &bundle::Metadata) -> Str
         writeln!(out, "    ] }},").unwrap();
     }
     writeln!(out, "];").unwrap();
-    latest_tables(&mut out, &tags, metadata, &latest_names);
+    let known: BTreeSet<u32> = tags
+        .iter()
+        .copied()
+        .chain(transport.fields.iter().map(|field| field.tag))
+        .collect();
+    latest_tables(&mut out, &known, metadata, &latest_names);
 
     // --- per-version groups, messages, dict ------------------------------
-    for (ordinal, ((version, _), bundled)) in BUNDLED_VERSIONS.iter().zip(assembled).enumerate() {
-        let dict = &bundled.dict;
+    for (ordinal, (version, dict)) in BUNDLED_VERSIONS
+        .iter()
+        .map(|(version, _)| *version)
+        .zip(dicts)
+        .chain(std::iter::once(("FIXT.1.1", transport)))
+        .enumerate()
+    {
         let id = ident(version);
+        let storage = if ordinal < BUNDLED_VERSIONS.len() {
+            format!("StaticFields::Application {{ mask_bit: {ordinal} }}")
+        } else {
+            standalone_fields(&mut out, &id, dict);
+            format!("StaticFields::Standalone(FIELDS_{id})")
+        };
         let schema = schema_tables(&mut out, &id, &dict.schema);
         writeln!(out, "static GROUPS_{id}: &[StaticGroup] = &[").unwrap();
         for g in &dict.groups {
@@ -577,16 +562,37 @@ fn generate(assembled: &[bundle::Assembled], metadata: &bundle::Metadata) -> Str
         writeln!(out, "];").unwrap();
         writeln!(
             out,
-            "pub static DICT_{id}: StaticDict = StaticDict {{ version: {}, mask_bit: {ordinal}, schema: {schema}, session_layer: {}, groups: GROUPS_{id}, messages: MESSAGES_{id} }};",
-            lit(version), bundled.session_layer
+            "pub static DICT_{id}: StaticDict = StaticDict {{ version: {}, fields: {storage}, schema: {schema}, groups: GROUPS_{id}, messages: MESSAGES_{id} }};",
+            lit(version)
         )
         .unwrap();
     }
 
     writeln!(out, "pub static BUNDLED: &[(&str, &StaticDict)] = &[").unwrap();
-    for (version, _) in BUNDLED_VERSIONS {
+    for version in BUNDLED_VERSIONS
+        .iter()
+        .map(|(version, _)| *version)
+        .chain(["FIXT.1.1"])
+    {
         writeln!(out, "    ({}, &DICT_{}),", lit(version), ident(version)).unwrap();
     }
     writeln!(out, "];").unwrap();
     out
+}
+
+fn standalone_fields(out: &mut String, id: &str, dict: &ParsedDict) {
+    assert!(dict.fields.len() <= parse::MAX_ITEMS);
+    writeln!(out, "static FIELDS_{id}: &[StandaloneField] = &[").unwrap();
+    for field in &dict.fields {
+        assert!(field.enums.len() <= parse::MAX_ITEMS);
+        writeln!(out, "StandaloneField {{ tag: {}, name: {}, datatype: {}, datatype_class: {}, description: {}, added: {}, deprecated: {}, added_ep: {}, allows_other_values: {}, enums: &[",
+            field.tag, lit(&field.name), lit(&field.datatype), class(field.datatype_class),
+            lit(&field.description), lit(&field.added), lit(&field.deprecated), field.added_ep, field.allows_other_values).unwrap();
+        for value in &field.enums {
+            writeln!(out, "StandaloneEnum {{ value: {}, name: {}, description: {}, added: {}, added_ep: {} }},",
+                lit(&value.value), lit(&value.name), lit(&value.description), lit(&value.added), value.added_ep).unwrap();
+        }
+        writeln!(out, "] }},").unwrap();
+    }
+    writeln!(out, "];").unwrap();
 }

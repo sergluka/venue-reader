@@ -20,6 +20,19 @@ pub const TEXT: u32 = 58;
 pub const TIME_IN_FORCE: u32 = 59;
 pub const GAP_FILL_FLAG: u32 = 123;
 pub const EXEC_TYPE: u32 = 150;
+pub const APPL_VER_ID: u32 = 1128;
+pub const CSTM_APPL_VER_ID: u32 = 1129;
+pub const APPL_EXT_ID: u32 = 1156;
+
+/// The tags that select the dictionaries of a line. Each one may occur once, and
+/// only outside repeating groups.
+pub const IDENTITY_SELECTORS: [u32; 5] = [
+    BEGIN_STRING,
+    MSG_TYPE,
+    APPL_VER_ID,
+    APPL_EXT_ID,
+    CSTM_APPL_VER_ID,
+];
 
 /// FIX Boolean, as it appears on the wire.
 pub const YES: &str = "Y";

@@ -17,6 +17,7 @@ use std::sync::LazyLock;
 
 use crate::codec::{ByteOffset, Integrity, LineAnalysis, MessageAnalysis};
 use crate::config::{Diagnostics, Severity};
+use crate::ctx::Labels;
 use crate::tag;
 
 /// Every rule this server knows, in the order they are checked.
@@ -77,10 +78,7 @@ pub enum Precondition {
     Fields,
     /// …and it carries a BeginString.
     FixMessage,
-    /// The line's dictionary was chosen, not fallen back to: BeginString(8)
-    /// names the binding's version, or — on a line without BeginString(8) —
-    /// the selected dictionary is the one that decoded it. A rule about what
-    /// a dictionary lacks says nothing about one nobody chose.
+    /// At least one source is known under an explicit, valid interpretation.
     Bound,
 }
 
@@ -89,9 +87,9 @@ pub struct LineCtx<'a> {
     pub bytes: &'a [u8],
     pub message: &'a MessageAnalysis,
     pub selected_version: Option<&'a str>,
-    /// The name of the dictionary that decoded the line — configured, else
-    /// its file name; `None` for bundled tables.
-    pub label: Option<&'a str>,
+    /// The names of the dictionaries that decoded the line — configured, else
+    /// the file name; `None` for bundled tables.
+    pub labels: Labels<'a>,
     /// Both integrity rules need this and neither owns it: shared scratch,
     /// computed at most once per line.
     integrity: OnceCell<Integrity>,
@@ -103,7 +101,7 @@ impl<'a> LineCtx<'a> {
             bytes,
             message,
             selected_version: None,
-            label: None,
+            labels: Labels::default(),
             integrity: OnceCell::new(),
         }
     }
@@ -119,13 +117,7 @@ impl<'a> LineCtx<'a> {
     }
 
     fn bound(&self) -> bool {
-        let version = self.message.version.as_ref();
-        match self.message.first(tag::BEGIN_STRING) {
-            Some(field) => field.text(self.bytes) == Some(version),
-            None => self
-                .selected_version
-                .is_some_and(|selected| crate::dictionary::versions_compatible(selected, version)),
-        }
+        self.message.is_bound()
     }
 }
 
@@ -149,7 +141,7 @@ pub trait Rule: Sync {
 /// finding rendered, no dictionary name.
 #[derive(Debug, Default)]
 pub struct Scope<'a> {
-    pub label: Option<&'a str>,
+    pub labels: Labels<'a>,
     /// Findings this severe or less are counted rather than rendered, by
     /// rules that can: the walk's cap would refuse them anyway.
     pub count_from: Option<Severity>,
@@ -230,7 +222,7 @@ impl Registry {
         };
         let mut ctx = LineCtx::new(bytes, message);
         ctx.selected_version = self.selected_version.as_deref();
-        ctx.label = scope.label;
+        ctx.labels = scope.labels;
         let is_fix = message.first(tag::BEGIN_STRING).is_some();
         let bound = OnceCell::new();
         for (rule, severity) in &self.rules {
@@ -322,7 +314,7 @@ pub(crate) mod tests {
                 rule: self.id(),
                 start: ByteOffset::new(0),
                 end: ByteOffset::new(1),
-                message: ctx.label.unwrap_or("no label").to_owned(),
+                message: ctx.labels.application.unwrap_or("no label").to_owned(),
                 severity,
                 document_key: None,
             }]
@@ -357,89 +349,52 @@ pub(crate) mod tests {
         assert!(bound(&ctx, b"8=FIX.4.4|35=0|"));
         assert!(
             bound(&ctx, b"8=FIXT.1.1|35=0|"),
-            "the alias is a version of its own"
+            "administrative FIXT messages need only transport"
         );
-        assert!(!bound(&ctx, b"8=FIX.9.9|35=0|"), "decoded by fallback");
+        assert!(
+            !bound(&ctx, b"8=FIX.9.9|35=0|"),
+            "unsupported wire identity"
+        );
         assert!(!bound(&ctx, b"8=|35=0|"));
         assert!(!bound(&ctx, b"8=\xff|35=0|"));
         assert!(!bound(&ctx, b"55=X|"), "a fragment with nothing selected");
     }
 
-    /// Only a line with no BeginString(8) at all is bound by the selection,
-    /// and only when the selection is what decoded it.
     #[test]
-    fn a_fragment_is_bound_by_a_selection_that_decoded_it() {
-        let covering = Ctx::for_test_selected("FIX.4.4");
-        assert!(bound(&covering, b"55=X|"));
-        assert!(bound(&covering, b"8=FIX.4.4|35=0|"));
-        assert!(
-            !bound(&covering, b"8=FIX.9.9|35=0|"),
-            "falls back to the selection, still not bound"
-        );
-        assert!(!bound(&covering, b"8=|35=0|"));
-        assert!(!bound(&covering, b"8=\xff|35=0|"));
-
-        let elsewhere = Ctx::for_test_selected("FIX.9.1");
-        assert!(
-            !bound(&elsewhere, b"55=X|"),
-            "decoded by the bundled default"
-        );
-        assert!(bound(&elsewhere, b"8=FIX.9.1|35=0|"));
-        let analysis = analyze(b"55=X|", &elsewhere);
-        let registry =
-            Registry::with_selected_version(&Diagnostics::default(), elsewhere.selected_version());
-        let codes: Vec<&str> = registry
-            .check(b"55=X|", &analysis, &Scope::default())
-            .diags
-            .into_iter()
-            .map(|diag| diag.code)
-            .collect();
-        assert!(
-            codes.contains(&"dictionaryVersion"),
-            "the mismatch is still said: {codes:?}"
-        );
+    fn a_selection_never_binds_fragments_or_unsupported_wire_versions() {
+        for selected in ["FIX.4.4", "FIX.5.0SP2", "FIX.9.1"] {
+            let context = Ctx::for_test_selected(selected);
+            for line in [
+                b"55=X|".as_slice(),
+                b"8=FIX.9.9|35=0|",
+                b"8=FIX.5.0SP2|35=0|",
+                b"8=|35=0|",
+                b"8=\xff|35=0|",
+            ] {
+                assert!(!bound(&context, line), "{selected}: {line:?}");
+            }
+        }
     }
 
-    /// A FIX.5.0SP2 selection decodes fragments when the default version is
-    /// FIXT.1.1, which it covers only through the alias.
     #[test]
-    fn a_selection_covering_the_default_through_the_alias_binds_a_fragment() {
-        use crate::dictionary::parse::fixtures::{field, quickfix};
-        use crate::dictionary::{Dict, DictionaryChoice};
-        let choice = DictionaryChoice {
-            dict: Dict::Owned(std::sync::Arc::new(quickfix(
-                "FIX.5.0SP2",
-                &field(9999, "Selected"),
-            ))),
-            version: "FIX.5.0SP2".into(),
-            source: "test".into(),
-            identity: 123,
-            name: Some("selected".into()),
-        };
-        let limits = crate::config::Limits::default();
-        let build = crate::dictionary::BuildContext {
-            root_dir: None,
-            home_dir: None,
-            limits: &limits,
-        };
-        let (registry, _) = crate::dictionary::Registry::build(
-            &[],
-            "FIXT.1.1",
-            &build,
-            &crate::dictionary::DictionaryStore::default(),
+    fn transport_binds_an_unresolved_application_without_guessing_its_body() {
+        let context = Ctx::for_test("FIX.4.4");
+        assert!(bound(&context, b"8=FIXT.1.1|35=D|55=X|"));
+        let line = b"8=FIXT.1.1|35=D|9000=x|";
+        let analysis = analyze(line, &context);
+        let checked = Registry::from_config(&Diagnostics::default()).check(
+            line,
+            &analysis,
+            &Scope::default(),
         );
-        let ctx = Ctx::with_choice(
-            &crate::config::Config::default(),
-            std::sync::Arc::new(registry),
-            Some(choice),
-        );
-        assert_eq!(ctx.resolve(None).version.as_ref(), "FIXT.1.1");
-        assert!(
-            !ctx.resolve(None).dict.is_static(),
-            "the selection decoded it"
-        );
-        assert!(bound(&ctx, b"55=X|"));
-        assert!(bound(&ctx, b"8=FIXT.1.1|35=0|"));
+        assert!(checked
+            .diags
+            .iter()
+            .any(|diag| diag.code == "unknownVersion"));
+        assert!(!checked
+            .diags
+            .iter()
+            .any(|diag| diag.code == "unknownTag" || diag.code == "unknownMsgType"));
     }
 
     #[test]
@@ -448,7 +403,10 @@ pub(crate) mod tests {
         let line = b"8=FIX.4.4|35=0|";
         let analysis = analyze(line, &ctx);
         let scope = Scope {
-            label: Some("desk"),
+            labels: Labels {
+                transport: None,
+                application: Some("desk"),
+            },
             ..Scope::default()
         };
         let found = probe(&ctx).check(line, &analysis, &scope).diags;

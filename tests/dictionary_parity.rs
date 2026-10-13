@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use fix_lsp::dictionary::bundle::{assemble, parse_metadata};
+use fix_lsp::dictionary::bundle::{enrich, parse_metadata};
 use fix_lsp::dictionary::parse::Source;
 use fix_lsp::dictionary::schema::{Schema, Scope};
 use fix_lsp::dictionary::statics::TAGS;
@@ -25,7 +25,8 @@ fn standard_file(version: Version) -> &'static str {
         Version::Fix44 => "FIX44.xml",
         Version::Fix50 => "FIX50.xml",
         Version::Fix50Sp1 => "FIX50SP1.xml",
-        Version::Fix50Sp2 | Version::Fixt11 => "FIX50SP2.xml",
+        Version::Fix50Sp2 => "FIX50SP2.xml",
+        Version::Fixt11 => "FIXT11.xml",
     }
 }
 
@@ -40,11 +41,9 @@ fn runtime_parse_equals_static_tables_for_every_version() {
     let standard = Path::new(XML).join("standard");
     let meta =
         parse_metadata(&Source::read(standard.join("FIXLatest-metadata.xml")).unwrap()).unwrap();
-    let session = parse_quickfix(&standard.join("FIXT11.xml")).unwrap();
-    for v in Version::BUNDLED {
-        let parsed = parse_quickfix(&standard.join(standard_file(v))).unwrap();
-        let assembled = assemble(v.as_str(), parsed, &session, &meta).unwrap();
-        let direct = assembled.dict;
+    for v in Version::ALL {
+        let mut direct = parse_quickfix(&standard.join(standard_file(v))).unwrap();
+        enrich(&mut direct, &meta, v.as_str());
         let stat = Dict::Static(bundled(v));
         let reconstructed = stat.to_parsed();
         assert_eq!(reconstructed.version.as_deref(), Some(v.as_str()));
@@ -85,15 +84,6 @@ fn runtime_parse_equals_static_tables_for_every_version() {
         }
         assert_eq!(reconstructed.schema, direct.schema, "{v:?}: packed schema");
 
-        // QuickFIX/J keeps the 5.x session layer in FIXT11.xml alone.
-        let has_session = !matches!(v, Version::Fix50 | Version::Fix50Sp1);
-        assert_eq!(stat.has_session_layer(), assembled.session_layer, "{v:?}");
-        assert_eq!(assembled.session_layer, has_session, "{v:?}");
-        assert_eq!(
-            theirs.header.members.is_empty(),
-            !has_session,
-            "{v:?}: header scope"
-        );
         assert_eq!(stat.faults(), &direct.faults[..], "{v:?}: faults");
         assert!(direct.faults.is_empty(), "{v:?}: {:?}", direct.faults);
     }
@@ -192,7 +182,7 @@ fn hand_written_group_structure_fix44() {
 #[test]
 fn snapshot_counters() {
     // (version, fields, enums, messages, groups). The header's NoHops(627) is
-    // a group in FIX.4.3, FIX.4.4 and FIX.5.0SP2; FIX.4.3's NoRelatedSym(146)
+    // a group in FIX.4.3, FIX.4.4 and FIXT.1.1; FIX.4.3's NoRelatedSym(146)
     // and FIX.4.4's NoUnderlyings(711) are two groups each, one per
     // requiredness of the component inside.
     let expected = [
@@ -203,7 +193,10 @@ fn snapshot_counters() {
         (Version::Fix44, 916, 1814, 92, 93),
         (Version::Fix50, 1132, 2442, 93, 100),
         (Version::Fix50Sp1, 1353, 2598, 105, 134),
-        (Version::Fix50Sp2, 1452, 2821, 115, 146),
+        // FIX50SP2.xml itself: the removed merge supplied 20 fields, 45 values,
+        // seven administrative messages and two groups from FIXT11.xml.
+        (Version::Fix50Sp2, 1432, 2776, 108, 144),
+        (Version::Fixt11, 74, 175, 7, 2),
     ];
     let mut actual = Vec::new();
     for (version, ..) in expected {
@@ -231,7 +224,9 @@ fn snapshot_counters() {
     let merged = (TAGS.len(), field_overrides, enum_overrides);
     assert_eq!(
         merged,
-        (1498, 212, 25),
+        // Only DefaultApplExtID(1407), DefaultCstmApplVerID(1408),
+        // SessionStatus(1409), DefaultVerIndicator(1410) leave the union.
+        (1494, 212, 25),
         "(TAGS union, field override rows, enum override rows)"
     );
 }
@@ -325,5 +320,122 @@ fn the_join_rule_produces_these_exact_values() {
     assert!(
         !msg_types.iter().any(|v| v.starts_with("BQ=")),
         "a FIX Latest message"
+    );
+}
+
+#[test]
+fn original_xml_membership_is_preserved_without_transport_composition() {
+    for version in Version::ALL {
+        let text = fs::read_to_string(Path::new(XML).join("standard").join(standard_file(version)))
+            .unwrap();
+        let xml = roxmltree::Document::parse(&text).unwrap();
+        let root = xml.root_element();
+        let fields = root
+            .children()
+            .find(|node| node.has_tag_name("fields"))
+            .unwrap();
+        let dict = Dict::Static(bundled(version));
+        for (part, scope) in [
+            ("header", dict.schema().header()),
+            ("trailer", dict.schema().trailer()),
+        ] {
+            let section = root
+                .children()
+                .find(|node| node.has_tag_name(part))
+                .unwrap();
+            let has_declarations = section.children().any(|node| node.is_element());
+            assert_eq!(
+                scope.declared().next().is_some(),
+                has_declarations,
+                "{version:?}: raw {part} membership"
+            );
+        }
+        let original_tags: BTreeSet<u32> = fields
+            .children()
+            .filter(|node| node.has_tag_name("field"))
+            .map(|node| node.attribute("number").unwrap().parse().unwrap())
+            .collect();
+        let generated_tags: BTreeSet<u32> = dict
+            .to_parsed()
+            .fields
+            .iter()
+            .map(|field| field.tag)
+            .collect();
+        assert_eq!(
+            generated_tags, original_tags,
+            "{version:?}: original source fields"
+        );
+        let messages = root
+            .children()
+            .find(|node| node.has_tag_name("messages"))
+            .unwrap();
+        let original_messages: BTreeSet<&str> = messages
+            .children()
+            .filter(|node| node.has_tag_name("message"))
+            .map(|node| node.attribute("msgtype").unwrap())
+            .collect();
+        let parsed = dict.to_parsed();
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.msg_type.as_str())
+                .collect::<BTreeSet<_>>(),
+            original_messages
+        );
+        if version == Version::Fixt11 {
+            for node in fields.children().filter(|node| node.has_tag_name("field")) {
+                let tag = node.attribute("number").unwrap().parse().unwrap();
+                let field = dict.field(dict.field_idx(tag).unwrap());
+                let original: BTreeSet<&str> = node
+                    .children()
+                    .filter(|node| node.has_tag_name("value"))
+                    .map(|node| node.attribute("enum").unwrap())
+                    .collect();
+                assert_eq!(
+                    field
+                        .enums()
+                        .map(|value| value.value())
+                        .collect::<BTreeSet<_>>(),
+                    original,
+                    "FIXT tag {tag}"
+                );
+            }
+            assert!(dict.message_idx("D").is_none());
+            assert!(dict.enum_label(dict.field_idx(35).unwrap(), "D").is_some());
+        }
+    }
+}
+
+#[test]
+fn transport_lifecycle_does_not_end_at_application_split() {
+    for version in [Version::Fix44, Version::Fixt11] {
+        let dict = Dict::Static(bundled(version));
+        let heartbeat = dict.field(dict.field_idx(108).unwrap());
+        assert_eq!(heartbeat.lifecycle().removed_in, None);
+    }
+}
+
+/// Transcribed from HopGrp and MsgTypeGrp in the original public FIXT11.xml.
+#[test]
+fn standalone_transport_groups_keep_source_local_indices() {
+    let dict = Dict::Static(bundled(Version::Fixt11));
+    let parsed = dict.to_parsed();
+    let schema = dict.schema();
+    let hops = schema.header().find(627).unwrap().group().unwrap();
+    // The runtime source parser interns message groups before header groups.
+    assert_eq!(hops, 1);
+    assert_eq!(tags(schema.group(hops)), [628, 629, 630]);
+    let logon = dict.message_idx("A").unwrap();
+    let message_types = message(&parsed, "A").find(384).unwrap().group().unwrap();
+    assert_eq!(message_types, 0);
+    assert_eq!(
+        tags(schema.group(message_types)),
+        [372, 385, 1130, 1406, 1131, 1410]
+    );
+    assert_eq!(
+        dict.group(dict.group_by_count_tag(logon, 384).unwrap())
+            .delimiter_tag(),
+        372
     );
 }

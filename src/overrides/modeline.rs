@@ -183,9 +183,11 @@ fn scalar(raw: &str, kind: catalog::Kind) -> Result<Value, String> {
         return serde_json::to_value(&parsed["value"]).map_err(|error| error.to_string());
     }
     match kind {
-        catalog::Kind::String | catalog::Kind::Depth | catalog::Kind::Severity => {
-            Ok(Value::String(raw))
-        }
+        catalog::Kind::ApplicationVersion if raw == "null" => Ok(Value::Null),
+        catalog::Kind::String
+        | catalog::Kind::ApplicationVersion
+        | catalog::Kind::Depth
+        | catalog::Kind::Severity => Ok(Value::String(raw)),
         catalog::Kind::Boolean => raw
             .parse::<bool>()
             .map(Value::Bool)

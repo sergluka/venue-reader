@@ -59,7 +59,7 @@ fn a_hover_anywhere_in_a_field_answers_about_that_field() {
 /// protocol because the renderer used to return nothing here.
 #[test]
 fn a_tag_the_dictionary_does_not_define_is_still_hovered() {
-    const LINE: &str = "8=FIX.5.0|9=57|35=0|1328=Bad price|10=171|";
+    const LINE: &str = "8=FIXT.1.1|9=57|35=D|1128=7|1328=Bad price|10=171|";
     let mut client = open(LINE);
     let start = LINE.find("1328=").expect("the field is there") as u32;
     let end = start + "1328=Bad price".len() as u32;
@@ -86,7 +86,7 @@ fn a_tag_the_dictionary_does_not_define_is_still_hovered() {
 /// base version the metadata records, FIX.5.0, names a file without it.
 #[test]
 fn a_pack_dated_tag_is_dated_by_its_release_on_the_wire() {
-    const SP2: &str = "8=FIX.5.0SP2|9=57|35=0|1328=x|10=171|";
+    const SP2: &str = "8=FIXT.1.1|9=57|35=D|1128=9|1328=x|10=171|";
     let mut client = open(SP2);
     let at_1328 = SP2.find("1328=x").expect("the field is there") as u32;
     let markdown = at(&mut client, at_1328)["contents"]["value"]
@@ -271,11 +271,9 @@ fn open_desk(extra: Value) -> (TestClient, Workspace) {
 }
 
 fn markdown_at(client: &mut TestClient, field: &str) -> String {
-    let start = DESK_LINE.find(field).expect("the field is there") as u32;
-    at(client, start)["contents"]["value"]
-        .as_str()
+    client
+        .hover_markdown(URI, 0, DESK_LINE, field)
         .expect("markdown")
-        .to_owned()
 }
 
 /// The configured dictionary name reaches the "not defined by" line through
@@ -366,4 +364,108 @@ fn a_field_in_a_header_group_names_its_group_path() {
         );
         client.shutdown();
     }
+}
+
+#[test]
+fn fixt_hover_uses_each_fields_source_and_the_application_message() {
+    const LINE: &str = "8=FIXT.1.1|35=D|1128=9|49=SENDER|54=1|453=1|448=P|447=D|452=1|";
+    let mut client = open(LINE);
+    for (tag, name, version) in [
+        ("49=", "SenderCompID", "fixt1.1"),
+        ("54=", "Side", "5.0.SP2"),
+    ] {
+        let answer = at(&mut client, LINE.find(tag).unwrap() as u32);
+        let markdown = answer["contents"]["value"].as_str().expect("markdown");
+        assert!(markdown.starts_with(&format!("**{name}**")), "{markdown}");
+        assert!(
+            markdown.contains(&format!("/fix-dictionary/{version}/")),
+            "{markdown}"
+        );
+    }
+    let answer = at(&mut client, LINE.find("35=").unwrap() as u32);
+    let markdown = answer["contents"]["value"].as_str().expect("markdown");
+    assert!(
+        markdown.contains("Value: `D` — **NewOrderSingle**"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("The NewOrderSingle(35=D) message"),
+        "{markdown}"
+    );
+    let answer = at(&mut client, LINE.find("448=").unwrap() as u32);
+    let markdown = answer["contents"]["value"].as_str().expect("markdown");
+    assert!(
+        markdown.contains("Group: `NoPartyIDs/1/PartyID`"),
+        "{markdown}"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn unresolved_application_hover_keeps_only_version_independent_links() {
+    const LINE: &str = "8=FIXT.1.1|35=D|54=1|";
+    for (url, linked) in [
+        ("https://reference.example/{version}/{tag}", false),
+        ("https://reference.example/{fixVersion}/{tag}", false),
+        ("https://reference.example/{tag}", true),
+    ] {
+        let mut client = TestClient::start();
+        client.initialize_with(json!({
+            "capabilities": { "general": { "positionEncodings": ["utf-8"] } },
+            "initializationOptions": { "fix": { "documentLink": { "url": url } } },
+        }));
+        client.did_open(URI, LINE, 1);
+        let answer = at(&mut client, LINE.find("54=").unwrap() as u32);
+        let markdown = answer["contents"]["value"].as_str().expect("markdown");
+        assert!(markdown.starts_with("**Side** (54)"), "{markdown}");
+        assert!(!markdown.contains("**Buy**"), "{markdown}");
+        assert!(!markdown.contains("Not in"), "{markdown}");
+        assert_eq!(markdown.contains("[FIX Reference"), linked, "{markdown}");
+        let answer = at(&mut client, LINE.find("35=").unwrap() as u32);
+        let markdown = answer["contents"]["value"].as_str().expect("markdown");
+        assert!(!markdown.contains("**NewOrderSingle**"), "{markdown}");
+        client.shutdown();
+    }
+}
+
+#[test]
+fn paired_sources_keep_field_types_enums_and_message_names_independent() {
+    let workspace = Workspace::new("render-source-ownership");
+    let transport = workspace.write("transport.xml", "<fix type='FIXT' major='1' minor='1'><header><field name='BeginString' required='Y'/><field name='MsgType' required='Y'/><field name='ApplVerID' required='N'/><field name='TransportSender' required='N'/></header><messages><message name='Heartbeat' msgtype='0' msgcat='admin'/></messages><fields><field number='8' name='BeginString' type='STRING'/><field number='35' name='MsgType' type='STRING'/><field number='49' name='TransportSender' type='STRING'/><field number='54' name='TransportSide' type='INT'><value enum='1' description='TRANSPORT_VALUE'/></field><field number='1128' name='ApplVerID' type='STRING'/></fields></fix>");
+    let application = workspace.write("application.xml", "<fix type='FIX' major='5' minor='0' servicepack='2'><messages><message name='SyntheticOrder' msgtype='D' msgcat='app'><field name='ApplicationSide' required='N'/></message></messages><fields><field number='49' name='ApplicationSender' type='INT'/><field number='54' name='ApplicationSide' type='CHAR'><value enum='1' description='APPLICATION_VALUE'/></field></fields></fix>");
+    let mut client = workspace.client(json!({
+        "allowDictionaryPath": true,
+        "dictionaries": [{"name": "synthetic-pair", "transport": transport, "application": application, "default": true}],
+        "inlayHints": {"enumValues": {"enabled": true}},
+    }));
+    const LINE: &str = "8=FIXT.1.1|35=D|1128=9|49=S|54=1|";
+    client.did_open(URI, LINE, 1);
+    for (field, expected) in [
+        ("49=", "**TransportSender** (49) — STRING"),
+        ("54=", "**ApplicationSide** (54) — CHAR"),
+        ("35=", "Value: `D` — **SyntheticOrder**"),
+    ] {
+        let answer = at(&mut client, LINE.find(field).unwrap() as u32);
+        let markdown = answer["contents"]["value"].as_str().expect("markdown");
+        assert!(markdown.contains(expected), "{markdown}");
+        assert!(!markdown.contains("TRANSPORT_VALUE"), "{markdown}");
+    }
+    let answer = at(&mut client, LINE.find("54=").unwrap() as u32);
+    assert!(answer["contents"]["value"]
+        .as_str()
+        .unwrap()
+        .contains("APPLICATION_VALUE"));
+    let hints = client.request("textDocument/inlayHint", json!({
+        "textDocument": {"uri": URI},
+        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 100}},
+    })).expect("hints");
+    assert!(
+        hints
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hint| hint["label"] == "(SyntheticOrder)"),
+        "{hints}"
+    );
+    client.shutdown();
 }

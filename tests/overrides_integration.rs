@@ -8,23 +8,6 @@ use serde_json::{json, Value};
 
 const MESSAGE: &str = "8=FIX.4.4|35=D|54=1|";
 
-fn wait_effective(client: &mut TestClient, uri: &str, key: &str, expected: Value) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let report = client.describe(uri);
-        if let Ok(report) = &report {
-            if report["effective"][key] == expected {
-                return report.clone();
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{key} did not become {expected}: {report:?}"
-        );
-        std::thread::yield_now();
-    }
-}
-
 fn refresh(client: &TestClient, settings: Value) {
     client.notify(
         "workspace/didChangeConfiguration",
@@ -287,7 +270,7 @@ fn selecting_a_global_name_does_not_reload_its_xml() {
         json!(path.canonicalize().unwrap().to_string_lossy())
     );
     for document in [&first, &second] {
-        wait_effective(&mut client, document, "dictionary", json!("venue"));
+        client.wait_effective(document, "dictionary", json!("venue"));
         assert!(client
             .hover(document, 0, 16)
             .unwrap()
@@ -380,7 +363,7 @@ fn a_removed_session_name_does_not_reappear_automatically() {
             json!({"command":"fix.useDictionary","arguments":["venue"]}),
         )
         .unwrap();
-    wait_effective(&mut client, &document, "dictionary", json!("venue"));
+    client.wait_effective(&document, "dictionary", json!("venue"));
     assert!(client
         .hover(&document, 0, 16)
         .unwrap()
@@ -390,7 +373,7 @@ fn a_removed_session_name_does_not_reappear_automatically() {
         &client,
         json!({"allowDictionaryPath":true,"diagnostics":{"enabled":false}}),
     );
-    let removed = wait_effective(&mut client, &document, "dictionary", Value::Null);
+    let removed = client.wait_effective(&document, "dictionary", Value::Null);
     assert!(removed["warnings"]
         .as_array()
         .unwrap()
@@ -405,7 +388,7 @@ fn a_removed_session_name_does_not_reappear_automatically() {
         .to_string()
         .contains("RememberedChoice"));
     refresh(&client, settings);
-    wait_effective(&mut client, &document, "dictionary", Value::Null);
+    client.wait_effective(&document, "dictionary", Value::Null);
     assert!(!client
         .hover(&document, 0, 16)
         .unwrap()
@@ -461,8 +444,7 @@ fn dictionary_version_mismatch_uses_normal_rule_gates_and_one_finding_per_versio
     assert_eq!(mismatches.len(), 1, "{report}");
     assert_eq!(mismatches[0]["severity"], json!(2));
     client.did_change_full(&document, &format!("# fix: dictionary=FIX.4.2 diagnostics.rules.dictionaryVersion=false\n{MESSAGE}\n{MESSAGE}"), 2);
-    wait_effective(
-        &mut client,
+    client.wait_effective(
         &document,
         "diagnostics.rules.dictionaryVersion.enabled",
         json!(false),
@@ -563,7 +545,7 @@ fn removing_a_client_leaf_reveals_personal_defaults_without_erasing_other_values
         json!(true)
     );
     refresh(&client, json!({}));
-    let report = wait_effective(&mut client, &document, "hover.enabled", json!(false));
+    let report = client.wait_effective(&document, "hover.enabled", json!(false));
     assert_eq!(
         report["effective"]["inlayHints.tagNames.enabled"],
         json!(true)
@@ -595,7 +577,7 @@ fn describe_does_not_reload_edited_user_or_project_toml() {
     fs::write(&project_file, "hover.enabled = true\n").unwrap();
     assert_eq!(client.describe(&document).unwrap(), before);
     refresh(&client, json!({}));
-    let after = wait_effective(&mut client, &document, "hover.enabled", json!(true));
+    let after = client.wait_effective(&document, "hover.enabled", json!(true));
     assert_eq!(
         after["effective"]["inlayHints.tagNames.enabled"],
         json!(false)
@@ -620,12 +602,7 @@ fn modeline_only_refresh_reuses_the_committed_project_snapshot() {
         &format!("# fix: semanticTokens.enabled=false\n{MESSAGE}"),
         2,
     );
-    let report = wait_effective(
-        &mut client,
-        &document,
-        "semanticTokens.enabled",
-        json!(false),
-    );
+    let report = client.wait_effective(&document, "semanticTokens.enabled", json!(false));
     assert_eq!(report["effective"]["hover.enabled"], false);
     client.shutdown();
 }
@@ -688,7 +665,7 @@ fn duplicate_modeline_settings_fall_through_and_repair_clears_errors_with_rules_
         &format!("# fix: hover.enabled=false\n{MESSAGE}"),
         2,
     );
-    let report = wait_effective(&mut client, &document, "hover.enabled", json!(false));
+    let report = client.wait_effective(&document, "hover.enabled", json!(false));
     assert!(report["warnings"].as_array().unwrap().is_empty());
     let cleared = client.wait_for("textDocument/publishDiagnostics");
     assert_eq!(cleared["version"], json!(2));
@@ -765,7 +742,7 @@ fn disabling_file_sources_removes_their_values_and_configuration_warnings() {
         &client,
         json!({"diagnostics":{"enabled":false},"overrides":{"modeline":false,"projectConfig":false}}),
     );
-    let after = wait_effective(&mut client, &document, "hover.enabled", json!(true));
+    let after = client.wait_effective(&document, "hover.enabled", json!(true));
     assert_eq!(after["effective"]["semanticTokens.enabled"], json!(true));
     assert!(after["warnings"].as_array().unwrap().is_empty());
     client.shutdown();

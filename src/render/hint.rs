@@ -6,7 +6,7 @@
 
 use crate::codec::{Field, MessageAnalysis};
 use crate::config::InlayHints;
-use crate::dictionary::{standard::standard_name, Version};
+use crate::dictionary::standard;
 
 use super::Options;
 
@@ -30,7 +30,7 @@ pub fn tag_label(
     let own = analysis.field_name(field);
     // The mark is part of the name, so the user's wrapper is kept.
     let foreign = (path.is_none() && own.is_none())
-        .then(|| standard_name(Version::parse(&analysis.version), field.tag))
+        .then(|| standard::name_of(&analysis.standard(field), field.tag))
         .flatten()
         .map(|name| format!("{name}{FOREIGN_MARK}"));
     let name = match (&path, &foreign) {
@@ -46,7 +46,9 @@ const FOREIGN_MARK: &str = "?";
 
 /// How a field's value is spelled. Switch-free for the reason [`tag_label`] is.
 pub fn value_label(analysis: &MessageAnalysis, field: &Field, options: &Options) -> Option<String> {
-    options.value_format.render(analysis.enum_label(field))
+    options
+        .value_format
+        .render(super::value_name(analysis, field))
 }
 
 /// What to draw after a field's tag, or `None` when nothing should be.
@@ -287,7 +289,7 @@ mod tests {
     #[test]
     fn a_tag_standard_fix_names_and_the_dictionary_lacks_is_marked() {
         let (bytes, analysis) = one_in(
-            "8=FIX.5.0|9=57|35=0|1328=x|10=171|",
+            "8=FIXT.1.1|9=57|35=D|1128=7|1328=x|10=171|",
             &Ctx::for_test("FIX.5.0"),
         );
         let index = at(&analysis, 1328);
@@ -317,7 +319,7 @@ mod tests {
     #[test]
     fn a_disputed_tag_is_not_labelled() {
         let (bytes, analysis) = one_in(
-            "8=FIX.4.2|9=57|35=0|220=USD|10=171|",
+            "8=FIX.4.2|9=57|35=D|220=USD|10=171|",
             &Ctx::for_test("FIX.4.2"),
         );
         let index = at(&analysis, 220);

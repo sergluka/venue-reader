@@ -1,5 +1,4 @@
-//! Turning `LineAnalysis` plus a `Dict` into text. Later stages add the hover,
-//! inlay-hint and symbol renderers here.
+//! Render source-owned analysis at request time.
 
 pub mod decode;
 pub mod hint;
@@ -18,7 +17,15 @@ pub use summary::{summary, Summary};
 pub use tag_url::TagUrl;
 pub use template::{Template, TemplateError, DEFAULT_TEMPLATE};
 
+use crate::codec::{Field, MessageAnalysis};
 use crate::config::Config;
+
+pub(super) fn value_name<'a>(analysis: &'a MessageAnalysis, field: &Field) -> Option<&'a str> {
+    if field.tag == crate::tag::MSG_TYPE {
+        return analysis.message_definition().map(|message| message.name());
+    }
+    analysis.enum_label(field)
+}
 
 /// What rendering needs from configuration. Deliberately not inside `Ctx`:
 /// none of it can invalidate a cached `LineAnalysis`, because an analysis holds

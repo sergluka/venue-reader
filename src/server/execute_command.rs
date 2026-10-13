@@ -23,9 +23,10 @@
 //! `fix.describeTag` is hover for a tag no line carries: `[tag]` or
 //! `[tag, value]`, no document, so it works with none open. It names no version
 //! either — the question is what the tag means, not whether some edition has
-//! it — so the newest bundled edition that defines the tag answers, and the
-//! tag's own lifespan says when it arrived and when it left. Neither the
-//! session selection nor `defaultVersion` is consulted; only `tagUrl` is, for
+//! it — so the reference source answers: FIXT 1.1 for a transport field, else
+//! the newest bundled edition that defines the tag. The tag's own lifespan says
+//! when it arrived and when it left. Neither the
+//! session selection nor `defaultApplVerID` is consulted; only `tagUrl` is, for
 //! the reference link, which is what the readiness check below protects.
 
 use lsp_server::ResponseError;
@@ -43,6 +44,17 @@ pub const DECODE: &str = "fix.decode";
 pub const USE_DICTIONARY: &str = "fix.useDictionary";
 pub const DESCRIBE_OVERRIDES: &str = "fix.describeOverrides";
 pub const DESCRIBE_TAG: &str = "fix.describeTag";
+
+pub(super) fn dictionary_details(choice: &crate::dictionary::DictionaryChoice) -> Value {
+    json!({
+        "name": choice.name, "version": choice.version(), "source": choice.source,
+        "transport": {"version": choice.transport.version(), "source": choice.transport_source},
+        "application": choice.application.as_ref().map(|identity| json!({
+            "version": identity.version, "extensionPack": identity.extension_pack,
+            "customVersion": identity.custom_version, "source": choice.source
+        }))
+    })
+}
 
 impl ServerState {
     pub(super) fn execute_command_task(&mut self, params: &Value) -> Dispatched {
@@ -154,7 +166,18 @@ impl ServerState {
                 })
             })
             .collect();
-        let dictionaries: Vec<Value> = document.project.registry.definitions().iter().map(|definition| json!({"name":definition.spec.name,"path":definition.choice.source,"version":definition.choice.version,"source":definition.source})).collect();
+        let dictionaries: Vec<Value> = document
+            .project
+            .registry
+            .definitions()
+            .iter()
+            .map(|definition| {
+                let mut details = dictionary_details(&definition.choice);
+                details["path"] = json!(definition.choice.source);
+                details["source"] = json!(definition.source);
+                details
+            })
+            .collect();
         Ok(
             json!({"effective":document.resolved.values,"sources":sources,"warnings":warnings,"dictionaries":dictionaries}),
         )
@@ -663,11 +686,11 @@ mod tests {
         assert!(described(&mut state, json!([49])).starts_with("**SenderCompID** (49)"));
     }
 
-    /// Neither a session selection nor `defaultVersion` reaches a description.
+    /// Neither a session selection nor `defaultApplVerID` reaches a description.
     /// SenderCompID(49) is the tag that can tell: every edition defines it, so
     /// a configured start would answer from that edition and link to its pages,
-    /// where the newest edition's link is FIX.5.0SP2's. A later tag like 1328
-    /// could not discriminate — it reaches SP2 from either start.
+    /// where the reference source is FIXT 1.1. A later tag like 1328 could not
+    /// discriminate — it reaches SP2 from either start.
     #[test]
     fn a_session_selection_and_a_default_version_contribute_nothing() {
         use crate::dictionary::parse::fixtures::{field, quickfix};
@@ -675,20 +698,23 @@ mod tests {
         let (mut state, _) = state_with(HEARTBEAT);
         let plain = described(&mut state, json!([49]));
         assert!(
-            plain.ends_with("/fix-dictionary/5.0.SP2/tagNum_49.html)"),
+            plain.ends_with("/fix-dictionary/fixt1.1/tagNum_49.html)"),
             "{plain}"
         );
 
-        state.config.base.default_version = "FIX.4.2".into();
+        state.config.base.default_appl_ver_id = Some("FIX.4.2".into());
         super::super::testing::reconfigure(&mut state);
         assert_eq!(described(&mut state, json!([49])), plain);
 
+        let dict = Dict::Owned(std::sync::Arc::new(quickfix(
+            "FIX.4.2",
+            &field(9999, "DeskOnly"),
+        )));
         state.config.session_choice = Some(DictionaryChoice {
-            dict: Dict::Owned(std::sync::Arc::new(quickfix(
-                "FIX.4.2",
-                &field(9999, "DeskOnly"),
-            ))),
-            version: "FIX.4.2".into(),
+            transport: dict.clone(),
+            transport_source: "desk.xml".into(),
+            application: Some(crate::dictionary::ApplicationIdentity::release("FIX.4.2")),
+            dict,
             source: "desk.xml".into(),
             identity: 7,
             name: Some("desk".into()),

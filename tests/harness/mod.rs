@@ -29,6 +29,32 @@ pub const CONTENT_MODIFIED: i32 = -32801;
 pub const INVALID_PARAMS: i32 = -32602;
 pub const REQUEST_FAILED: i32 = -32803;
 
+/// A message with BodyLength(9) and CheckSum(10) computed apart from the
+/// integrity repair of the server. `|` stands for SOH.
+pub fn frame(begin: &str, body: &str) -> String {
+    let message = format!("8={begin}|9={}|{body}", body.len());
+    let checksum: u32 = message
+        .bytes()
+        .map(|byte| u32::from(if byte == b'|' { 1 } else { byte }))
+        .sum();
+    format!("{message}10={:03}|", checksum % 256)
+}
+
+/// Inlay hint labels as text. A label is a string or a list of parts.
+pub fn hint_labels(hints: &[Value]) -> Vec<String> {
+    hints
+        .iter()
+        .map(|hint| match &hint["label"] {
+            Value::String(text) => text.clone(),
+            Value::Array(parts) => parts
+                .iter()
+                .map(|part| part["value"].as_str().expect("label part"))
+                .collect(),
+            other => panic!("a label is a string or parts: {other}"),
+        })
+        .collect()
+}
+
 pub fn file_uri(path: &Path) -> String {
     lsp_types::Uri::from_file_path(path).unwrap().to_string()
 }
@@ -380,6 +406,38 @@ impl TestClient {
             "textDocument/hover",
             Self::hover_params(uri, line, character),
         )
+    }
+
+    /// The hover markdown for the field that starts with `field` on `line`,
+    /// whose text is `line_text`. `None` when the server has no answer.
+    pub fn hover_markdown(
+        &mut self,
+        uri: &str,
+        line: u32,
+        line_text: &str,
+        field: &str,
+    ) -> Option<String> {
+        let column = line_text.find(field).expect("the field is on the line") as u32;
+        let answer = self.hover(uri, line, column).expect("hover response");
+        answer["contents"]["value"].as_str().map(str::to_owned)
+    }
+
+    /// Wait until `fix.describeOverrides` reports `expected` as the effective `key`.
+    pub fn wait_effective(&mut self, uri: &str, key: &str, expected: Value) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let report = self.describe(uri);
+            if let Ok(report) = &report {
+                if report["effective"][key] == expected {
+                    return report.clone();
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{key} did not become {expected}: {report:?}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// Block until the server sends `method`, returning its params. Notifications

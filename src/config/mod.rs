@@ -11,22 +11,26 @@ use serde::{Deserialize, Serialize};
 pub mod user_file;
 use serde_json::{Map, Value};
 
-use crate::dictionary::DEFAULT_VERSION;
+use crate::dictionary::binding::to_wire;
 
 /// Fully materialized effective configuration.
 ///
 /// Sparse user, client, project and modeline layers are merged before this
 /// type is built, so every field contains its schema default when no source
 /// supplied a value.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UserConfig {
     /// Whether configuration may load dictionaries from filesystem paths.
     pub allow_dictionary_path: bool,
     /// Gates for document-local configuration sources.
     pub overrides: ConfigOverrides,
-    /// Bundled or configured FIX version used when a line cannot select one.
-    pub default_version: String,
+    /// Canonical release fallback for missing ApplVerID(1128); selected pairs take precedence.
+    #[serde(
+        rename = "defaultApplVerID",
+        deserialize_with = "deserialize_application_version"
+    )]
+    pub default_appl_ver_id: Option<String>,
     /// Named external dictionary definitions visible to this configuration.
     pub dictionaries: Vec<DictionarySpec>,
     /// One-line message summary and its delivery channels.
@@ -65,25 +69,6 @@ impl Default for ConfigOverrides {
         Self {
             project_config: true,
             modeline: true,
-        }
-    }
-}
-
-impl Default for UserConfig {
-    fn default() -> Self {
-        UserConfig {
-            allow_dictionary_path: false,
-            overrides: ConfigOverrides::default(),
-            default_version: DEFAULT_VERSION.into(),
-            dictionaries: Vec::new(),
-            message_summary: MessageSummary::default(),
-            diagnostics: Diagnostics::default(),
-            document_link: DocumentLink::default(),
-            document_symbol: DocumentSymbol::default(),
-            hover: Hover::default(),
-            inlay_hints: InlayHints::default(),
-            limits: Limits::default(),
-            semantic_tokens: SemanticTokens::default(),
         }
     }
 }
@@ -348,17 +333,146 @@ impl Default for SummaryChannels {
     }
 }
 
-/// One `fix.dictionaries[]` entry.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// A named pair or transport family; paths are relative to the defining layer.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", try_from = "DictionarySpecInput")]
 pub struct DictionarySpec {
-    /// One QuickFIX XML file, resolved relative to the defining layer.
-    pub path: String,
-    /// Stable selector used by configuration and commands.
+    /// Single XML source; its root determines the binding form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub name: String,
-    /// A named definition changes version defaults only when explicitly enabled.
-    #[serde(default)]
+    /// Requests automatic selection for this exact binding; conflicts can disable the claim.
     pub default: bool,
+    /// Header/trailer/admin source: bundled identifier or XML path, never a registration name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// Application body source: bundled identifier or XML path, never a registration name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub application: Option<String>,
+    /// Canonical application release; supplies FIXT-rooted identity, otherwise must match XML.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub application_version: Option<String>,
+    /// Exact application extension pack; `None` differs from `Some(0)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_pack: Option<u32>,
+    /// Exact CstmApplVerID(1129) identity, separate from the release and extension pack.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_version: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DictionarySpecInput {
+    #[serde(default)]
+    path: Option<String>,
+    name: String,
+    #[serde(default)]
+    default: bool,
+    transport: Option<String>,
+    application: Option<String>,
+    application_version: Option<String>,
+    extension_pack: Option<u32>,
+    custom_version: Option<String>,
+}
+
+impl TryFrom<DictionarySpecInput> for DictionarySpec {
+    type Error = String;
+
+    fn try_from(input: DictionarySpecInput) -> Result<Self, Self::Error> {
+        let spec = Self {
+            path: input.path,
+            name: input.name,
+            default: input.default,
+            transport: input.transport,
+            application: input.application,
+            application_version: input.application_version,
+            extension_pack: input.extension_pack,
+            custom_version: input.custom_version,
+        };
+        spec.validate_shape()?;
+        Ok(spec)
+    }
+}
+
+impl DictionarySpec {
+    pub(crate) fn source_description(&self) -> String {
+        if let Some(path) = &self.path {
+            return path.clone();
+        }
+        match (self.transport.as_deref(), self.application.as_deref()) {
+            (Some(transport), Some(application)) => {
+                format!("transport: {transport}, application: {application}")
+            }
+            (Some(transport), None) => format!("transport: {transport}"),
+            (None, Some(application)) => format!("application: {application}"),
+            (None, None) => String::new(),
+        }
+    }
+
+    pub fn validate_shape(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("name must not be blank".into());
+        }
+        if let Some(path) = &self.path {
+            if path.trim().is_empty() {
+                return Err("path must not be blank".into());
+            }
+            if self.transport.is_some() || self.application.is_some() {
+                return Err("path is mutually exclusive with transport and application".into());
+            }
+        } else if self.transport.is_none() {
+            return Err("a path or transport source is required".into());
+        }
+        for (key, value) in [
+            ("transport", self.transport.as_deref()),
+            ("application", self.application.as_deref()),
+            ("customVersion", self.custom_version.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.trim().is_empty()) {
+                return Err(format!("{key} must not be blank"));
+            }
+        }
+        if let Some(version) = &self.application_version {
+            if to_wire(version).is_none() {
+                return Err("applicationVersion must be a canonical application release".into());
+            }
+        }
+        if self.path.is_none()
+            && self.application.is_none()
+            && (self.application_version.is_some()
+                || self.extension_pack.is_some()
+                || self.custom_version.is_some())
+        {
+            return Err("application identity requires an application source".into());
+        }
+        Ok(())
+    }
+
+    pub fn uses_paths(&self) -> bool {
+        self.path.is_some()
+            || [self.transport.as_deref(), self.application.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|source| crate::dictionary::Version::parse(source).is_none())
+    }
+}
+
+fn deserialize_application_version<'de, Deserializer>(
+    deserializer: Deserializer,
+) -> Result<Option<String>, Deserializer::Error>
+where
+    Deserializer: serde::Deserializer<'de>,
+{
+    let version = Option::<String>::deserialize(deserializer)?;
+    if version
+        .as_deref()
+        .is_some_and(|version| to_wire(version).is_none())
+    {
+        return Err(serde::de::Error::custom(
+            "defaultApplVerID must be null or a canonical application release",
+        ));
+    }
+    Ok(version)
 }
 
 /// `fix.diagnostics` — the master gate and per-rule settings. Deliberately not
@@ -579,6 +693,60 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn application_default_uses_the_exact_public_key_and_canonical_release() {
+        for version in [Value::Null, json!("FIX.5.0SP2"), json!("FIX.Latest")] {
+            let config: Config =
+                serde_json::from_value(json!({"defaultApplVerID": version})).unwrap();
+            let serialized = serde_json::to_value(config).unwrap();
+            assert_eq!(serialized["defaultApplVerID"], version);
+            assert!(serialized.get("defaultVersion").is_none());
+            assert!(serialized.get("defaultApplVerId").is_none());
+        }
+        for invalid in [json!("9"), json!("FIXT.1.1"), json!(""), json!(9)] {
+            assert!(
+                serde_json::from_value::<Config>(json!({"defaultApplVerID": invalid})).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn registration_shapes_require_sources_and_keep_identity_dimensions() {
+        for valid in [
+            json!({"name":"pair", "transport":"FIXT.1.1", "application":"FIX.5.0SP2"}),
+            json!({"name":"family", "transport":"FIXT.1.1"}),
+            json!({"name":"combined", "path":"synthetic.xml", "applicationVersion":"FIX.Latest", "extensionPack":0, "customVersion":"synthetic"}),
+        ] {
+            let spec: DictionarySpec = serde_json::from_value(valid.clone()).unwrap();
+            let serialized = serde_json::to_value(&spec).unwrap();
+            assert_eq!(
+                serde_json::from_value::<DictionarySpec>(serialized).unwrap(),
+                spec
+            );
+            assert_eq!(
+                spec.extension_pack,
+                valid
+                    .get("extensionPack")
+                    .map(|value| value.as_u64().unwrap() as u32)
+            );
+        }
+        for invalid in [
+            json!({"name":"bad", "path":"x.xml", "transport":"FIXT.1.1"}),
+            json!({"name":"bad", "path":"x.xml", "application":"FIX.5.0"}),
+            json!({"name":"bad", "transport":"FIXT.1.1", "extensionPack":0}),
+            json!({"name":"bad", "application":"FIX.5.0"}),
+            json!({"name":"bad", "path":"", "transport":"FIXT.1.1"}),
+            json!({"name":"bad", "path":"x.xml", "applicationVersion":"9"}),
+            json!({"name":"bad", "path":"x.xml", "customVersion":" "}),
+            json!({"name":"bad", "path":"x.xml", "extensionPack":4294967296_u64}),
+        ] {
+            assert!(
+                serde_json::from_value::<DictionarySpec>(invalid.clone()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn semantic_tokens_default_on_and_the_cap_matches_the_schema() {
         let cfg: Config = serde_json::from_value(json!({})).unwrap();
         assert!(cfg.semantic_tokens.enabled);
@@ -625,7 +793,7 @@ mod tests {
     #[test]
     fn defaults_are_the_schema_defaults() {
         let cfg: Config = serde_json::from_value(json!({})).unwrap();
-        assert_eq!(cfg.default_version, "FIX.4.4");
+        assert_eq!(cfg.default_appl_ver_id, None);
         assert!(cfg.dictionaries.is_empty());
         assert_eq!(cfg.limits.dictionary_bytes, 16 * 1024 * 1024);
         assert!(cfg.hover.enabled);
@@ -683,7 +851,7 @@ mod tests {
             }
         }))
         .unwrap();
-        assert_eq!(cfg.dictionaries[0].path, "a.xml");
+        assert_eq!(cfg.dictionaries[0].path.as_deref(), Some("a.xml"));
         assert_eq!(cfg.dictionaries[1].name, "nine");
         // `default` is the key that says whether an entry answers for every
         // line of its version; absent, it does not — answering for a whole

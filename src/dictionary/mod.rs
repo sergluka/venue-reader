@@ -5,6 +5,7 @@
 //! replaces its tables outright, never overlays them (`README.md`, "Custom
 //! dictionaries").
 
+pub mod binding;
 pub mod bundle;
 pub mod dict;
 pub mod model;
@@ -15,14 +16,15 @@ pub mod standard;
 pub mod statics;
 
 pub use dict::{
-    bundled, newest_defining, Dict, EnumIdx, EnumView, FieldIdx, FieldView, GroupIdx, GroupView,
-    Lifecycle, MessageView, MsgIdx, Version, DEFAULT_VERSION,
+    bundled, newest_defining, reference_message_source, reference_source, Dict, EnumIdx, EnumView,
+    FieldIdx, FieldView, GroupIdx, GroupView, Lifecycle, MessageView, MsgIdx, Version,
 };
 pub use model::{Datatype, EnumDef, Fault, FieldDef, GroupDef, MessageDef, ParsedDict};
 pub use parse::{parse_quickfix, ParseError, MAX_ITEMS};
 pub use registry::{
-    fault_events, is_reserved_selector, looks_like_path, versions_compatible, BuildContext,
-    DictionaryChoice, DictionaryDefinition, DictionaryLayer, DictionaryStore, LoadError, Registry,
-    RegistryEvent,
+    fault_events, is_reserved_selector, looks_like_path, BuildContext, DictionaryChoice,
+    DictionaryDefinition, DictionaryLayer, DictionaryStore, LoadError, Registry, RegistryEvent,
 };
 pub use standard::{Retirement, Standard, StandardDef};
+
+pub use binding::{ApplicationIdentity, ApplicationKey, DictionarySources, SourceRole};

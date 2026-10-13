@@ -10,12 +10,10 @@ use super::model::{Datatype, EnumDef, Fault, FieldDef, GroupDef, MessageDef, Par
 pub use super::schema::{GroupIdx, MsgIdx};
 use super::schema::{Schema, Scope};
 use super::statics::{
-    EnumOverride, EnumRecord, FieldOverride, StaticDict, StaticGroup, StaticMessage, TagRecord,
-    VersionMask, BUNDLED as BUNDLED_TABLES, TAGS,
+    EnumOverride, EnumRecord, FieldOverride, StandaloneEnum, StandaloneField, StaticDict,
+    StaticFields, StaticGroup, StaticMessage, TagRecord, VersionMask, BUNDLED as BUNDLED_TABLES,
+    TAGS,
 };
-
-/// The version used when nothing else resolves (config default and registry fallback).
-pub const DEFAULT_VERSION: &str = "FIX.4.4";
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Version {
@@ -27,12 +25,12 @@ pub enum Version {
     Fix50,
     Fix50Sp1,
     Fix50Sp2,
-    /// Session-layer version; resolves to FIX.5.0SP2 for bundled lookups.
+    /// Standalone transport, outside application chronology.
     Fixt11,
 }
 
 impl Version {
-    /// Versions with their own bundled tables.
+    /// The eight bundled application releases, in chronological order.
     pub const BUNDLED: [Version; 8] = [
         Version::Fix40,
         Version::Fix41,
@@ -63,7 +61,7 @@ impl Version {
         Version::ALL.into_iter().find(|v| v.as_str() == s)
     }
 
-    /// A string that names a FIX version (bundled, aliased, or known unbundled).
+    /// A bundled source identity or known unbundled application release.
     pub fn is_version_identifier(s: &str) -> bool {
         Version::parse(s).is_some() || Version::KNOWN_UNBUNDLED.contains(&s)
     }
@@ -81,25 +79,9 @@ impl Version {
             Version::Fixt11 => "FIXT.1.1",
         }
     }
-
-    /// The single alias: `FIXT.1.1 → FIX.5.0SP2`.
-    pub fn resolve_alias(self) -> Version {
-        match self {
-            Version::Fixt11 => Version::Fix50Sp2,
-            other => other,
-        }
-    }
-
-    /// Alias-aware string form, for callers holding arbitrary version strings.
-    pub fn resolve_alias_str(s: &str) -> &str {
-        match Version::parse(s) {
-            Some(v) => v.resolve_alias().as_str(),
-            None => s,
-        }
-    }
 }
 
-/// The newest bundled version whose tables define `tag`.
+/// The newest bundled application release defining `tag`; excludes transport.
 pub fn newest_defining(tag: u32) -> Option<Version> {
     Version::BUNDLED
         .into_iter()
@@ -107,11 +89,45 @@ pub fn newest_defining(tag: u32) -> Option<Version> {
         .find(|version| Dict::Static(bundled(*version)).field_idx(tag).is_some())
 }
 
-/// The bundled dictionary for a version (total: the alias resolves `FIXT.1.1`).
+/// The bundled source that describes `tag` apart from any line. FIXT 1.1
+/// answers where hover on a FIXT line places the tag in the transport: a
+/// header or trailer field, or a field that only FIXT and FIX4 define.
+/// Otherwise the newest release that defines the tag answers.
+pub fn reference_source(tag: u32) -> Option<Version> {
+    let fixt = Dict::Static(bundled(Version::Fixt11));
+    let envelope = fixt.is_header(tag) || fixt.is_trailer(tag);
+    let newest = newest_defining(tag);
+    let only_transport = fixt.field_idx(tag).is_some()
+        && !newest.is_some_and(|version| super::binding::requires_fixt(version.as_str()));
+    if envelope || only_transport {
+        Some(Version::Fixt11)
+    } else {
+        newest
+    }
+}
+
+/// The bundled source that describes MsgType(35) `value` apart from any line:
+/// FIXT 1.1 for a FIXT session message, otherwise the newest release that
+/// defines the message.
+pub fn reference_message_source(value: &str) -> Option<Version> {
+    let fixt = Dict::Static(bundled(Version::Fixt11));
+    if fixt
+        .message_idx(value)
+        .is_some_and(|index| fixt.message(index).is_session())
+    {
+        return Some(Version::Fixt11);
+    }
+    Version::BUNDLED
+        .into_iter()
+        .rev()
+        .find(|version| Dict::Static(bundled(*version)).message_idx(value).is_some())
+}
+
+/// The bundled physical source for a version, including standalone FIXT.
 /// Looked up by name in the generated table, so the mask ordinal has exactly
 /// one source — `build.rs`.
 pub fn bundled(version: Version) -> &'static StaticDict {
-    let name = version.resolve_alias().as_str();
+    let name = version.as_str();
     BUNDLED_TABLES
         .iter()
         .find(|(n, _)| *n == name)
@@ -122,7 +138,9 @@ pub fn bundled(version: Version) -> &'static StaticDict {
 /// What the dictionaries say about a tag's life across the bundled versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Lifecycle<'a> {
+    /// Field introduction release inferred from metadata; absent when it cannot be dated.
     pub added: Option<&'a str>,
+    /// FIX release that deprecated this field; absent when unrecorded.
     pub deprecated: Option<&'a str>,
     /// The first bundled version that does not define the tag — and only when
     /// *no* later version defines it either, which is what makes "removed" the
@@ -144,14 +162,14 @@ pub(super) fn tag_record(tag: u32) -> Option<&'static TagRecord> {
     tag_index(tag).map(|i| &TAGS[i])
 }
 
-/// The bundled versions in protocol order, by mask ordinal. `FIXT.1.1` is not
-/// among them — it is an alias for `FIX.5.0SP2`'s tables and shares its bit, so
-/// counting it would visit the same edition twice.
+/// Transport never participates in application chronology.
 fn bundled_order() -> impl Iterator<Item = (u8, &'static str)> {
-    Version::ALL
-        .into_iter()
-        .filter(|version| version.resolve_alias() == *version)
-        .map(|version| (bundled(version).mask_bit, version.as_str()))
+    Version::BUNDLED.into_iter().map(|version| {
+        (
+            bundled(version).mask_bit().expect("application"),
+            version.as_str(),
+        )
+    })
 }
 
 fn removed_in(presence: VersionMask, bit: u8) -> Option<&'static str> {
@@ -229,10 +247,15 @@ impl Dict {
 
     pub fn field_idx(&self, tag: u32) -> Option<FieldIdx> {
         let i = match self {
-            Dict::Static(d) => {
-                let i = tag_index(tag)?;
-                TAGS[i].presence.contains(d.mask_bit).then_some(i)?
-            }
+            Dict::Static(d) => match d.fields {
+                StaticFields::Application { mask_bit } => {
+                    let index = tag_index(tag)?;
+                    TAGS[index].presence.contains(mask_bit).then_some(index)?
+                }
+                StaticFields::Standalone(fields) => {
+                    fields.binary_search_by_key(&tag, |field| field.tag).ok()?
+                }
+            },
             Dict::Owned(d) => d.field_index(tag)?,
         };
         Some(FieldIdx(i as u32))
@@ -240,10 +263,11 @@ impl Dict {
 
     /// The merged row for a tag, whether or not this version has it — the one
     /// lookup that ignores the presence mask, so a caller can say what *other*
-    /// versions define. `None` for an owned dictionary, which spans no versions.
+    /// versions define. Standalone transport and owned sources return `None`.
     pub fn record(&self, tag: u32) -> Option<&'static TagRecord> {
         match self {
-            Dict::Static(_) => tag_record(tag),
+            Dict::Static(d) if d.mask_bit().is_some() => tag_record(tag),
+            Dict::Static(_) => None,
             Dict::Owned(_) => None,
         }
     }
@@ -257,9 +281,12 @@ impl Dict {
 
     pub fn field(&self, idx: FieldIdx) -> FieldView<'_> {
         match self {
-            Dict::Static(d) => FieldView::Static {
-                rec: &TAGS[idx.0 as usize],
-                bit: d.mask_bit,
+            Dict::Static(d) => match d.fields {
+                StaticFields::Application { mask_bit } => FieldView::Static {
+                    rec: &TAGS[idx.0 as usize],
+                    bit: mask_bit,
+                },
+                StaticFields::Standalone(fields) => FieldView::Standalone(&fields[idx.0 as usize]),
             },
             Dict::Owned(d) => FieldView::Owned(&d.fields[idx.0 as usize]),
         }
@@ -346,15 +373,6 @@ impl Dict {
         }
     }
 
-    /// False only for bundled FIX.5.0 and FIX.5.0SP1, whose header, trailer and
-    /// session messages are not there to check against.
-    pub fn has_session_layer(&self) -> bool {
-        match self {
-            Dict::Static(d) => d.session_layer,
-            Dict::Owned(_) => true,
-        }
-    }
-
     /// A component's name, by its index into the schema's name table.
     pub fn component_name(&self, name: u16) -> &str {
         let names = self.schema().names;
@@ -367,17 +385,17 @@ impl Dict {
             Dict::Owned(d) => (**d).clone(),
             Dict::Static(d) => ParsedDict {
                 version: Some(d.version.to_owned()),
-                fields: TAGS
-                    .iter()
-                    .filter(|r| r.presence.contains(d.mask_bit))
-                    .map(|rec| {
-                        FieldView::Static {
-                            rec,
-                            bit: d.mask_bit,
-                        }
-                        .to_owned_def()
-                    })
-                    .collect(),
+                fields: match d.fields {
+                    StaticFields::Application { mask_bit } => TAGS
+                        .iter()
+                        .filter(|record| record.presence.contains(mask_bit))
+                        .map(|rec| FieldView::Static { rec, bit: mask_bit }.to_owned_def())
+                        .collect(),
+                    StaticFields::Standalone(fields) => fields
+                        .iter()
+                        .map(|field| FieldView::Standalone(field).to_owned_def())
+                        .collect(),
+                },
                 groups: d
                     .groups
                     .iter()
@@ -407,6 +425,7 @@ impl Dict {
 #[derive(Clone, Copy)]
 pub enum FieldView<'a> {
     Static { rec: &'static TagRecord, bit: u8 },
+    Standalone(&'static StandaloneField),
     Owned(&'a FieldDef),
 }
 
@@ -417,11 +436,13 @@ impl<'a> FieldView<'a> {
         pick: fn(&FieldOverride) -> Option<&'static str>,
         base: fn(&TagRecord) -> &'static str,
         owned: fn(&FieldDef) -> &str,
+        standalone: fn(&StandaloneField) -> &'static str,
     ) -> &'a str {
         match self {
             FieldView::Static { rec, bit } => {
                 rec.override_for(*bit).and_then(pick).unwrap_or(base(rec))
             }
+            FieldView::Standalone(field) => standalone(field),
             FieldView::Owned(f) => owned(f),
         }
     }
@@ -429,16 +450,22 @@ impl<'a> FieldView<'a> {
     pub fn tag(&self) -> u32 {
         match self {
             FieldView::Static { rec, .. } => rec.tag,
+            FieldView::Standalone(field) => field.tag,
             FieldView::Owned(f) => f.tag,
         }
     }
 
     pub fn name(&self) -> &'a str {
-        self.resolved(|o| o.name, |r| r.name, |f| &f.name)
+        self.resolved(|o| o.name, |r| r.name, |f| &f.name, |field| field.name)
     }
 
     pub fn datatype(&self) -> &'a str {
-        self.resolved(|o| o.datatype, |r| r.datatype, |f| &f.datatype)
+        self.resolved(
+            |o| o.datatype,
+            |r| r.datatype,
+            |f| &f.datatype,
+            |field| field.datatype,
+        )
     }
 
     /// `datatype()` normalised. One integer compare per token instead of thirty
@@ -449,18 +476,25 @@ impl<'a> FieldView<'a> {
                 .override_for(*bit)
                 .and_then(|o| o.datatype_class)
                 .unwrap_or(rec.datatype_class),
+            FieldView::Standalone(field) => field.datatype_class,
             FieldView::Owned(f) => f.datatype_class,
         }
     }
 
     pub fn description(&self) -> &'a str {
-        self.resolved(|o| o.description, |r| r.description, |f| &f.description)
+        self.resolved(
+            |o| o.description,
+            |r| r.description,
+            |f| &f.description,
+            |field| field.description,
+        )
     }
 
     /// Whether values outside the listed ones are allowed (`allowOtherValues`).
     pub fn allows_other_values(&self) -> bool {
         match self {
             FieldView::Static { rec, bit } => rec.allows_other_values.contains(*bit),
+            FieldView::Standalone(field) => field.allows_other_values,
             FieldView::Owned(f) => f.allows_other_values,
         }
     }
@@ -468,18 +502,24 @@ impl<'a> FieldView<'a> {
     /// Empty for an owned dictionary: a custom dictionary is QuickFIX XML,
     /// which dates nothing.
     pub fn added(&self) -> &'a str {
-        self.resolved(|o| o.added, |r| r.added, |_| "")
+        self.resolved(|o| o.added, |r| r.added, |_| "", |field| field.added)
     }
 
     /// Empty for an owned dictionary, as `added`.
     pub fn deprecated(&self) -> &'a str {
-        self.resolved(|o| o.deprecated, |r| r.deprecated, |_| "")
+        self.resolved(
+            |o| o.deprecated,
+            |r| r.deprecated,
+            |_| "",
+            |field| field.deprecated,
+        )
     }
 
     /// The extension pack recorded against `added()`, 0 when none is.
     pub fn added_ep(&self) -> u16 {
         match self {
             FieldView::Static { rec, .. } => rec.added_ep,
+            FieldView::Standalone(field) => field.added_ep,
             FieldView::Owned(_) => 0,
         }
     }
@@ -497,14 +537,26 @@ impl<'a> FieldView<'a> {
     ///
     /// Nothing for an owned dictionary, which carries no dates.
     pub fn lifecycle(&self) -> Lifecycle<'a> {
-        let FieldView::Static { rec, bit } = self else {
-            return Lifecycle::default();
-        };
         let some = |text: &'a str| (!text.is_empty()).then_some(text);
+        let removed_in = match self {
+            FieldView::Static { rec, bit } => {
+                // Transport's absence from FIX5 application files is no removal.
+                if Dict::Static(bundled(Version::Fixt11))
+                    .field_idx(rec.tag)
+                    .is_some()
+                {
+                    None
+                } else {
+                    removed_in(rec.presence, *bit)
+                }
+            }
+            FieldView::Standalone(_) => None,
+            FieldView::Owned(_) => return Lifecycle::default(),
+        };
         Lifecycle {
             added: release_of(self.added(), self.added_ep()),
             deprecated: some(self.deprecated()),
-            removed_in: removed_in(rec.presence, *bit),
+            removed_in,
         }
     }
 
@@ -514,6 +566,7 @@ impl<'a> FieldView<'a> {
                 iter: rec.enums.iter(),
                 bit: *bit,
             },
+            FieldView::Standalone(field) => EnumIter::Standalone(field.enums.iter()),
             FieldView::Owned(f) => EnumIter::Owned(f.enums.iter()),
         }
     }
@@ -529,6 +582,10 @@ impl<'a> FieldView<'a> {
                 let at = rec.enums.binary_search_by(|e| e.value.cmp(value)).ok()?;
                 rec.enums[at].presence.contains(*bit).then_some(at)
             }
+            FieldView::Standalone(field) => field
+                .enums
+                .binary_search_by(|value_row| value_row.value.cmp(value))
+                .ok(),
             FieldView::Owned(f) => f
                 .enums
                 .binary_search_by(|e| e.value.as_str().cmp(value))
@@ -542,6 +599,7 @@ impl<'a> FieldView<'a> {
                 rec: &rec.enums[at],
                 bit: *bit,
             },
+            FieldView::Standalone(field) => EnumView::Standalone(&field.enums[at]),
             FieldView::Owned(f) => EnumView::Owned(&f.enums[at]),
         }
     }
@@ -568,6 +626,7 @@ pub enum EnumIter<'a> {
         iter: std::slice::Iter<'static, EnumRecord>,
         bit: u8,
     },
+    Standalone(std::slice::Iter<'static, StandaloneEnum>),
     Owned(std::slice::Iter<'a, EnumDef>),
 }
 
@@ -580,6 +639,7 @@ impl<'a> Iterator for EnumIter<'a> {
                 let rec = iter.find(|e| e.presence.contains(*bit))?;
                 Some(EnumView::Static { rec, bit: *bit })
             }
+            EnumIter::Standalone(iter) => iter.next().map(EnumView::Standalone),
             EnumIter::Owned(iter) => iter.next().map(EnumView::Owned),
         }
     }
@@ -588,6 +648,7 @@ impl<'a> Iterator for EnumIter<'a> {
 #[derive(Clone, Copy)]
 pub enum EnumView<'a> {
     Static { rec: &'static EnumRecord, bit: u8 },
+    Standalone(&'static StandaloneEnum),
     Owned(&'a EnumDef),
 }
 
@@ -597,11 +658,13 @@ impl<'a> EnumView<'a> {
         pick: fn(&EnumOverride) -> Option<&'static str>,
         base: fn(&EnumRecord) -> &'static str,
         owned: fn(&EnumDef) -> &str,
+        standalone: fn(&StandaloneEnum) -> &'static str,
     ) -> &'a str {
         match self {
             EnumView::Static { rec, bit } => {
                 rec.override_for(*bit).and_then(pick).unwrap_or(base(rec))
             }
+            EnumView::Standalone(value) => standalone(value),
             EnumView::Owned(e) => owned(e),
         }
     }
@@ -609,27 +672,34 @@ impl<'a> EnumView<'a> {
     pub fn value(&self) -> &'a str {
         match self {
             EnumView::Static { rec, .. } => rec.value,
+            EnumView::Standalone(value) => value.value,
             EnumView::Owned(e) => &e.value,
         }
     }
 
     pub fn name(&self) -> &'a str {
-        self.resolved(|o| o.name, |r| r.name, |e| &e.name)
+        self.resolved(|o| o.name, |r| r.name, |e| &e.name, |value| value.name)
     }
 
     pub fn description(&self) -> &'a str {
-        self.resolved(|o| o.description, |r| r.description, |e| &e.description)
+        self.resolved(
+            |o| o.description,
+            |r| r.description,
+            |e| &e.description,
+            |value| value.description,
+        )
     }
 
     /// As `FieldView::added`: empty for an owned dictionary.
     pub fn added(&self) -> &'a str {
-        self.resolved(|o| o.added, |r| r.added, |_| "")
+        self.resolved(|o| o.added, |r| r.added, |_| "", |field| field.added)
     }
 
     /// As `FieldView::added_ep`.
     pub fn added_ep(&self) -> u16 {
         match self {
             EnumView::Static { rec, .. } => rec.added_ep,
+            EnumView::Standalone(value) => value.added_ep,
             EnumView::Owned(_) => 0,
         }
     }
@@ -684,7 +754,9 @@ impl<'a> MessageView<'a> {
     /// tables, whose categories come from Orchestra, `admin` in a QuickFIX file.
     pub fn is_session(&self) -> bool {
         let category = self.category();
-        category.eq_ignore_ascii_case("session") || category.eq_ignore_ascii_case("admin")
+        category.eq_ignore_ascii_case("session")
+            || category.eq_ignore_ascii_case("admin")
+            || category.eq_ignore_ascii_case("administrative")
     }
 
     pub fn to_owned_def(&self) -> MessageDef {
@@ -737,7 +809,7 @@ impl<'a> GroupView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dictionary::bundle::{assemble, parse_metadata};
+    use crate::dictionary::bundle::{enrich, parse_metadata};
     use crate::dictionary::parse::{parse_quickfix, Source};
     use std::path::Path;
     use std::sync::LazyLock;
@@ -748,11 +820,9 @@ mod tests {
     static FIX44_DIRECT: LazyLock<ParsedDict> = LazyLock::new(|| {
         let standard = Path::new(XML).join("standard");
         let meta = Source::read(standard.join("FIXLatest-metadata.xml")).unwrap();
-        let session = parse_quickfix(&standard.join("FIXT11.xml")).unwrap();
-        let dict = parse_quickfix(&standard.join("FIX44.xml")).unwrap();
-        assemble("FIX.4.4", dict, &session, &parse_metadata(&meta).unwrap())
-            .unwrap()
-            .dict
+        let mut dict = parse_quickfix(&standard.join("FIX44.xml")).unwrap();
+        enrich(&mut dict, &parse_metadata(&meta).unwrap(), "FIX.4.4");
+        dict
     });
 
     fn stat(v: Version) -> Dict {
@@ -845,12 +915,11 @@ mod tests {
         assert_eq!(dict.field(idx).datatype_class(), Datatype::Numeric);
     }
 
-    /// The alias resolves to 5.0SP2, whose header gained 1128 and 1129 — so the
-    /// same six tags plus more, and the trailer unchanged.
+    /// Each source supplies its own header and trailer.
     #[test]
     fn a_session_layer_is_what_the_dictionary_declares() {
         for version in [Version::Fix44, Version::Fixt11] {
-            let dict = stat(version.resolve_alias());
+            let dict = stat(version);
             for tag in [8, 9, 35, 34, 49, 56] {
                 assert!(dict.is_header(tag), "{version:?}: {tag} is header");
                 assert!(!dict.is_trailer(tag), "{version:?}: {tag} is not trailer");
@@ -868,6 +937,15 @@ mod tests {
         let dict = stat(Version::Fix44);
         assert!(dict.is_header(627), "NoHops");
         assert!(dict.is_header(628), "HopCompID, a member of it");
+    }
+
+    #[test]
+    fn reference_source_includes_header_group_members() {
+        for tag in [627, 628, 629, 630, 1407] {
+            assert_eq!(reference_source(tag), Some(Version::Fixt11), "tag {tag}");
+        }
+        assert_eq!(reference_source(54), Some(Version::Fix50Sp2));
+        assert_eq!(reference_source(108), Some(Version::Fix50));
     }
 
     #[test]
@@ -982,8 +1060,7 @@ mod tests {
         );
     }
 
-    /// The alias shares FIX.5.0SP2's tables and its mask bit, so the ordering
-    /// must not visit that edition twice.
+    /// Only application releases have chronology bits.
     #[test]
     fn the_bundled_order_has_one_entry_per_edition() {
         let order: Vec<&str> = bundled_order().map(|(_, name)| name).collect();
@@ -1002,8 +1079,8 @@ mod tests {
             assert_eq!(Version::parse(v.as_str()), Some(v));
         }
         assert_eq!(Version::parse("FIX.9.9"), None);
-        assert_eq!(Version::resolve_alias_str("FIXT.1.1"), "FIX.5.0SP2");
-        assert_eq!(Version::resolve_alias_str("FIX.9.9"), "FIX.9.9");
+        assert_eq!(Version::parse("FIXT.1.1"), Some(Version::Fixt11));
+        assert_eq!(Version::Fixt11.as_str(), "FIXT.1.1");
         assert!(Version::is_version_identifier("FIX.2.7"));
         assert!(!Version::is_version_identifier("broker"));
     }
@@ -1013,13 +1090,14 @@ mod tests {
         for (i, v) in Version::BUNDLED.iter().enumerate() {
             let d = bundled(*v);
             assert_eq!(d.version, v.as_str());
-            assert_eq!(usize::from(d.mask_bit), i);
+            assert_eq!(usize::from(d.mask_bit().unwrap()), i);
         }
     }
 
     #[test]
-    fn fixt11_bundled_is_fix50sp2_tables() {
-        assert!(std::ptr::eq(
+    fn fixt11_bundled_is_independent() {
+        assert!(bundled(Version::Fixt11).mask_bit().is_none());
+        assert!(!std::ptr::eq(
             bundled(Version::Fixt11),
             bundled(Version::Fix50Sp2)
         ));
@@ -1036,21 +1114,24 @@ mod tests {
         }
     }
 
-    /// QuickFIX/J keeps 5.x session messages in FIXT11.xml only, and the build
-    /// folds them into the one version `8=FIXT.1.1` resolves to.
+    /// QuickFIX/J keeps FIX5 transport messages in FIXT11.xml only.
     #[test]
     fn session_messages_live_where_the_session_layer_is() {
         for v in Version::BUNDLED {
             let d = stat(v);
             let heartbeat = d.message_idx("0").map(|m| d.message(m).name());
             let expected = match v {
-                Version::Fix50 | Version::Fix50Sp1 => None,
+                Version::Fix50 | Version::Fix50Sp1 | Version::Fix50Sp2 => None,
                 _ => Some("Heartbeat"),
             };
             assert_eq!(heartbeat, expected, "{v:?}");
         }
         let sp2 = stat(Version::Fix50Sp2);
-        assert!(sp2.message(sp2.message_idx("A").unwrap()).is_session());
+        let transport = stat(Version::Fixt11);
+        assert!(transport
+            .message(transport.message_idx("A").unwrap())
+            .is_session());
+        assert!(sp2.message_idx("A").is_none());
         assert!(
             sp2.message_idx("AE").is_some(),
             "the application layer stays"
@@ -1154,19 +1235,29 @@ mod tests {
         assert_eq!(declared(&stat, ga), declared(&owned, gb));
         assert_eq!(stat.group(ga).delimiter_tag(), 269);
         assert_eq!(stat.schema(), owned.schema());
-        assert_eq!(stat.has_session_layer(), owned.has_session_layer());
         assert_eq!(owned.to_parsed(), *FIX44_DIRECT);
     }
 
-    /// Bundled FIX.5.0 and FIX.5.0SP1 keep QuickFIX/J's empty session blocks.
     #[test]
-    fn the_session_layer_mark_is_off_only_for_fix50_and_sp1() {
+    fn transport_scopes_follow_each_sources_declarations() {
         for version in Version::ALL {
-            let expected = !matches!(version, Version::Fix50 | Version::Fix50Sp1);
-            assert_eq!(stat(version).has_session_layer(), expected, "{version:?}");
+            let dict = stat(version);
+            let schema = dict.schema();
+            let expected_empty = matches!(
+                version,
+                Version::Fix50 | Version::Fix50Sp1 | Version::Fix50Sp2
+            );
+            for (part, scope) in [("header", schema.header()), ("trailer", schema.trailer())] {
+                assert_eq!(
+                    scope.declared().next().is_none(),
+                    expected_empty,
+                    "{version:?}: {part}"
+                );
+            }
         }
         let owned = Dict::Owned(Arc::new(ParsedDict::default()));
-        assert!(owned.has_session_layer());
+        assert!(owned.schema().header().declared().next().is_none());
+        assert!(owned.schema().trailer().declared().next().is_none());
     }
 
     /// NewOrderSingle's component rows.
@@ -1285,8 +1376,12 @@ mod tests {
             .enum_record(803, "28")
             .expect("PartySubIDType(803) = 28 is defined somewhere");
         assert_eq!(rec.name, "MarketMaker");
-        assert!(!rec.presence.contains(bundled(Version::Fix44).mask_bit));
-        assert!(rec.presence.contains(bundled(Version::Fix50Sp2).mask_bit));
+        assert!(!rec
+            .presence
+            .contains(bundled(Version::Fix44).mask_bit().unwrap()));
+        assert!(rec
+            .presence
+            .contains(bundled(Version::Fix50Sp2).mask_bit().unwrap()));
         // And the masked lookup keeps disagreeing, which is the point.
         let idx = f44.field_idx(803).expect("the field itself is in 4.4");
         assert!(f44.enum_idx(idx, "28").is_none());
@@ -1365,7 +1460,7 @@ mod tests {
 
     #[test]
     fn enum_idx_agrees_with_the_view_iterator_on_every_bundled_version() {
-        for version in Version::BUNDLED {
+        for version in Version::ALL {
             let dict = stat(version);
             let msg_type = dict.field_idx(35).unwrap();
             for value in dict.field(msg_type).enums() {
@@ -1407,5 +1502,80 @@ mod tests {
         assert_eq!(FieldIdx::from_raw(msg_type.raw()), msg_type);
         let new_order = dict.enum_idx(msg_type, "D").unwrap();
         assert_eq!(EnumIdx::from_raw(new_order.raw()), new_order);
+    }
+    #[test]
+    fn standalone_indices_use_the_full_packed_capacity() {
+        let capacity = super::super::parse::MAX_ITEMS;
+        let values = Box::leak(
+            (0..capacity)
+                .map(|index| StandaloneEnum {
+                    value: Box::leak(format!("{index:05}").into_boxed_str()),
+                    name: "SyntheticValue",
+                    description: "",
+                    added: "",
+                    added_ep: 0,
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let fields = Box::leak(
+            (0..capacity)
+                .map(|index| StandaloneField {
+                    tag: index as u32 + 1,
+                    name: "SyntheticField",
+                    datatype: "String",
+                    datatype_class: Datatype::Text,
+                    description: "",
+                    added: "",
+                    deprecated: "",
+                    added_ep: 0,
+                    allows_other_values: false,
+                    enums: values,
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let source = Box::leak(Box::new(StaticDict {
+            version: "FIXT.1.1",
+            fields: StaticFields::Standalone(fields),
+            schema: bundled(Version::Fixt11).schema,
+            groups: bundled(Version::Fixt11).groups,
+            messages: bundled(Version::Fixt11).messages,
+        }));
+        let dict = Dict::Static(source);
+        for index in [0, 32_767, capacity - 1] {
+            let field = dict.field_idx(index as u32 + 1).unwrap();
+            assert_eq!(field.raw(), index as u32);
+            assert_eq!(
+                dict.field(FieldIdx::from_raw(field.raw())).tag(),
+                index as u32 + 1
+            );
+            let value = format!("{index:05}");
+            let enum_index = dict.enum_idx(field, &value).unwrap();
+            assert_eq!(usize::from(enum_index.raw()), index);
+            assert_eq!(
+                dict.enum_at(field, EnumIdx::from_raw(enum_index.raw()))
+                    .value(),
+                value
+            );
+        }
+        assert_eq!(capacity, 65_535);
+        assert!(source.mask_bit().is_none());
+    }
+
+    #[test]
+    fn standalone_indices_follow_the_original_source_tables() {
+        let direct = parse_quickfix(&Path::new(XML).join("standard/FIXT11.xml")).unwrap();
+        let dict = stat(Version::Fixt11);
+        for (index, field) in direct.fields.iter().enumerate() {
+            let field_index = dict.field_idx(field.tag).unwrap();
+            assert_eq!(field_index.raw(), index as u32);
+            for (index, value) in field.enums.iter().enumerate() {
+                assert_eq!(
+                    usize::from(dict.enum_idx(field_index, &value.value).unwrap().raw()),
+                    index
+                );
+            }
+        }
     }
 }

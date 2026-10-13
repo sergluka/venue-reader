@@ -333,3 +333,71 @@ fn a_header_group_counter_counts_and_its_entry_is_marked() {
         client.shutdown();
     }
 }
+
+fn tokens_by_column(line: &str) -> Vec<(u64, u64, u64)> {
+    let mut client = TestClient::start();
+    client.initialize_caps(caps("full"));
+    client.did_open(URI, line, 1);
+    let answer = client
+        .request(
+            "textDocument/semanticTokens/full",
+            json!({ "textDocument": { "uri": URI } }),
+        )
+        .expect("answered");
+    let data = integers(&answer["data"]);
+    let mut column = 0;
+    let tokens = data
+        .as_chunks::<5>()
+        .0
+        .iter()
+        .map(|token| {
+            column += token[1];
+            (column, token[3], token[4])
+        })
+        .collect();
+    client.shutdown();
+    tokens
+}
+
+#[test]
+fn unresolved_ownership_is_not_an_unknown_tag() {
+    for line in [
+        "8=FIXT.1.1|35=D|54=1|9999=x|",
+        "8=FIX.5.0|35=D|54=1|9999=x|",
+        "8=FIX.5.0SP1|35=D|54=1|9999=x|",
+        "8=FIX.5.0SP2|35=D|54=1|9999=x|",
+    ] {
+        let tokens = tokens_by_column(line);
+        assert!(
+            tokens.iter().all(|token| token.2 & (1 << 5) == 0),
+            "{line}: {tokens:?}"
+        );
+        let side = line.find("54=").unwrap() as u64;
+        assert!(tokens.contains(&(side + 3, 6, 0)), "{line}: {tokens:?}");
+    }
+    let resolved = "8=FIXT.1.1|35=D|1128=9|54=1|9999=x|";
+    let tokens = tokens_by_column(resolved);
+    let unknown = resolved.find("9999=").unwrap() as u64;
+    assert!(tokens.contains(&(unknown, 0, 1 << 5)), "{tokens:?}");
+    let side = resolved.find("54=").unwrap() as u64;
+    assert!(tokens.contains(&(side + 3, 1, 0)), "{tokens:?}");
+}
+
+#[test]
+fn fixt_group_counts_and_transport_fields_keep_their_scope_modifiers() {
+    const LINE: &str = "8=FIXT.1.1|35=D|1128=9|627=1|628=H|453=0|10=0|";
+    let tokens = tokens_by_column(LINE);
+    for (tag, modifiers) in [
+        ("1128=", 1 << 1),
+        ("627=", (1 << 1) | (1 << 6)),
+        ("628=", (1 << 1) | (1 << 7)),
+        ("453=", 1 << 6),
+        ("10=", 1 << 2),
+    ] {
+        let column = LINE.find(tag).unwrap() as u64;
+        assert!(
+            tokens.contains(&(column, 0, modifiers)),
+            "{tag}: {tokens:?}"
+        );
+    }
+}

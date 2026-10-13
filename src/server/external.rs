@@ -332,13 +332,10 @@ fn prepare(
     let registry = if input.refresh_global {
         let roots = layer_roots(&base_layers, input.dictionary_root.as_deref());
         let layers = dictionary_layers(&base_layers, &roots);
-        let enabled = if base.config.allow_dictionary_path {
-            layers.as_slice()
-        } else {
-            &[]
-        };
+        let permitted = permitted_specs(&base_layers, base.config.allow_dictionary_path);
+        let enabled = permitted_layers(&layers, &permitted);
         let (registry, events) = store
-            .build_registry(enabled, &base.config.default_version, &context)
+            .build_registry(&enabled, &context)
             .map_err(|error| error.to_string())?;
         append_events(
             &mut base.warnings,
@@ -426,6 +423,38 @@ fn dictionary_layers<'a>(
         .collect()
 }
 
+fn permitted_specs(
+    layers: &[SettingsLayer],
+    allow_paths: bool,
+) -> Vec<Vec<config::DictionarySpec>> {
+    layers
+        .iter()
+        .map(|layer| {
+            layer
+                .dictionaries
+                .iter()
+                .filter(|spec| allow_paths || !spec.uses_paths())
+                .cloned()
+                .collect()
+        })
+        .collect()
+}
+
+fn permitted_layers<'a>(
+    layers: &[DictionaryLayer<'a>],
+    specs: &'a [Vec<config::DictionarySpec>],
+) -> Vec<DictionaryLayer<'a>> {
+    layers
+        .iter()
+        .zip(specs)
+        .map(|(layer, specs)| DictionaryLayer {
+            specs,
+            source: layer.source,
+            root_dir: layer.root_dir,
+        })
+        .collect()
+}
+
 fn append_events(
     warnings: &mut Vec<Warning>,
     events: Vec<RegistryEvent>,
@@ -433,20 +462,9 @@ fn append_events(
     origin: &Origin,
 ) {
     warnings.extend(events.into_iter().map(|event| {
-        let source = layers
-            .iter()
-            .rev()
-            .find(|layer| {
-                layer.dictionaries.iter().any(|spec| match &event {
-                    RegistryEvent::LoadFailed { path, .. }
-                    | RegistryEvent::DictionaryFault { path, .. }
-                    | RegistryEvent::MoreDictionaryFaults { path, .. }
-                    | RegistryEvent::DuplicateDefault { path, .. }
-                    | RegistryEvent::BlankName { path } => spec.path == *path,
-                    RegistryEvent::BadName { name, .. } => spec.name == *name,
-                    RegistryEvent::DefaultVersionUnresolved { .. } => false,
-                })
-            })
+        let source = event
+            .source()
+            .and_then(|source| layers.iter().find(|layer| layer.origin.source == source))
             .map_or(origin, |layer| &layer.origin);
         event_warning(&event, "dictionaries", source.clone())
     }));
@@ -489,7 +507,13 @@ fn select(
     if let Some(choice) = registry.choice(raw) {
         return Selected {
             by_path: false,
-            outcome: if reserved || enabled {
+            outcome: if reserved
+                || enabled
+                || registry
+                    .definitions()
+                    .iter()
+                    .any(|entry| entry.spec.name == raw && !entry.spec.uses_paths())
+            {
                 Ok(choice)
             } else {
                 Err(LoadError::PathsDisabled)
@@ -521,7 +545,8 @@ fn blocked_dictionaries(layers: &[SettingsLayer], label: &str, origin: &Origin) 
     let names: Vec<_> = layers
         .iter()
         .flat_map(|layer| &layer.dictionaries)
-        .map(|spec| format!("{} ({})", spec.name, spec.path))
+        .filter(|spec| spec.uses_paths())
+        .map(|spec| format!("{} ({})", spec.name, spec.source_description()))
         .collect();
     (!names.is_empty()).then(|| {
         Warning::new(
@@ -617,17 +642,22 @@ fn prepare_document(
             || global.registry.clone(),
             |previous| previous.project.registry.clone(),
         )
-    } else if !base.config.allow_dictionary_path
-        || projects.iter().all(|layer| layer.dictionaries.is_empty())
-    {
+    } else if projects.iter().all(|layer| {
+        layer
+            .dictionaries
+            .iter()
+            .all(|spec| !base.config.allow_dictionary_path && spec.uses_paths())
+    }) {
         global.registry.clone()
     } else {
         let mut definition_layers = base_layers.to_vec();
         definition_layers.extend(projects.iter().cloned());
         let roots = layer_roots(&definition_layers, input.dictionary_root.as_deref());
         let definitions = dictionary_layers(&definition_layers, &roots);
+        let permitted = permitted_specs(&definition_layers, base.config.allow_dictionary_path);
+        let enabled = permitted_layers(&definitions, &permitted);
         let (registry, events) = store
-            .build_registry(&definitions, &base.config.default_version, &context)
+            .build_registry(&enabled, &context)
             .map_err(|error| error.to_string())?;
         append_events(
             &mut resolved.warnings,
@@ -780,4 +810,76 @@ fn project_layers(
         ));
     }
     Ok(layers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DictionarySpec;
+
+    #[test]
+    fn blocked_dictionary_warnings_describe_legacy_and_split_sources() {
+        for (label, kind) in [
+            ("dictionaries", SourceKind::Client),
+            ("project dictionaries", SourceKind::Project),
+        ] {
+            let origin = Origin::new(kind, "synthetic-settings");
+            let mut layer = SettingsLayer::new(origin.clone());
+            layer.dictionaries = vec![
+                DictionarySpec {
+                    name: "legacy".into(),
+                    path: Some("synthetic.xml".into()),
+                    ..DictionarySpec::default()
+                },
+                DictionarySpec {
+                    name: "pair".into(),
+                    transport: Some("FIXT.1.1".into()),
+                    application: Some("synthetic-application.xml".into()),
+                    ..DictionarySpec::default()
+                },
+                DictionarySpec {
+                    name: "family".into(),
+                    transport: Some("synthetic-transport.xml".into()),
+                    ..DictionarySpec::default()
+                },
+                DictionarySpec {
+                    name: "bundled".into(),
+                    transport: Some("FIXT.1.1".into()),
+                    application: Some("FIX.5.0SP2".into()),
+                    ..DictionarySpec::default()
+                },
+            ];
+            assert_eq!(
+                blocked_dictionaries(&[layer], label, &origin),
+                Some(Warning::new(
+                    "dictionaries",
+                    format!("allowDictionaryPath is false; {label} ignored: legacy (synthetic.xml), pair (transport: FIXT.1.1, application: synthetic-application.xml), family (transport: synthetic-transport.xml)"),
+                    origin,
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_only_sources_produce_no_blocked_dictionary_warning() {
+        let origin = Origin::new(SourceKind::Client, "synthetic-settings");
+        let mut layer = SettingsLayer::new(origin.clone());
+        layer.dictionaries = vec![
+            DictionarySpec {
+                name: "pair".into(),
+                transport: Some("FIXT.1.1".into()),
+                application: Some("FIX.5.0SP2".into()),
+                ..DictionarySpec::default()
+            },
+            DictionarySpec {
+                name: "family".into(),
+                transport: Some("FIXT.1.1".into()),
+                ..DictionarySpec::default()
+            },
+        ];
+        assert_eq!(
+            blocked_dictionaries(&[layer], "dictionaries", &origin),
+            None
+        );
+    }
 }

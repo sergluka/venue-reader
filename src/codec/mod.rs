@@ -1,14 +1,19 @@
 //! Byte-level FIX decoding: tokenizer, decoder, integrity facts.
 //!
-//! Config-free by design — everything here takes bytes and a `Dict`. The glue
-//! that picks the dictionary for a line lives in [`crate::ctx`].
+//! Config-free by design. Everything here gets bytes and the resolved
+//! transport and application sources. [`crate::ctx`] picks the sources for a line.
 
 pub mod decode;
 pub mod integrity;
 mod packed;
 pub mod tokenize;
 
+#[cfg(test)]
+mod version_tests;
+
+use crate::tag;
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -17,7 +22,10 @@ pub use integrity::Integrity;
 
 pub use tokenize::{tokenize, FieldSpan, LineKind, LineTokens};
 
-use crate::dictionary::{Dict, EnumIdx, FieldIdx, GroupIdx, MsgIdx};
+use crate::dictionary::{
+    DictionarySources, EnumIdx, FieldIdx, FieldView, GroupIdx, GroupView, MessageView, MsgIdx,
+    SourceRole, Standard,
+};
 use packed::Packed16;
 
 /// `GroupInstance::parent` is wider than `Field::group` only because it never
@@ -126,23 +134,20 @@ pub struct Field {
     group: Packed16,
     enum_idx: Packed16,
     tag_len: u8,
-    // One byte of tail padding is left over. Deliberate: a genuine flag can be
-    // added later for free, and nothing has to be repacked to make room.
+    flags: u8,
 }
 
 const _: () = assert!(std::mem::size_of::<Field>() == 20);
 
-// There is no `flags` byte, and that is a decision rather than an omission.
-// A "tag overflowed" flag would restate what `tag == u32::MAX` already says, and
-// two encodings of one fact means half the callers check the wrong one. A "value
-// is not UTF-8" flag is cheaper to recompute than to store: "no enum resolved"
-// is already `enum_value() == None`, and the consumers that need "these bytes
-// are not text" hold the line bytes anyway.
-//
-// The only remaining lever down to 16 bytes is dropping `tag` and re-reading the
-// digits from the line. Not done: `tag` is the most-read member, a `Field` that
-// cannot answer "which tag?" without the line is a poor abstraction, and the
-// memory question is settled by cache policy rather than by four more bytes.
+// Bits of `Field::flags`. The two low bits hold the owner role.
+const OWNER_MASK: u8 = 0b11;
+const OWNER_TRANSPORT: u8 = 0b01;
+const OWNER_APPLICATION: u8 = 0b10;
+const IN_HEADER: u8 = 1 << 2;
+const IN_TRAILER: u8 = 1 << 3;
+const COUNTER: u8 = 1 << 4;
+/// The bits that a field in a group entry gets from the count field of the group.
+const SCOPE_MASK: u8 = IN_HEADER | IN_TRAILER;
 
 impl Field {
     fn new(span: &FieldSpan) -> Field {
@@ -158,6 +163,7 @@ impl Field {
             group: Packed16::NONE,
             enum_idx: Packed16::NONE,
             tag_len: (span.tag_end - span.tag_start) as u8,
+            flags: 0,
         }
     }
 
@@ -171,6 +177,41 @@ impl Field {
 
     fn set_group(&mut self, instance: u32) {
         self.group = Packed16::pack(instance);
+    }
+
+    pub fn owner(&self) -> Option<SourceRole> {
+        match self.flags & OWNER_MASK {
+            OWNER_TRANSPORT => Some(SourceRole::Transport),
+            OWNER_APPLICATION => Some(SourceRole::Application),
+            _ => None,
+        }
+    }
+
+    pub fn unresolved(&self) -> bool {
+        self.owner().is_none()
+    }
+    pub fn is_header(&self) -> bool {
+        self.flags & IN_HEADER != 0
+    }
+    pub fn is_trailer(&self) -> bool {
+        self.flags & IN_TRAILER != 0
+    }
+    pub fn is_counter(&self) -> bool {
+        self.flags & COUNTER != 0
+    }
+
+    fn set_owner(&mut self, owner: SourceRole, scope_flags: u8) {
+        self.flags = match owner {
+            SourceRole::Transport => OWNER_TRANSPORT,
+            SourceRole::Application => OWNER_APPLICATION,
+        } | scope_flags;
+    }
+
+    fn clear_resolution(&mut self) {
+        self.flags = 0;
+        self.def = Packed16::NONE;
+        self.enum_idx = Packed16::NONE;
+        self.group = Packed16::NONE;
     }
 
     pub fn tag_end(&self) -> ByteOffset {
@@ -235,15 +276,20 @@ impl Field {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupInstance {
     pub group: GroupIdx,
+    /// Dictionary source whose group table owns `group`.
+    pub owner: SourceRole,
     /// 1-based entry number within the group.
     pub entry: u32,
     /// Index into `MessageAnalysis.fields` of the count field.
     pub count_field_idx: u32,
     /// Index into `MessageAnalysis.groups`, or [`NO_GROUP`].
     parent_idx: u32,
-    /// 1 for a top-level group.
-    pub depth: u16,
+    /// 1 for a top-level group, at most `MAX_GROUP_DEPTH`.
+    pub depth: u8,
 }
+
+// Every group entry of a cached line holds one.
+const _: () = assert!(std::mem::size_of::<GroupInstance>() == 16);
 
 impl GroupInstance {
     /// Index of the instance this one sits inside, always lower than its own.
@@ -262,7 +308,7 @@ pub struct GroupSpans {
     /// definition is kept here because it is in hand while the table is built,
     /// and a consumer that looks it up by scanning the instances turns a
     /// bounded pass into a quadratic one.
-    groups: BTreeMap<u32, (Range<ByteOffset>, GroupIdx)>,
+    groups: BTreeMap<u32, (Range<ByteOffset>, GroupRef)>,
 }
 
 impl GroupSpans {
@@ -282,7 +328,7 @@ impl GroupSpans {
     }
 
     /// The definition a count field opens.
-    pub fn group_def(&self, count_field_idx: u32) -> Option<GroupIdx> {
+    pub fn group_def(&self, count_field_idx: u32) -> Option<GroupRef> {
         self.groups.get(&count_field_idx).map(|(_, of)| *of)
     }
 }
@@ -299,15 +345,94 @@ fn widen_range(have: &mut Range<ByteOffset>, span: Range<ByteOffset>) {
     have.end = have.end.max(span.end);
 }
 
-/// What one line turned into.
-///
-/// An enum rather than a struct with a `kind` tag, so that "a comment has no
-/// fields" and "a message always has a dictionary" are unrepresentable rather
-/// than upheld by convention. Not for the memory: the enum is sized by its
-/// largest variant either way (120 bytes, down from 128 only because the tag
-/// and three `Option` discriminants went). What a line that is not a message
-/// stops paying is the refcount traffic — no `Dict` and no version `Arc` to
-/// clone and later drop. Cached per line in `document::Line`.
+/// A message definition index valid only in the dictionary selected by `owner`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageRef {
+    pub owner: SourceRole,
+    pub index: MsgIdx,
+}
+
+/// A group definition index valid only in the dictionary selected by `owner`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupRef {
+    pub owner: SourceRole,
+    pub index: GroupIdx,
+}
+
+/// One of [`tag::IDENTITY_SELECTORS`], kept as its position so that a
+/// [`ResolutionIssue`] is two bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selector(u8);
+
+impl Selector {
+    pub const BEGIN_STRING: Selector = Selector(0);
+    pub const MSG_TYPE: Selector = Selector(1);
+    pub const APPL_VER_ID: Selector = Selector(2);
+    pub const APPL_EXT_ID: Selector = Selector(3);
+    pub const CSTM_APPL_VER_ID: Selector = Selector(4);
+
+    const NAMES: [&str; tag::IDENTITY_SELECTORS.len()] = [
+        "BeginString(8)",
+        "MsgType(35)",
+        "ApplVerID(1128)",
+        "ApplExtID(1156)",
+        "CstmApplVerID(1129)",
+    ];
+
+    pub fn of(tag: u32) -> Option<Selector> {
+        tag::IDENTITY_SELECTORS
+            .iter()
+            .position(|selector| *selector == tag)
+            .map(|at| Selector(at as u8))
+    }
+
+    pub fn tag(self) -> u32 {
+        tag::IDENTITY_SELECTORS[self.index()]
+    }
+
+    /// The name and number of the tag, such as `ApplVerID(1128)`.
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self.index()]
+    }
+
+    pub fn index(self) -> usize {
+        usize::from(self.0)
+    }
+}
+
+/// Source-resolution failure; selector variants carry the offending selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionIssue {
+    MissingBeginString,
+    UnsupportedBeginString,
+    InvalidSelector(Selector),
+    DuplicateSelector(Selector),
+    MissingApplication,
+    UnregisteredApplication,
+    SelectorInGroup(Selector),
+    AmbiguousSelector(Selector),
+    ProhibitedSelector(Selector),
+}
+
+/// Source-selection facts retained for diagnostics and dictionary labels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Resolution {
+    /// Identity or structural error encountered while choosing dictionary sources.
+    pub issue: Option<ResolutionIssue>,
+    /// Whether the selected binding conflicted with this line's transport or application.
+    pub selected_mismatch: bool,
+    /// Hash of the binding that supplied the transport, for dictionary labels.
+    /// A zero hash, one in 2^64, shows no name.
+    pub transport_binding: Option<NonZeroU64>,
+    /// Hash of the binding that supplied the application, for dictionary labels.
+    /// A transport family and a default pair make it differ from `transport_binding`.
+    pub application_binding: Option<NonZeroU64>,
+}
+
+// Every cached message line holds one.
+const _: () = assert!(std::mem::size_of::<Resolution>() == 24);
+
+/// Non-message lines retain no dictionaries or field analysis.
 pub enum LineAnalysis {
     /// Empty or whitespace-only.
     Empty,
@@ -324,18 +449,21 @@ pub struct MessageAnalysis {
     /// Bytes of log prefix skipped before the first field. Spans are absolute,
     /// so this is informational.
     pub prefix_len: ByteOffset,
-    /// The dictionary this line was decoded with, and the version string that
-    /// selected it — `FIXT.1.1` resolves to the `FIX.5.0SP2` tables but the
-    /// line's version is still `FIXT.1.1`.
-    pub dict: Dict,
+    /// Dictionary owners for the indices stored in this analysis.
+    pub sources: DictionarySources,
+    pub resolution: Resolution,
+    /// Identified application release, otherwise BeginString(8) or an empty string.
     pub version: Arc<str>,
     pub fields: Vec<Field>,
     pub groups: Vec<GroupInstance>,
     /// Resolved from the first MsgType(35). `None` when the line carries none — a
     /// bare repeating-group block is still a message line — or when the
     /// dictionary does not know the type.
-    pub msg_type: Option<MsgIdx>,
+    pub msg_type: Option<MessageRef>,
 }
+
+// The fixed part of every cached message line. `heap_size` counts its vectors.
+const _: () = assert!(std::mem::size_of::<MessageAnalysis>() == 128);
 
 // `Line.analysis` is an `OnceLock<Arc<LineAnalysis>>` inside an `Arc<Line>` shared
 // with workers; make a future `Rc`/`Cell` a compile error, not a later surprise.
@@ -372,6 +500,52 @@ impl LineAnalysis {
 }
 
 impl MessageAnalysis {
+    pub fn field_dict(&self, field: &Field) -> Option<&crate::dictionary::Dict> {
+        self.sources.source(field.owner()?)
+    }
+
+    pub fn field_definition(&self, field: &Field) -> Option<FieldView<'_>> {
+        Some(self.field_dict(field)?.field(field.def()?))
+    }
+
+    pub fn field_version(&self, field: &Field) -> Option<&str> {
+        match field.owner()? {
+            SourceRole::Transport => self.field_dict(field)?.version(),
+            SourceRole::Application => Some(&self.version),
+        }
+    }
+
+    pub fn message_definition(&self) -> Option<MessageView<'_>> {
+        let message = self.msg_type?;
+        Some(self.sources.source(message.owner)?.message(message.index))
+    }
+
+    pub fn group_definition(&self, group: &GroupInstance) -> GroupView<'_> {
+        self.sources
+            .source(group.owner)
+            .expect("group source")
+            .group(group.group)
+    }
+
+    pub fn standard(&self, field: &Field) -> Standard {
+        match field.owner() {
+            Some(SourceRole::Transport) => {
+                Standard::of_source(self.field_dict(field).expect("field source"), field.tag)
+            }
+            Some(SourceRole::Application) => {
+                Standard::of_tag(crate::dictionary::Version::parse(&self.version), field.tag)
+            }
+            None => Standard::of_tag(None, field.tag),
+        }
+    }
+
+    pub fn is_bound(&self) -> bool {
+        self.sources.transport.is_some() || self.sources.application.is_some()
+    }
+    pub fn application_known(&self) -> bool {
+        self.sources.application.is_some()
+    }
+
     /// First field with this tag, in wire order — what the summary and hover use
     /// for a repeated tag.
     pub fn first(&self, tag: u32) -> Option<&Field> {
@@ -431,15 +605,21 @@ impl MessageAnalysis {
         // The count field is deliberately outside its own group, so a group's
         // span is its instances *plus* the count field's own span — a user
         // pointing at `453=3` means the group.
-        let mut groups: BTreeMap<u32, (Range<ByteOffset>, GroupIdx)> = BTreeMap::new();
+        let mut groups: BTreeMap<u32, (Range<ByteOffset>, GroupRef)> = BTreeMap::new();
         for (at, instance) in self.groups.iter().enumerate() {
             let Some(span) = instances[at].clone() else {
                 continue;
             };
             let count = instance.count_field_idx;
-            let slot = groups
-                .entry(count)
-                .or_insert_with(|| (self.fields[count as usize].span(), instance.group));
+            let slot = groups.entry(count).or_insert_with(|| {
+                (
+                    self.fields[count as usize].span(),
+                    GroupRef {
+                        owner: instance.owner,
+                        index: instance.group,
+                    },
+                )
+            });
             widen_range(&mut slot.0, span);
         }
         GroupSpans { instances, groups }
@@ -463,12 +643,19 @@ impl MessageAnalysis {
     /// this line's version. Resolving through the `Dict` the line was decoded
     /// with is the only correct way: an index means nothing against another.
     pub fn field_name(&self, field: &Field) -> Option<&str> {
-        Some(self.dict.field(field.def()?).name())
+        Some(self.field_definition(field)?.name())
     }
 
     /// Enum label for a field's value, `None` when it matches none.
     pub fn enum_label(&self, field: &Field) -> Option<&str> {
-        Some(self.dict.enum_at(field.def()?, field.enum_value()?).name())
+        if field.tag == crate::tag::MSG_TYPE {
+            return self.message_definition().map(|message| message.name());
+        }
+        Some(
+            self.field_dict(field)?
+                .enum_at(field.def()?, field.enum_value()?)
+                .name(),
+        )
     }
 
     /// Enum label of a tag's first occurrence — what a renderer wants when it
@@ -484,14 +671,13 @@ impl MessageAnalysis {
     /// that overflowed, which would put `4294967295` in a path beside the
     /// digits themselves wherever both are rendered.
     pub fn group_path(&self, field: &Field, line: &[u8]) -> Option<String> {
-        let dict = &self.dict;
         let chain = self.ancestors(field);
         if chain.is_empty() {
             return None;
         }
         let mut path = String::new();
         for instance in chain {
-            path.push_str(dict.group(instance.group).name());
+            path.push_str(self.group_definition(instance).name());
             path.push('/');
             path.push_str(&instance.entry.to_string());
             path.push('/');
@@ -542,5 +728,27 @@ mod byte_offset_tests {
             assert_eq!(ByteOffset::from_len(u32::MAX as usize + 1), None);
             assert_eq!(ByteOffset::from_len(usize::MAX), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod selector_tests {
+    use super::Selector;
+    use crate::tag;
+
+    #[test]
+    fn each_selector_names_its_own_tag() {
+        for (selector, number) in [
+            (Selector::BEGIN_STRING, tag::BEGIN_STRING),
+            (Selector::MSG_TYPE, tag::MSG_TYPE),
+            (Selector::APPL_VER_ID, tag::APPL_VER_ID),
+            (Selector::APPL_EXT_ID, tag::APPL_EXT_ID),
+            (Selector::CSTM_APPL_VER_ID, tag::CSTM_APPL_VER_ID),
+        ] {
+            assert_eq!(selector.tag(), number);
+            assert_eq!(Selector::of(number), Some(selector));
+            assert!(selector.name().ends_with(&format!("({number})")));
+        }
+        assert_eq!(Selector::of(tag::SIDE), None);
     }
 }

@@ -79,9 +79,10 @@ fn answer(params: &CodeActionParams, cap: usize, snapshot: &Snapshot) -> Handler
         // The label the walk passed too, so the claimed diagnostics stay
         // byte-identical to the published ones whatever the rule prints.
         let scope = Scope {
-            label: analysis
+            labels: analysis
                 .message()
-                .and_then(|message| snapshot.names.of(&message.version)),
+                .map(|message| snapshot.names.of_analysis(message))
+                .unwrap_or_default(),
             only: Some(integrity::Integrity.id()),
             ..Scope::default()
         };

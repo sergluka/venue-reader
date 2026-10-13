@@ -155,7 +155,7 @@ impl Mod {
 
     /// The pair for one entry: depth chooses it, the entry number alternates
     /// within it, so two adjacent entries of one group never look the same.
-    fn of_entry(depth: u16, entry: u32) -> Mod {
+    fn of_entry(depth: u8, entry: u32) -> Mod {
         const BY_DEPTH: [[Mod; 2]; DEEPEST_MARKED as usize] = [
             [Mod::Group1a, Mod::Group1b],
             [Mod::Group2a, Mod::Group2b],
@@ -172,7 +172,7 @@ pub const MODIFIERS: [&str; Mod::ALL.len()] = legend!(Mod);
 
 /// Groups deeper than this share the deepest pair of modifiers; a client has to
 /// map every name it colours, and the nesting a FIX log shows in practice is two.
-const DEEPEST_MARKED: u16 = 3;
+const DEEPEST_MARKED: u8 = 3;
 
 /// One coloured range. Never spans a line: a FIX message is one line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,8 +216,8 @@ fn message_tokens(line: &[u8], message: &MessageAnalysis, overlays: bool, out: &
     // everything rather than asked per field.
     let mut line_mods = 0;
     if message
-        .msg_type
-        .is_some_and(|idx| message.dict.message(idx).is_session())
+        .message_definition()
+        .is_some_and(|message| message.is_session())
     {
         line_mods |= Mod::Session.bit();
     }
@@ -229,11 +229,6 @@ fn message_tokens(line: &[u8], message: &MessageAnalysis, overlays: bool, out: &
     // vector and a map per line, while "which field opens a group" is a cheaper
     // question asked of the instances directly.
     let spans = overlays.then(|| message.group_spans());
-    let counters = counter_tags(message);
-    // Built once per line, not per field: building a scope costs about as
-    // much as searching it.
-    let schema = message.dict.schema();
-    let (header, trailer) = (schema.header(), schema.trailer());
     // An entry's first field is the one that raises the highest instance index
     // seen so far: instances are numbered as they are opened, so returning to a
     // parent after a nested group never looks like a new entry.
@@ -241,23 +236,21 @@ fn message_tokens(line: &[u8], message: &MessageAnalysis, overlays: bool, out: &
 
     for field in &message.fields {
         let mut mods = line_mods;
-        match field.def() {
-            Some(def) => {
-                // `deprecated()` and not `lifecycle()`: the latter resolves two
-                // more attributes and walks the presence masks for a third, all
-                // to answer a question about one of them.
-                if !message.dict.field(def).deprecated().is_empty() {
+        match message.field_definition(field) {
+            Some(definition) => {
+                if !definition.deprecated().is_empty() {
                     mods |= Mod::Deprecated.bit();
                 }
             }
-            None => mods |= Mod::Unknown.bit(),
+            None if !field.unresolved() => mods |= Mod::Unknown.bit(),
+            None => {}
         }
-        if header.reaches(&schema, field.tag) {
+        if field.is_header() {
             mods |= Mod::Header.bit();
-        } else if trailer.reaches(&schema, field.tag) {
+        } else if field.is_trailer() {
             mods |= Mod::Trailer.bit();
         }
-        if counters.binary_search(&field.tag).is_ok() {
+        if field.is_counter() {
             mods |= Mod::Count.bit();
         }
         let instance = field.group_idx();
@@ -296,30 +289,6 @@ fn message_tokens(line: &[u8], message: &MessageAnalysis, overlays: bool, out: &
     }
 }
 
-/// Which tags open a group in this message, its header or its trailer, sorted.
-///
-/// From the **dictionary**, not from what the line instantiated: `268=0` opens
-/// no entries and is still the field that counts them. A message type the
-/// dictionary does not know declares nothing, which is what it can honestly
-/// say — and the annotator enters no header group on such a line either.
-fn counter_tags(message: &MessageAnalysis) -> Vec<u32> {
-    let Some(msg) = message.msg_type else {
-        return Vec::new();
-    };
-    let schema = message.dict.schema();
-    let mut out = Vec::new();
-    let mut stack = vec![schema.message(msg.0), schema.header(), schema.trailer()];
-    while let Some(scope) = stack.pop() {
-        for (tag, member) in scope.groups() {
-            out.push(tag);
-            stack.extend(member.group().map(|group| schema.group(group)));
-        }
-    }
-    out.sort_unstable();
-    out.dedup();
-    out
-}
-
 /// The special tags come first on purpose: a QuickFIX dictionary synthesises an
 /// enum for every message type, so resolving enums first would leave nothing
 /// spelled as a keyword.
@@ -332,8 +301,8 @@ fn value_kind(message: &MessageAnalysis, field: &Field) -> Kind {
     if field.enum_value().is_some() {
         return Kind::EnumMember;
     }
-    match field.def() {
-        Some(def) => of_datatype(message.dict.field(def).datatype_class()),
+    match message.field_definition(field) {
+        Some(definition) => of_datatype(definition.datatype_class()),
         None => Kind::String,
     }
 }

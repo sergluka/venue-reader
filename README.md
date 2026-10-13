@@ -14,6 +14,7 @@ All analysis runs locally. FIX messages are not uploaded to a decoding service.
 - [Running the server](#running-the-server)
 - [Configuration](#configuration)
 - [Custom dictionaries](#custom-dictionaries)
+- [Venue dictionary examples](#venue-dictionary-examples)
 - [LSP capabilities](#lsp-capabilities)
 - [Custom commands](#custom-commands)
 - [Semantic tokens](#semantic-tokens)
@@ -29,12 +30,66 @@ fix-lsp processes one FIX message per line. It accepts SOH, pipe (`|`), and
 caret (`^`) separators, and can skip a log prefix before BeginString(8).
 Blank lines and `#` comments are supported.
 
-Bundled dictionaries cover FIX 4.0, 4.1, 4.2, 4.3, 4.4, 5.0, 5.0 SP1, and
-5.0 SP2. FIXT 1.1 resolves to the bundled FIX 5.0 SP2 dictionary, which includes
-the FIXT session definitions. Versions are resolved independently for each
-line from BeginString(8), so one log can contain messages from different FIX
-versions. Custom XML dictionaries can define their own fields, values,
-messages, and groups.
+Bundled dictionaries cover FIX 4.0–4.4, FIX 5.0/SP1/SP2, and standalone
+FIXT 1.1. Each line resolves its transport and application independently, so
+one log can contain messages from different FIX versions. FIXT supplies the
+header, trailer and administrative messages; the selected application supplies
+application message bodies. Custom XML dictionaries can define their own
+fields, values, messages, and groups.
+
+### FIX versions and message identity
+
+BeginString(8) selects the transport. Conventional FIX4 messages use the same
+source for both roles. FIX5 application messages use `8=FIXT.1.1` with
+ApplVerID(1128); `FIX.5.0`, `FIX.5.0SP1`, and `FIX.5.0SP2` are dictionary
+identifiers, never accepted wire aliases.
+
+| ApplVerID(1128) | Application release |
+| --- | --- |
+| `0`, `1` | `FIX.2.7`, `FIX.3.0` (external dictionaries required) |
+| `2`–`6` | `FIX.4.0`–`FIX.4.4` |
+| `7` | `FIX.5.0` |
+| `8` | `FIX.5.0SP1` |
+| `9` | `FIX.5.0SP2` |
+| `10` | `FIX.Latest` (external dictionary required) |
+
+For example, `8=FIXT.1.1|35=D|1128=8|54=1|` decodes Side(54) using FIX 5.0
+SP1 and the header using FIXT 1.1. This abbreviated example omits integrity
+fields. FIXT can also carry a FIX4 application, such as ApplVerID(1128) = 6.
+
+Without ApplVerID(1128), a FIXT application message uses the selected complete
+pair's application identity, then `defaultApplVerID`. Both are absent by
+default: transport fields remain decoded, application values remain raw, and
+`unknownVersion` reports the missing application identity. A registration with
+`default = true` supplies a dictionary for an identity; it does not supply the
+missing application release.
+
+ApplExtID(1156) and CstmApplVerID(1129) identify an extension pack and custom
+version separately from the release. Explicit message values override the
+corresponding configured identity defaults. Absence differs from explicit
+zero. An unregistered exact identity stays unresolved: the server never drops
+an unknown identifier, invents an extension pack or chooses a nearby release.
+
+A complete pair whose identity conflicts with a message is discarded as a
+whole, including its transport and identity defaults. The message then uses
+the matching default pair and reports `dictionaryVersion`. A selected
+transport-only family retains its transport while the application changes
+per message. Conventional FIX4 does not infer a modern application profile;
+select an explicit FIX4 transport/application pair for one.
+`default = true` and ApplVerID(1128) = 10 alone do not activate that profile.
+
+FIXT administrative messages need only transport. Application selectors on
+such a message are reported without selecting an application. Logon fields,
+including DefaultApplVerID(1137), never affect another line or document; there
+is no session tracking or negotiation.
+
+Missing, invalid, repeated or unsupported BeginString(8) leaves fields without
+dictionary interpretation even when a dictionary is selected. Standard tag
+names may still be shown, but enum labels, group paths and version-dependent
+links are not inferred. Missing application identity preserves available
+transport decoding. Malformed or repeated selectors, including identical
+repetitions, are rejected; selectors inside groups or with unresolved
+structural ownership invalidate the dependent interpretation.
 
 ### Inspecting messages
 
@@ -115,7 +170,7 @@ Write literal braces as `{{` and `}}`. An unresolved placeholder suppresses
 the label; a format containing only literal text applies to every field.
 A tag the selected dictionary does not define, but standard FIX names, is
 labelled with the standard name and a `?` mark — `RejectText?` for
-RejectText(1328) on a FIX.5.0 line — meaning the name is standard FIX's, not
+RejectText(1328) on a FIXT line with ApplVerID(1128) = 7 — meaning the name is standard FIX's, not
 the dictionary's; the hint's tooltip says which dictionary lacks it and, where
 the version has bundled tables, which version has it. A tag neither knows has
 no label.
@@ -201,7 +256,7 @@ disagree about a field, hover says nothing about it;
 
 A tag the selected dictionary does not define is still named and placed
 against standard FIX when FIX Latest or a bundled version knows it: `1328=…`
-on a FIX.5.0 line reads **RejectText** (1328), *Not in FIX.5.0, introduced in
+on a FIXT line with ApplVerID(1128) = 7 reads **RejectText** (1328), *Not in FIX.5.0, introduced in
 FIX.5.0SP1*, and the raw value. Under a custom dictionary a line above the
 note says the dictionary lacks it — *Not defined by "desk"*. Nothing else is
 claimed: no datatype, description or lifecycle line, and a versioned link only
@@ -210,8 +265,9 @@ or one the sources dispute, has no hover; the `unknownTag` diagnostic
 ([Diagnostics](#diagnostics)) still says the dictionary lacks it.
 
 For a tag no line carries, [`fix.describeTag`](#fixdescribetag) answers from
-the newest version that defines it, with that tag's lifespan in place of a
-note about any one version.
+FIXT 1.1 for a transport field and otherwise from the newest version that
+defines the tag, with that tag's lifespan in place of a note about any one
+version.
 
 ### Large logs and editor support
 
@@ -287,7 +343,7 @@ come from the sources below.
 Settings use the same canonical names across LSP, TOML, and modelines. Only
 explicitly supplied values override lower-priority values, including when an
 explicit value equals a built-in default. Objects merge per setting;
-dictionary declarations accumulate subject to name and version-default rules.
+dictionary declarations accumulate subject to name and identity-default rules.
 
 ### Sources and precedence
 
@@ -411,7 +467,8 @@ remove the key instead.
 | Settings | Personal TOML / global LSP | Project TOML | Modelines |
 | --- | --- | --- | --- |
 | `hover.*`, `semanticTokens.*`, `inlayHints.*`, `messageSummary.*`, `documentSymbol.*`, `diagnostics.*` | Yes | Yes | Yes |
-| `defaultVersion`, `allowDictionaryPath`, `documentLink.url`, `overrides.*`, `limits.*` | Yes | No | No |
+| `allowDictionaryPath`, `documentLink.url`, `overrides.*`, `limits.*` | Yes | No | No |
+| `defaultApplVerID` | Yes | Yes | Yes |
 | `dictionaries[]` | Yes | Yes | No |
 | `dictionary` selector | Session command only | Yes | Yes |
 | `files` filter | No | Yes | No |
@@ -430,7 +487,7 @@ configuration files sparse so higher layers only override intended settings.
 ```json
 {
   "allowDictionaryPath": false,
-  "defaultVersion": "FIX.4.4",
+  "defaultApplVerID": null,
   "dictionaries": [],
   "overrides": { "projectConfig": true, "modeline": true },
   "hover": { "enabled": true },
@@ -472,10 +529,12 @@ enabled, with severities listed under [Diagnostics](#diagnostics).
 `inlayHints.groupPaths.enabled` changes tag labels; it produces no hints
 while tag-name hints are disabled.
 
-There is no explicit `dictionary` selection by default: BeginString(8)
-selects the version, using `defaultVersion` when it cannot.
+There is no explicit `dictionary` selection by default. BeginString(8)
+selects the transport; application identity uses ApplVerID(1128), a selected
+complete pair, or `defaultApplVerID`. Missing or unsupported BeginString(8)
+leaves dictionary interpretation unresolved, including when a dictionary is selected.
 `files` has no filter by default. A dictionary entry defaults to
-`default = false`; `name` and `path` are required.
+`default = false`; `name` and either `path` or `transport` are required.
 
 | Limit | Effect |
 | --- | --- |
@@ -495,7 +554,11 @@ still answers every cursor, but returns whole-line ranges only.
 The [global settings schema](schema/fix-lsp.schema.json) describes accepted
 values. `documentSymbol.depth` accepts `messages`, `fields`, or `full`;
 diagnostic severity accepts `error`, `warning`, `info`, or `hint`.
-`defaultVersion` must resolve to a bundled or configured version.
+`defaultApplVerID` accepts `null` or a canonical application release, such as
+`"FIX.5.0SP2"` or `"FIX.Latest"`; wire codes such as `"9"` are not configuration
+values. It can be overridden per document. There is no built-in FIXT
+application default. The removed `defaultVersion` key follows ordinary
+unknown-key handling.
 
 ### Applying changes and troubleshooting
 
@@ -529,10 +592,12 @@ before restarting.
 
 ## Custom dictionaries
 
-Custom dictionaries are standalone, not overlays on bundled dictionaries.
+Dictionary sources are independent, not overlays on bundled dictionaries.
 Fields, enum values, and message or group structures missing from a custom
-dictionary are not inherited from a bundled one. Include the standard
-definitions you need alongside your custom definitions.
+source are not inherited within that role. Bind a transport and application
+source to compose their roles; include the definitions each source needs.
+Source ownership is preserved inside nested groups, even when the same tag
+has different types or enum labels in the two sources.
 
 Hover compares each field of a custom dictionary with standard FIX for the
 line's version and marks the ones that version does not define; see
@@ -586,9 +651,11 @@ first, then `… and N more`, as severe as the worst one it counts.
 One discrepancy loads without a report: a tag number defined under two
 names keeps the last definition, and both names resolve.
 
-The FIX version comes from XML metadata, for example
-`<fix type="FIX" major="4" minor="4">`. It is not inferred from filenames,
-and there is no `dictionaries[].version` option. Direct loading of FIX
+The source's FIX version comes from XML metadata, for example
+`<fix type="FIX" major="4" minor="4">`. It is not inferred from filenames.
+`applicationVersion` declares binding identity, without changing this metadata;
+a declaration contradicting a non-FIXT application source is rejected.
+There is no `dictionaries[].version` option. Direct loading of FIX
 Orchestra XML is not supported; Orchestra is used to build bundled metadata.
 
 A working synthetic example is
@@ -596,8 +663,9 @@ A working synthetic example is
 
 ### Registering and selecting dictionaries
 
-First enable `allowDictionaryPath` in personal TOML or global LSP settings.
-The following is a global LSP `fix` section:
+For file sources, first enable `allowDictionaryPath` in personal TOML or
+global LSP settings. Bindings using only bundled sources do not need file
+access. The following is a global LSP `fix` section:
 
 ```json
 {
@@ -612,11 +680,62 @@ The following is a global LSP `fix` section:
 }
 ```
 
-Every definition requires a nonblank, unique `name` and a `path`.
+| Binding form | Sources and identity |
+| --- | --- |
+| FIX4 `path` | One XML source supplies transport and application. |
+| FIX5 `path` | XML application plus bundled `FIXT.1.1`. |
+| Transport-only FIXT `path` | One transport source; no application default. |
+| Combined FIXT `path` | One source supplies both roles; requires `applicationVersion`. |
+| `transport` + `application` | Complete pair with independent sources. |
+| `transport` alone | Family retaining transport while application resolves per line. |
+| `transport = "FIX.4.4"` + modern `application` | Explicit modern FIX4 profile. |
 
-`default = true` makes a dictionary the fallback for messages of its
-declared FIX version. Registration alone does not replace the bundled
-dictionary: `default` is false unless specified.
+Each entry has `name`, `path` (default empty), `transport`, `application`,
+`applicationVersion`, `extensionPack`, `customVersion`, and `default` (default
+false). Optional strings and identity fields are absent unless supplied.
+`extensionPack` is a nonnegative integer, including explicit zero;
+`customVersion` is a nonblank string. Sources retain their original XML;
+separate bindings may reuse one file and still have different names/identities.
+
+Every definition requires a nonblank, unique `name` and either `path` or
+`transport`. `path` cannot be combined with `transport` or `application`.
+A FIX4 path supplies both roles; a FIX5 path supplies application definitions
+with bundled FIXT transport. A transport-only FIXT path supplies no application.
+A combined FIXT path requires explicit `applicationVersion`.
+
+Explicit bindings use `transport` and optional `application`, each naming a
+bundled source or an XML file, never another registration. An explicit
+`transport = "FIX.4.4"` can accompany a `FIX.Latest` application source.
+An explicit `application` source supplies application bodies even if its XML
+also declares a header or trailer; those definitions do not replace the
+selected transport.
+
+The following fields describe the application identity used to match messages
+to the binding:
+
+| Field | Meaning |
+| --- | --- |
+| `applicationVersion` | Canonical application release, such as `FIX.5.0SP2`, corresponding to ApplVerID(1128). Normally read from the application XML root. Required for a combined FIXT-rooted source, whose root identifies only the transport. |
+| `extensionPack` | Optional official FIX Extension Pack number, corresponding to ApplExtID(1156). Extension packs introduce changes between FIX releases. |
+| `customVersion` | Optional agreed application-profile identifier, corresponding to CstmApplVerID(1129). It identifies a profile that extends or restricts the base FIX definitions; its string format is defined by the integration. |
+
+Omit `extensionPack` and `customVersion` unless the dictionary describes an
+application identity with those additional identifiers. A dictionary containing
+custom fields does not automatically require `customVersion`. The binding's
+`name` is a separate server-local selector.
+
+The XML must already contain the definitions for the declared release,
+extension pack and custom profile. These settings describe that identity;
+they do not add definitions or rewrite XML metadata. An explicit
+`applicationVersion` must agree with non-FIXT application XML metadata.
+The current loader reads the release from the XML root and takes extension-pack
+and custom-profile identity from these configuration fields.
+See [FIXT 1.1, Extension Pack Support and Custom Application Version Support](https://www.fixtrading.org/wp-content/uploads/download-manager-files/FIX_Transport_1.1.pdf#page=9).
+
+`default = true` makes the binding available for automatic selection of its
+exact transport/application identity. Registration alone does not replace
+bundled defaults. File sources require `allowDictionaryPath`; bindings using
+only bundled sources are available without it.
 
 To keep multiple dictionaries available and select one per project:
 
@@ -629,15 +748,46 @@ name = "custom44"
 path = "dict/custom-fix44.xml"
 
 [[dictionaries]]
-name = "venue44"
-path = "dict/venue-fix44.xml"
+name = "alternate44"
+path = "dict/alternate-fix44.xml"
+
+# FIX5 path shorthand pairs the application with bundled FIXT.
+[[dictionaries]]
+name = "custom-sp2"
+path = "dict/FIX50SP2.xml"
+
+# Sources are canonical bundled identifiers or XML files, never binding names.
+[[dictionaries]]
+name = "custom-pair"
+transport = "dict/FIXT11.xml"
+application = "dict/FIX50SP2.xml"
+
+# Transport family: resolve the application from each message or explicit default.
+[[dictionaries]]
+name = "custom-transport"
+transport = "dict/FIXT11.xml"
+
+# A combined FIXT-rooted file needs application identity.
+[[dictionaries]]
+name = "combined"
+path = "dict/combined.xml"
+applicationVersion = "FIX.5.0SP2"
+
+# Modern FIX4 profile: select it explicitly.
+[[dictionaries]]
+name = "fix44-latest"
+transport = "FIX.4.4"
+application = "dict/latest.xml"
+applicationVersion = "FIX.Latest"
 ```
 
 This is an alternative to global registration, not an additional declaration
 of the same names. Names must be unique across the applicable global/project
-chain and cannot shadow bundled names. Within one array, duplicate defaults
-for the same version are errors. A stronger layer can replace a version
-default with a differently named dictionary.
+chain and cannot shadow bundled names. A stronger layer replaces claims for
+the same exact identity before validation. Competing effective claims, or
+effective defaults assigning different physical transport sources to one
+BeginString(8), disable all affected custom defaults and report errors.
+Their named bindings remain selectable; bundled defaults remain available.
 
 The same definition arrays are supported in personal TOML, but a top-level
 `dictionary` selector is not. Selection can come from project TOML, a
@@ -648,14 +798,16 @@ bundled data even when a custom version default exists.
 A project or modeline selector can also be a path when file access is enabled.
 Absolute paths and prefixes `./`, `../`, or `~/` identify path selectors;
 other strings are dictionary names. Modelines cannot declare dictionary
-arrays. `fix.useDictionary` accepts names only and does not load XML.
+arrays. Direct paths use the same shorthand rules as `path`; they cannot
+express a separate two-file pair. `fix.useDictionary` accepts canonical
+bundled names and committed global binding names only and does not load XML.
 
-Selection does not change the message version. The selected dictionary must
-match the version resolved from BeginString(8); FIX 5.0 SP2 dictionaries also
-accept FIXT 1.1 messages. A mismatch falls back to the resolved version's
-default dictionary and is reported by `dictionaryVersion`.
-Selecting a FIX 4.2 dictionary does not change the default version of a
-fragment without BeginString(8).
+Selection does not change BeginString(8). A selected complete pair supplies
+application identity before `defaultApplVerID`; explicit message selectors
+must match its exact identity. A mismatch discards the whole pair and its
+defaults, resolves the matching default pair, and is reported by
+`dictionaryVersion`. Only a transport-only family allows dynamic application
+composition. Selecting a dictionary does not restore fragment decoding.
 
 ### Path resolution
 
@@ -669,6 +821,243 @@ Only a leading `~/` is expanded. There is no shell, environment-variable,
 or glob expansion. Global relative paths without an initialization root are
 rejected; the process working directory is not used as a fallback.
 Paths refer to the server's filesystem.
+
+## Venue dictionary examples
+
+Choose the dictionary for the exact API, session type and release that produced
+the log. Order entry, market data and drop copy can have different dictionaries
+at the same venue. The examples below are original configuration snippets;
+paths and registration names are illustrative. They describe dictionary loading,
+not venue certification or session connectivity.
+
+Obtain files from the publisher under the terms applicable to those files.
+This section links to official resources without reproducing venue XML, field
+tables or logs. Public availability does not establish redistribution permission,
+and this project's license does not relicense externally obtained dictionaries.
+
+Enable `allowDictionaryPath = true` in personal TOML or global LSP settings
+before using file sources; a project file or modeline cannot grant file access.
+Each example below is an independent `.fix-lsp.toml` configuration. Paths are
+relative to that file. Adjust them to your locally obtained files. If combining
+examples, keep one top-level `dictionary` selector and unique binding names.
+The server attempts to load every registered file.
+
+### Binance Spot
+
+Publisher: [FIX API and schema links](https://developers.binance.com/en/docs/products/spot/fix-api).
+
+The FIX4.4 order-entry schema covers order entry and drop copy; market data has
+its own schema. A FIX4 `path` supplies both transport and application definitions.
+
+```toml
+# .fix-lsp.toml
+dictionary = "binance-spot-oe"
+
+[[dictionaries]]
+name = "binance-spot-oe"
+path = "dict/binance/spot-fix-oe.xml"
+```
+
+For market-data logs, register `spot-fix-md.xml` under a separate name and
+select that binding. Do not assume the order-entry schema covers market data.
+
+### Coinbase Exchange
+
+Publisher: [Dictionary downloads](https://docs.cdp.coinbase.com/exchange/fix-api/dictionary-downloads).
+
+The FIX5.0 interfaces publish separate transport and application files. Use both
+files from the same session directory and dictionary release.
+
+```toml
+# .fix-lsp.toml
+dictionary = "coinbase-exchange-oe"
+
+[[dictionaries]]
+name = "coinbase-exchange-oe"
+transport = "dict/coinbase-exchange/order-entry/FIXT11-prod-sand.xml"
+application = "dict/coinbase-exchange/order-entry/FIX50-prod-sand.xml"
+```
+
+For market data, register a separate pair from the `market-data` directory.
+The supplied FIX4.2 order-entry file `FIX42-prod-sand.xml` instead uses a single
+`path`, with no `transport` or `application` fields. Its application release
+comes from the XML root; no `applicationVersion` annotation is needed.
+
+### Coinbase International Exchange
+
+Publisher: [Dictionary downloads](https://docs.cdp.coinbase.com/international-exchange/fix-api/dictionary-downloads).
+
+Register the matching FIXT1.1/FIX5.0 pair from `order`, `marketdata` or `dropcopy`.
+These API profiles are separate from Coinbase Exchange.
+
+```toml
+# .fix-lsp.toml
+dictionary = "coinbase-intx-oe"
+
+[[dictionaries]]
+name = "coinbase-intx-oe"
+transport = "dict/coinbase-intx/order/FIXT11.xml"
+application = "dict/coinbase-intx/order/FIX50.xml"
+```
+
+For market data or drop copy, use both files from the corresponding directory
+and register a distinct binding. The shared filenames do not mean the files
+are interchangeable between session types.
+
+### Kalshi
+
+Publisher: [FIX documentation](https://docs.kalshi.com/fix/common-components),
+[dictionary download](https://assets.kalshi.com/fix/kalshi-fix-dictionary.xml).
+
+The combined dictionary has a FIXT1.1 root and supplies both transport and
+application definitions. Its root does not identify the SP2 application release,
+so the binding needs `applicationVersion`.
+
+```toml
+# .fix-lsp.toml
+dictionary = "kalshi"
+
+[[dictionaries]]
+name = "kalshi"
+path = "dict/kalshi/kalshi-fix-dictionary.xml"
+applicationVersion = "FIX.5.0SP2"
+```
+
+Without the application identity, this combined `path` registration is rejected.
+Do not assign an extension pack or custom-profile identifier merely because the
+file contains venue-specific definitions.
+
+### Nadex / CDNA
+
+Publisher: [repository at the inspected revision](https://github.com/NadexWeb/cdna-quickfixj-customization/tree/4d022b972e657bafea7fb4e9fb462d8195c9afd8).
+
+The published combined `fixt11-dcm-schema-client (2).xml` has a FIXT1.1 root.
+The following recipe uses its definitions for the publisher's SP2 application
+profile; it refers to the pinned revision, not every Nadex/CDNA release.
+
+```toml
+# .fix-lsp.toml
+dictionary = "nadex-cdna"
+
+[[dictionaries]]
+name = "nadex-cdna"
+path = "dict/nadex/fixt11-dcm-schema-client (2).xml"
+applicationVersion = "FIX.5.0SP2"
+```
+
+In that revision, the separate `FIX50SP2.modified.xml` file declares a FIX5.0
+root without SP2 metadata. Assigning `applicationVersion = "FIX.5.0SP2"` to
+that file is rejected because it contradicts the XML root. The combined-file
+recipe supplies the missing application identity without changing publisher XML.
+
+### Nasdaq INET Nordic
+
+Publisher: [protocol specifications](https://www.nasdaq.com/products/european-markets/inet-nordic-protocol-specifications).
+
+Obtain a matching QuickFIX XML dictionary through an authorized publisher source
+for the exact interface and release. Choose the binding from the file's XML root
+and source roles: a conventional FIX4 file uses `path`; separate transport and
+application files use a pair; a combined FIXT file needs `applicationVersion`.
+
+A specification's interface revision is not its FIX application release. The
+linked specifications alone do not establish that a loadable QuickFIX XML file
+is available, or that one dictionary covers every Nasdaq market/interface.
+
+### Euronext Optiq
+
+Publisher: [IT documentation](https://connect2.euronext.com/en/it-documentation).
+
+Use a QuickFIX XML dictionary for the exact Optiq interface and release when
+available under applicable terms. Register separate transport/application files
+as a pair, or annotate a combined FIXT file with its documented application
+release. Determine the form from the actual files, not the venue name.
+
+A FIX message specification PDF cannot be loaded as a dictionary. The publisher
+link is a documentation entry point, not a claim that a public QuickFIX XML
+file exists for every Optiq interface or that its redistribution is permitted.
+
+### Other supported dictionary arrangements
+
+These generic recipes complete the [supported binding forms](#registering-and-selecting-dictionaries).
+They are not attributed to a particular venue. The SP2 application file must
+have XML metadata declaring SP2; the Latest file must be QuickFIX XML with
+`version="FIX.Latest"`, not an Orchestra or Unified Repository source.
+
+```toml
+# .fix-lsp.toml
+dictionary = "application-sp2"
+
+# Application-only FIX5 XML: use bundled FIXT transport.
+[[dictionaries]]
+name = "application-sp2"
+path = "dict/FIX50SP2.xml"
+
+# Pure FIXT XML with only administrative messages.
+[[dictionaries]]
+name = "session-dictionary"
+path = "dict/FIXT11.xml"
+
+# Transport family: resolve the application separately for each message.
+[[dictionaries]]
+name = "transport-family"
+transport = "dict/FIXT11.xml"
+
+# Modern application definitions carried over FIX4 transport.
+[[dictionaries]]
+name = "modern-fix44"
+transport = "FIX.4.4"
+application = "dict/FIXLatest.xml"
+```
+
+For an explicit pair, either source can also be a canonical bundled identifier:
+for example, `transport = "FIXT.1.1"` with a local `application` file. Preserve
+a venue's transport dictionary when its header or administrative definitions
+are needed. Definitions may also be registered in personal TOML or global LSP
+settings; the project `dictionary` selector is separate from registration.
+
+For another log, select a registered binding by name, for example with
+`# fix: dictionary=coinbase-exchange-oe` in a document modeline. A named binding
+can represent a complete pair; a direct XML path cannot supply a second source
+or the required identity annotation for a combined FIXT dictionary. For global
+registrations, `fix.useDictionary` can select the registered name.
+
+### Identity and selection pitfalls
+
+
+- **Read the XML root, not the filename.** FIX application roots supply their
+  release, including a declared service pack. A FIXT root identifies transport
+  only: a combined file needs `applicationVersion`, including when it is used
+  as an explicit `application` source. Without that annotation a combined
+  FIXT `path` registration is rejected, not treated as transport-only.
+- **Omit extra identifiers unless the profile actually uses them.**
+  `extensionPack` identifies an official FIX Extension Pack; `customVersion`
+  identifies an agreed application profile. Custom fields alone imply neither.
+  Their values must come from the profile's specification, not an example or
+  filename. The loader takes these two identifiers from configuration; they
+  describe definitions already present in the XML, rather than applying patches.
+  Absent `extensionPack` and explicit zero are distinct identities.
+- **Registering is not selecting.** Choose `dictionary` for a project/modeline,
+  or add `default = true` for automatic matching of that binding's exact identity.
+  Multiple venue profiles for the same identity should normally remain named
+  selections; competing defaults are disabled. A default registration does not
+  supply a missing FIXT application version. A selected complete pair does;
+  otherwise configure `defaultApplVerID` when needed. Logon-derived defaults
+  and full session processing are not implemented.
+- **Selection still checks message identity.** BeginString(8) must be valid;
+  FIX5 messages use `FIXT.1.1`, not `FIX.5.0SP2`. Explicit ApplVerID(1128),
+  ApplExtID(1156) and CstmApplVerID(1129) must match a selected complete pair.
+  A mismatch discards that pair and resolves matching defaults, with a
+  `dictionaryVersion` diagnostic. Selection currently cannot force a mismatch.
+  A transport family instead keeps transport while resolving the application.
+- **Exact identities require exact dictionaries.** FIX.Latest, extension packs,
+  custom profiles and older unbundled application releases require external
+  definitions. The server does not substitute the nearest bundled release.
+  If an application source cannot be resolved, its body remains raw; available
+  transport definitions can still describe the header and trailer.
+- **Not every XML file is a QuickFIX dictionary.** FIX Orchestra, Unified
+  Repository XML, FIXML, SBE schemas and publisher PDFs are not directly loaded
+  by the QuickFIX XML loader. Imported definitions aid decoding; they do not
+  certify venue compatibility or provide full schema/session validation.
 
 ## LSP capabilities
 
@@ -758,12 +1147,14 @@ start the server, send `initialize` and `initialized`, and ask. In Neovim,
 `client:exec_cmd()` sends the command.
 
 The command names no version, because the question is what a tag means rather
-than whether some version has it. The newest bundled version that defines the
-tag answers — the current meaning, and the fullest code set — and the answer
-carries that tag's own lifespan: when it entered the protocol, when it was
+than whether some version has it. FIXT 1.1 answers for a transport field: one
+that the FIXT header or trailer declares, or one that no FIX 5 release defines,
+such as DefaultApplExtID(1407). Hover on a FIXT line places such a field the same way.
+Otherwise the newest bundled version that defines the tag answers — the current
+meaning, and the fullest code set. The answer carries that tag's own lifespan: when it entered the protocol, when it was
 deprecated, and for a tag the protocol dropped, the version that removed it.
 Hover's "not in this version" note belongs to a line and is not shown here.
-Neither the session's dictionary selection nor `fix.defaultVersion` is
+Neither the session's dictionary selection nor `fix.defaultApplVerID` is
 consulted, and only bundled tables are read, so a custom dictionary's own
 definitions never answer. The reference link points at the pages of the version
 that answered.
@@ -787,10 +1178,27 @@ Arguments: one bundled or committed global dictionary name:
 { "command": "fix.useDictionary", "arguments": ["FIX.4.4"] }
 ```
 
-Returns `{name, version, source}` and selects that dictionary for the session,
-below project and modeline selectors. Personal and global LSP definitions are
+Selects that dictionary for the session, below project and modeline selectors.
+Personal and global LSP definitions are
 available; project-only names and paths are not. The command selects from the
 committed registry without reading or reloading XML.
+
+The result preserves `name`, `version`, and `source` and adds both source roles:
+
+| Field | Contents |
+| --- | --- |
+| `name` | Selected canonical bundled identifier or registered name. |
+| `version` | Application release for a complete pair; transport version for a family. |
+| `source` | Application source for a complete pair; transport source for a family. |
+| `transport` | `{version, source}` for the transport. |
+| `application` | `null` for a transport-only family; otherwise `{version, extensionPack, customVersion, source}`. Absent optional identity dimensions are `null`. |
+
+Sources are canonical bundled identifiers or resolved filesystem paths.
+For `FIX.5.0SP2`, transport is `{version: "FIXT.1.1", source: "FIXT.1.1"}`;
+application is `{version: "FIX.5.0SP2", extensionPack: null, customVersion: null,
+source: "FIX.5.0SP2"}`. These describe the selected binding; per-line identity
+resolution and mismatch fallback still apply. Conventional single-source
+bindings report the same physical source for both roles.
 
 The choice survives configuration updates while its name remains registered.
 Removing that name clears the selection; adding it back does not restore the
@@ -815,6 +1223,11 @@ Returns:
 | `sources` | Winning layer and source for each key; modelines also include the assignment's LSP range. |
 | `warnings` | Applicable configuration warnings. |
 | `dictionaries` | Available dictionary definitions and their source information. |
+
+Each `dictionaries` entry exposes the same `transport` and `application`
+objects as `fix.useDictionary`. Its `path` remains the resolved application
+source (transport source for a family), and `source` identifies the
+configuration layer that registered it, rather than the XML or bundled source.
 
 It reports the last committed configuration, including while an update is
 pending. A document with no committed configuration returns `RequestFailed`.
@@ -890,10 +1303,10 @@ Six FIX rules are implemented. All are enabled by default:
 | Rule | Default severity | Diagnostic code(s) | Condition |
 | --- | --- | --- | --- |
 | `beginString` | `warning` | `beginString` | Recognized fields without BeginString(8). |
-| `unknownVersion` | `warning` | `unknownVersion` | BeginString(8) cannot select its declared version; decoding uses the fallback. |
+| `unknownVersion` | `warning` | `unknownVersion` | Unsupported transport, missing or unregistered application identity, invalid or repeated selectors, selectors inside a repeating group or with unresolved structural ownership, or prohibited application selectors on administrative messages. |
 | `dictionaryVersion` | `warning` | `dictionaryVersion` | The selected dictionary is incompatible with the resolved message version. Reported once per mismatching version in a document. |
 | `integrity` | `error` | `bodyLength`, `checkSum` | Missing or incorrect BodyLength(9) or CheckSum(10). |
-| `unknownMsgType` | `info` | `unknownMsgType` | The line's dictionary does not list its MsgType(35). |
+| `unknownMsgType` | `info` | `missingMsgType`, `unknownMsgType` | Missing MsgType(35), or the resolved source does not list it. |
 | `unknownTag` | `info` | `unknownTag` | The line's dictionary does not define a tag. Every occurrence is reported. |
 
 Each `diagnostics.rules.<rule>` accepts a boolean or an object with
@@ -920,26 +1333,21 @@ its configured name (else its file name) or, for bundled tables, by version: `FI
 define tag 9000`, `"desk" does not define MsgType(35) = U1`. After a tag
 standard FIX knows comes how it stands there, in hover's words:
 `FIX.5.0 does not define RejectText(1328); introduced in FIX.5.0SP1`. Both
-run only on a line whose dictionary was chosen — by its BeginString(8), or,
-on a fragment without one, by an explicit selection that decoded it. A line
-decoded by fallback, such as `8=FIX.9.9`, is not checked against it.
+check only definitions with resolved ownership. An unresolved application does
+not produce guesses about unknown application tags or messages. Missing or
+unknown MsgType(35) disables group annotation, including header/trailer groups.
+Cross-source group/group or group/plain-field conflicts retain safe prefix
+annotations and stop group annotation through the rest of the line;
+unresolved ownership does not become an `unknownTag` finding.
 
-Known limits:
-
-- A `8=FIXT.1.1` message is always checked as FIX.5.0SP2; ApplVerID(1128)
-  is not consulted. The bundled
-  FIX.5.0 and FIX.5.0SP1 tables have no session layer, so under them
-  `unknownMsgType` stays silent and session fields such as HeartBtInt(108)
-  are reported by `unknownTag`.
-- A custom dictionary is taken as the full list of messages, session
-  messages included. One that declares only application messages reports
-  every session message, such as MsgType(35) = A, as unknown; a custom FIX 5
-  dictionary cannot yet be paired with a separate session dictionary.
+Integrity uses the original bytes independently of dictionary resolution and
+still runs on a message with unsupported transport or unresolved application.
+Selecting a dictionary does not decode a fragment without BeginString(8).
 
 This is not full FIX schema validation: there are no rules for required
 fields, tags not allowed in their message or group, enum values, group-count
-consistency, or sequence gaps, and a tag repeated outside a group is not
-reported. Configuration errors are reported separately from these rules and
+consistency, or sequence gaps. Ordinary duplicate fields outside a group are not reported;
+the version resolver separately rejects duplicate identity selectors. Configuration errors are reported separately from these rules and
 are not suppressed by `diagnostics.enabled`.
 
 ## Bundled dictionary sources
@@ -952,8 +1360,9 @@ The dictionaries are built from public sources and compiled into the binary:
 | [FIX Trading Community Orchestra](https://github.com/FIXTradingCommunity/orchestrations) | Descriptions, enum labels, lifecycle metadata, and selected missing enum values. | Apache-2.0, © FIX Protocol Ltd. |
 
 QuickFIX/J defines which fields, messages, and groups belong to each version.
-The bundled FIXT 1.1 session definitions are folded into the FIX 5.0 SP2
-tables. Metadata is projected from the FIX Latest Orchestra file; descriptions
+FIXT 1.1 remains a standalone transport source; FIX 5.0/SP1/SP2 tables retain
+their original application membership. Metadata is projected from the FIX
+Latest Orchestra file; descriptions
 therefore come from that source rather than an exact historical manual for
 every version.
 
@@ -982,11 +1391,13 @@ says nothing where they disagree:
 - 6 tags in the user-defined range (5000–39999) are only in QuickFIX/J's FIX 5.0
   file: not standard. They read *Custom field* even under the bundled FIX 5.0
   dictionary.
-- 59 (version, tag) pairs are dated differently by the two: no claim is made,
-  and 42 tags show no introduction date.
+- 39 application (version, tag) pairs are dated differently by the two: no
+  claim is made, and 38 application tags show no introduction date. The former
+  20 transport disagreements disappear when transport membership is checked
+  against standalone FIXT, separately from application chronology.
 - Enum values: QuickFIX/J lists them unevenly and the bundled tables complete
-  them from FIX Latest in 114 (version, field) places, so no claim is made about
-  values yet.
+  them from FIX Latest where release metadata permits, so no claim is made
+  about values yet.
 
 Examples and how the counts are pinned are in
 [Bundled dictionary data](xml/README.md#standard-status--two-witnesses).
@@ -1016,16 +1427,19 @@ url = ""
 
 Alternatively, set `documentLink.url` to your own HTTP(S) reference template.
 Supported substitutions are `{tag}`, `{version}` (OnixS-style version
-segment: `4.4`, `5.0`, `5.0.SP1`, `5.0.SP2`), and `{fixVersion}` (the full FIX
-version). Other URL schemes are rejected. Project files and modelines cannot
+segment: `4.4`, `5.0`, `5.0.SP1`, `5.0.SP2`, `fixt1.1`), and `{fixVersion}`
+(the full owning source's FIX version). Other URL schemes are rejected. Project files and modelines cannot
 change this global setting.
 
 A template that uses `{version}` points into one version's pages, so a tag is
 linked only when the bundled dictionary for that version defines it and FIX
 Latest does not dispute it. Any other template links every tag, including a
-custom dictionary's own. The default site publishes 4.0 to 5.0.SP2. A desk
-whose own template uses `{version}` loses links on its custom tags; use
-`{fixVersion}` for those.
+custom dictionary's own when its version is resolved. Transport fields use
+the transport source's version; application fields use the application
+source's version. Templates containing either version placeholder are
+suppressed when that version is unresolved. A version-independent `{tag}`
+template can still link a raw field. A custom reference that supports exact
+source names can use `{fixVersion}` for its custom fields.
 
 For fully offline operation, keep configuration and dictionary files on local
 storage and disable external reference links. Editor extensions and

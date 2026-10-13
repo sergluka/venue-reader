@@ -73,7 +73,10 @@ fn answer(params: &HoverParams, format: &MarkupKind, snapshot: &Snapshot) -> Han
     let Some(index) = message.field_idx_at(byte) else {
         return Ok(Value::Null);
     };
-    let label = snapshot.names.of(&message.version);
+    let label = snapshot
+        .names
+        .of_analysis(message)
+        .of(message.fields[index].owner());
     let Some(markdown) = hover(&line.bytes, message, index, &snapshot.render, label) else {
         return Ok(Value::Null);
     };

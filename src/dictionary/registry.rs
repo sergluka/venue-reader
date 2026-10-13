@@ -11,18 +11,19 @@ use std::time::SystemTime;
 
 use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
-use super::dict::{bundled, Dict, Version, DEFAULT_VERSION};
+use super::binding::{is_begin_string, requires_fixt, to_wire, FIXT_1_1};
+pub use super::binding::{ApplicationIdentity, ApplicationKey, DictionarySources, SourceRole};
+use super::dict::{bundled, Dict, MessageView, Version};
 use super::model::{Fault, ParsedDict};
 use super::parse::{self, ParseError, Source};
 use super::statics::DICTS_BUILD_HASH;
 use crate::config::{DictionarySpec, Limits};
 
+/// One problem that a registry build reports as a configuration warning or error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryEvent {
-    LoadFailed {
-        path: String,
-        detail: String,
-    },
+    /// The dictionary file did not load. The entry is not registered.
+    LoadFailed { path: String, detail: String },
     /// The dictionary loaded, with one defect in it; `error` as
     /// `Fault::is_error`.
     DictionaryFault {
@@ -37,24 +38,50 @@ pub enum RegistryEvent {
         count: usize,
         error: bool,
     },
-    DuplicateDefault {
-        version: String,
-        path: String,
-    },
-    BadName {
+    /// The sources or the identity of a binding are not valid together. The
+    /// entry is not registered.
+    InvalidBinding { name: String, detail: String },
+    /// The default claim of a binding conflicts with another claim. The server
+    /// disables the claim, but the binding stays selectable by name.
+    DefaultConflict {
         name: String,
+        /// BeginString(8) value of the disabled claim.
+        begin_string: String,
         detail: String,
     },
-    BlankName {
-        path: String,
+    /// An event from one configuration layer, with the name of that layer.
+    AtSource {
+        source: String,
+        event: Box<RegistryEvent>,
     },
-    DefaultVersionUnresolved {
-        requested: String,
+    /// The name is the same as an earlier name or a bundled identifier. The
+    /// entry is not registered.
+    BadName { name: String, detail: String },
+    /// The entry has a blank name and is not registered.
+    BlankName {
+        /// Description of the entry sources, because the entry has no name.
+        path: String,
     },
 }
 
 impl RegistryEvent {
+    /// The configuration layer that the event comes from, if the event records it.
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            Self::AtSource { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+
     pub fn message(&self) -> String {
+        self.message_in(None)
+    }
+
+    /// `layer` names the configuration layer in the messages of binding events.
+    fn message_in(&self, layer: Option<&str>) -> String {
+        let in_layer = layer
+            .map(|layer| format!(" in {layer}"))
+            .unwrap_or_default();
         match self {
             Self::LoadFailed { path, detail } => {
                 format!("dictionary {path:?} not loaded: {detail}")
@@ -75,22 +102,32 @@ impl RegistryEvent {
                     a_fault(*error)
                 )
             }
-            Self::DuplicateDefault { version, path } => format!(
-                "dictionary {path:?} is a second default for {version}; the first one is kept"
-            ),
+            Self::InvalidBinding { name, detail } => {
+                format!("dictionary binding {name:?}{in_layer} rejected: {detail}")
+            }
+            Self::DefaultConflict {
+                name,
+                begin_string,
+                detail,
+            } => {
+                format!(
+                    "dictionary default {name:?}{in_layer} disabled for {begin_string}: {detail}"
+                )
+            }
+            Self::AtSource { source, event } => event.message_in(Some(source)),
             Self::BadName { name, detail } => {
                 format!("dictionary name {name:?} rejected: {detail}")
             }
             Self::BlankName { path } => {
                 format!("dictionary {path:?} has a blank name; the entry is ignored")
             }
-            Self::DefaultVersionUnresolved { requested } => {
-                format!("defaultVersion {requested:?} has no dictionary; using {DEFAULT_VERSION}")
-            }
         }
     }
 
     pub fn is_error(&self) -> bool {
+        if let Self::AtSource { event, .. } = self {
+            return event.is_error();
+        }
         if let Self::DictionaryFault { error, .. } | Self::MoreDictionaryFaults { error, .. } = self
         {
             return *error;
@@ -98,7 +135,8 @@ impl RegistryEvent {
         matches!(
             self,
             Self::LoadFailed { .. }
-                | Self::DuplicateDefault { .. }
+                | Self::InvalidBinding { .. }
+                | Self::DefaultConflict { .. }
                 | Self::BadName { .. }
                 | Self::BlankName { .. }
         )
@@ -154,28 +192,54 @@ pub struct DictionaryLayer<'a> {
     pub root_dir: Option<&'a Path>,
 }
 
+/// Resolved transport and optional application binding, retaining independent sources.
 #[derive(Clone)]
 pub struct DictionaryChoice {
+    /// Application source when `application` is set; otherwise the transport source.
     pub dict: Dict,
-    pub version: String,
+    /// Bundled identifier or canonical file path of `dict`.
     pub source: String,
+    /// Hash of source identities and application metadata; selection names do not affect it.
     pub identity: u64,
     pub name: Option<String>,
+    /// Header, trailer and administrative source; conventional FIX4 shares it with `dict`.
+    pub transport: Dict,
+    /// Exact release/extension/custom identity; `None` means no application source.
+    pub application: Option<ApplicationIdentity>,
+    /// Bundled identifier or canonical file path of `transport`.
+    pub transport_source: String,
 }
 
 impl DictionaryChoice {
-    pub fn compatible_with(&self, version: &str) -> bool {
-        versions_compatible(&self.version, version)
+    pub fn sources(&self) -> DictionarySources {
+        DictionarySources {
+            transport: Some(self.transport.clone()),
+            application: self.application.as_ref().map(|_| self.dict.clone()),
+        }
+    }
+
+    pub fn source(&self, role: SourceRole) -> Option<&Dict> {
+        match role {
+            SourceRole::Transport => Some(&self.transport),
+            SourceRole::Application => self.application.as_ref().map(|_| &self.dict),
+        }
+    }
+
+    pub fn application_version(&self) -> Option<&str> {
+        self.application
+            .as_ref()
+            .map(|identity| identity.version.as_str())
+    }
+
+    /// Canonical application release, or transport BeginString(8) for a transport-only choice.
+    pub fn version(&self) -> &str {
+        self.application_version()
+            .unwrap_or_else(|| self.transport.version().expect("transport version"))
     }
 }
 
-pub fn versions_compatible(dictionary_version: &str, message_version: &str) -> bool {
-    dictionary_version == message_version
-        || dictionary_version == Version::resolve_alias_str(message_version)
-}
-
 pub fn is_reserved_selector(name: &str) -> bool {
-    Version::is_version_identifier(name)
+    Version::is_version_identifier(name) || to_wire(name).is_some()
 }
 
 #[derive(Clone)]
@@ -183,16 +247,45 @@ pub struct DictionaryDefinition {
     pub spec: DictionarySpec,
     pub source: String,
     pub choice: DictionaryChoice,
+    /// Position of the declaring layer, weakest first.
+    priority: usize,
 }
 
 #[derive(Clone)]
 pub struct Registry {
-    by_version: HashMap<String, Dict>,
-    /// The configured name of each `by_version` dictionary, for hover.
-    default_names: HashMap<String, String>,
-    by_name: HashMap<String, Dict>,
+    defaults: HashMap<DefaultKey, DictionaryChoice>,
+    transport_identities: HashMap<String, u64>,
+    default_names: HashMap<u64, String>,
+    transport_defaults: HashMap<String, DictionaryChoice>,
+    pairs: HashMap<String, Vec<DictionaryChoice>>,
+    by_name: HashMap<String, DictionaryChoice>,
     definitions: Vec<DictionaryDefinition>,
-    default_version: String,
+    identity: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DefaultKey {
+    begin_string: String,
+    application: Option<ApplicationIdentity>,
+}
+
+impl DefaultKey {
+    fn of(choice: &DictionaryChoice) -> Self {
+        Self {
+            begin_string: choice
+                .transport
+                .version()
+                .expect("transport version")
+                .to_owned(),
+            application: choice.application.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LoadedSource {
+    dict: Dict,
+    source: String,
     identity: u64,
 }
 
@@ -217,20 +310,32 @@ struct FileStamp {
 
 impl Registry {
     pub fn bundled_only() -> Registry {
-        Registry {
-            by_version: HashMap::new(),
+        let mut registry = Registry {
+            defaults: HashMap::new(),
+            transport_identities: HashMap::new(),
             default_names: HashMap::new(),
+            transport_defaults: Version::ALL
+                .into_iter()
+                .filter(|version| is_begin_string(version.as_str()))
+                .map(|version| {
+                    (
+                        version.as_str().to_owned(),
+                        make_choice(bundled_source(version), None, None, None),
+                    )
+                })
+                .collect(),
+            pairs: HashMap::new(),
             by_name: HashMap::new(),
             definitions: Vec::new(),
-            default_version: DEFAULT_VERSION.to_owned(),
-            identity: empty_identity(DEFAULT_VERSION),
-        }
+            identity: empty_identity(),
+        };
+        registry.rebuild_pairs();
+        registry
     }
 
     #[cfg(test)]
     pub fn build(
         specs: &[DictionarySpec],
-        default_version: &str,
         ctx: &BuildContext<'_>,
         store: &DictionaryStore,
     ) -> (Registry, Vec<RegistryEvent>) {
@@ -241,10 +346,18 @@ impl Registry {
                 source: "client",
                 root_dir: ctx.root_dir,
             }],
-            default_version,
             ctx,
         ) {
-            Ok(built) => built,
+            Ok((registry, events)) => (
+                registry,
+                events
+                    .into_iter()
+                    .map(|event| match event {
+                        RegistryEvent::AtSource { event, .. } => *event,
+                        event => event,
+                    })
+                    .collect(),
+            ),
             Err(error) => (
                 Self::bundled_only(),
                 vec![RegistryEvent::LoadFailed {
@@ -260,81 +373,227 @@ impl DictionaryStore {
     pub fn build_registry(
         &self,
         layers: &[DictionaryLayer<'_>],
-        default_version: &str,
         ctx: &BuildContext<'_>,
     ) -> Result<(Registry, Vec<RegistryEvent>), LoadError> {
         let mut registry = Registry::bundled_only();
         let mut events = Vec::new();
-        for layer in layers {
+        let mut claims: HashMap<DefaultKey, Vec<usize>> = HashMap::new();
+        for (priority, layer) in layers.iter().enumerate() {
             let layer_ctx = BuildContext {
                 root_dir: layer.root_dir,
                 home_dir: ctx.home_dir,
                 limits: ctx.limits,
             };
-            let mut defaults = HashSet::new();
+            let mut layer_claims: HashMap<DefaultKey, Vec<usize>> = HashMap::new();
+            let mut layer_events = Vec::new();
             for spec in layer.specs {
                 if spec.name.trim().is_empty() {
-                    events.push(RegistryEvent::BlankName {
-                        path: spec.path.clone(),
+                    layer_events.push(RegistryEvent::BlankName {
+                        path: spec.source_description(),
                     });
                     continue;
                 }
                 if let Some(detail) = registry.name_problem(&spec.name, layer.source) {
-                    events.push(RegistryEvent::BadName {
+                    layer_events.push(RegistryEvent::BadName {
                         name: spec.name.clone(),
                         detail,
                     });
                     continue;
                 }
-                let (stamp, content, parsed) = match self.load(&spec.path, &layer_ctx) {
-                    Ok(loaded) => loaded,
-                    Err(error @ LoadError::Io { .. }) => return Err(error),
-                    Err(error) => {
-                        events.push(RegistryEvent::LoadFailed {
-                            path: spec.path.clone(),
-                            detail: error.to_string(),
-                        });
-                        continue;
-                    }
-                };
-                for event in fault_events(&spec.path, &parsed.faults) {
-                    if !events.contains(&event) {
-                        events.push(event);
-                    }
-                }
-                let version = parsed.version.clone().expect("validated XML version");
-                let source = display_path(&stamp);
-                let dict = Dict::Owned(parsed);
+                let (choice, transport_identity) =
+                    match self.registration(spec, &layer_ctx, &mut layer_events) {
+                        Ok(loaded) => loaded,
+                        Err(error @ LoadError::Io { .. }) => return Err(error),
+                        Err(LoadError::InvalidBinding { detail }) => {
+                            layer_events.push(RegistryEvent::InvalidBinding {
+                                name: spec.name.clone(),
+                                detail,
+                            });
+                            continue;
+                        }
+                        Err(error) => {
+                            layer_events.push(RegistryEvent::LoadFailed {
+                                path: match &error {
+                                    LoadError::Source { path, .. } => path.clone(),
+                                    _ => spec.source_description(),
+                                },
+                                detail: error.to_string(),
+                            });
+                            continue;
+                        }
+                    };
                 if spec.default {
-                    if defaults.insert(version.clone()) {
-                        registry.by_version.insert(version.clone(), dict.clone());
-                        registry
-                            .default_names
-                            .insert(version.clone(), spec.name.clone());
-                    } else {
-                        events.push(RegistryEvent::DuplicateDefault {
-                            version: version.clone(),
-                            path: spec.path.clone(),
-                        });
-                    }
+                    layer_claims
+                        .entry(DefaultKey::of(&choice))
+                        .or_default()
+                        .push(registry.definitions.len());
                 }
-                registry.by_name.insert(spec.name.clone(), dict.clone());
+                registry
+                    .transport_identities
+                    .insert(choice.transport_source.clone(), transport_identity);
+                registry.by_name.insert(spec.name.clone(), choice.clone());
                 registry.definitions.push(DictionaryDefinition {
                     spec: spec.clone(),
                     source: layer.source.to_owned(),
-                    choice: DictionaryChoice {
-                        dict,
-                        version,
-                        source,
-                        identity: content,
-                        name: Some(spec.name.clone()),
-                    },
+                    choice,
+                    priority,
                 });
             }
+            // A stronger layer replaces a weaker claim before conflicts are checked.
+            claims.extend(layer_claims);
+            events.extend(
+                layer_events
+                    .into_iter()
+                    .map(|event| RegistryEvent::AtSource {
+                        source: layer.source.to_owned(),
+                        event: Box::new(event),
+                    }),
+            );
         }
-        registry.validate_default(default_version, &mut events);
+        registry.apply_defaults(claims, &mut events);
+        registry.rebuild_pairs();
         registry.update_identity();
         Ok((registry, events))
+    }
+
+    fn source(
+        &self,
+        source: &str,
+        ctx: &BuildContext<'_>,
+        events: &mut Vec<RegistryEvent>,
+    ) -> Result<LoadedSource, LoadError> {
+        if let Some(version) = Version::parse(source) {
+            return Ok(bundled_source(version));
+        }
+        if is_reserved_selector(source) {
+            return Err(LoadError::InvalidBinding {
+                detail: format!("{source} has no bundled dictionary; supply a public XML source"),
+            });
+        }
+        let (stamp, identity, parsed) = self.load(source, ctx).map_err(|error| {
+            if error.is_fatal() {
+                error
+            } else {
+                LoadError::Source {
+                    path: source.to_owned(),
+                    error: Box::new(error),
+                }
+            }
+        })?;
+        for event in fault_events(source, &parsed.faults) {
+            if !events.contains(&event) {
+                events.push(event);
+            }
+        }
+        let source = display_path(&stamp);
+        let mut physical_identity = Xxh3::new();
+        physical_identity.update(source.as_bytes());
+        physical_identity.update(&identity.to_le_bytes());
+        Ok(LoadedSource {
+            dict: Dict::Owned(parsed),
+            source,
+            identity: physical_identity.digest(),
+        })
+    }
+
+    fn registration(
+        &self,
+        spec: &DictionarySpec,
+        ctx: &BuildContext<'_>,
+        events: &mut Vec<RegistryEvent>,
+    ) -> Result<(DictionaryChoice, u64), LoadError> {
+        spec.validate_shape()
+            .map_err(|detail| LoadError::InvalidBinding { detail })?;
+        let (transport, application) = if let Some(path) = &spec.path {
+            let loaded = self.source(path, ctx, events)?;
+            let version = loaded.dict.version().expect("validated XML version");
+            if version == FIXT_1_1 {
+                if spec.application_version.is_some() {
+                    (loaded.clone(), Some(loaded))
+                } else {
+                    if let Dict::Owned(parsed) = &loaded.dict {
+                        if parsed
+                            .messages
+                            .iter()
+                            .any(|message| !MessageView::Owned(message).is_session())
+                        {
+                            return Err(LoadError::InvalidBinding {
+                                detail: "combined FIXT source requires applicationVersion".into(),
+                            });
+                        }
+                    }
+                    (loaded, None)
+                }
+            } else if requires_fixt(version) {
+                (bundled_source(Version::Fixt11), Some(loaded))
+            } else {
+                (loaded.clone(), Some(loaded))
+            }
+        } else {
+            let transport = self.source(
+                spec.transport.as_deref().expect("validated shape"),
+                ctx,
+                events,
+            )?;
+            let application = spec
+                .application
+                .as_deref()
+                .map(|source| self.source(source, ctx, events))
+                .transpose()?;
+            (transport, application)
+        };
+        let begin_string = transport.dict.version().expect("transport version");
+        if !is_begin_string(begin_string) {
+            return Err(LoadError::InvalidBinding {
+                detail: format!("{begin_string} is not a transport BeginString"),
+            });
+        }
+        let identity = if let Some(application) = &application {
+            let declared = application.dict.version().expect("application version");
+            let version = spec.application_version.as_deref().unwrap_or(declared);
+            if to_wire(version).is_none() {
+                return Err(LoadError::InvalidBinding {
+                    detail: "application source requires a canonical applicationVersion".into(),
+                });
+            }
+            if declared != FIXT_1_1 && declared != version {
+                return Err(LoadError::InvalidBinding {
+                    detail: format!(
+                        "applicationVersion {version} contradicts XML version {declared}"
+                    ),
+                });
+            }
+            if begin_string != FIXT_1_1
+                && begin_string != version
+                && !(begin_string == "FIX.4.4" && spec.transport.is_some())
+            {
+                return Err(LoadError::InvalidBinding {
+                    detail: format!(
+                        "application {version} requires FIXT.1.1 or an explicit FIX.4.4 profile"
+                    ),
+                });
+            }
+            Some(ApplicationIdentity {
+                version: version.to_owned(),
+                extension_pack: spec.extension_pack,
+                custom_version: spec.custom_version.clone(),
+            })
+        } else {
+            if spec.application_version.is_some()
+                || spec.extension_pack.is_some()
+                || spec.custom_version.is_some()
+            {
+                return Err(LoadError::InvalidBinding {
+                    detail: "application identity requires an application source".into(),
+                });
+            }
+            None
+        };
+        let transport_identity = transport.identity;
+        Ok((
+            make_choice(transport, application, identity, Some(spec.name.clone())),
+            transport_identity,
+        ))
     }
 
     pub fn load_choice(
@@ -342,14 +601,17 @@ impl DictionaryStore {
         path: &str,
         ctx: &BuildContext<'_>,
     ) -> Result<DictionaryChoice, LoadError> {
-        let (stamp, identity, parsed) = self.load(path, ctx)?;
-        Ok(DictionaryChoice {
-            version: parsed.version.clone().expect("validated XML version"),
-            dict: Dict::Owned(parsed),
-            source: display_path(&stamp),
-            identity,
-            name: None,
-        })
+        let (mut choice, _) = self.registration(
+            &DictionarySpec {
+                path: Some(path.to_owned()),
+                name: "direct-path".into(),
+                ..DictionarySpec::default()
+            },
+            ctx,
+            &mut Vec::new(),
+        )?;
+        choice.name = None;
+        Ok(choice)
     }
 
     fn load(
@@ -369,120 +631,330 @@ impl DictionaryStore {
 impl Registry {
     pub fn choice(&self, name: &str) -> Option<DictionaryChoice> {
         if let Some(version) = Version::parse(name) {
-            let dict = Dict::Static(bundled(version));
-            let declared = dict.version().expect("bundled version").to_owned();
-            let mut identity = Xxh3::new();
-            identity.update(&DICTS_BUILD_HASH.to_le_bytes());
-            identity.update(declared.as_bytes());
-            return Some(DictionaryChoice {
-                dict,
-                version: declared,
-                source: name.to_owned(),
-                identity: identity.digest(),
-                name: Some(name.to_owned()),
-            });
+            let source = bundled_source(version);
+            let choice = if version == Version::Fixt11 {
+                make_choice(source, None, None, Some(name.to_owned()))
+            } else {
+                let transport = if requires_fixt(name) {
+                    bundled_source(Version::Fixt11)
+                } else {
+                    source.clone()
+                };
+                make_choice(
+                    transport,
+                    Some(source),
+                    Some(ApplicationIdentity::release(name)),
+                    Some(name.to_owned()),
+                )
+            };
+            return Some(choice);
         }
-        self.definitions
-            .iter()
-            .find(|entry| entry.spec.name == name)
-            .map(|entry| entry.choice.clone())
+        self.by_name.get(name).cloned()
+    }
+
+    /// Binary search keeps profile lookup allocation-free as custom defaults grow.
+    pub fn default_pair<'a>(
+        &self,
+        begin_string: &str,
+        application: impl Into<ApplicationKey<'a>>,
+    ) -> Option<&DictionaryChoice> {
+        let application = Some(application.into());
+        let pairs = self.pairs.get(begin_string)?;
+        let index = pairs
+            .binary_search_by(|choice| {
+                choice
+                    .application
+                    .as_ref()
+                    .map(ApplicationIdentity::key)
+                    .cmp(&application)
+            })
+            .ok()?;
+        pairs.get(index)
+    }
+
+    pub fn default_transport(&self, begin_string: &str) -> Option<&DictionaryChoice> {
+        self.transport_defaults.get(begin_string)
+    }
+
+    fn rebuild_pairs(&mut self) {
+        let mut pairs: HashMap<String, HashMap<ApplicationIdentity, DictionaryChoice>> =
+            HashMap::new();
+        for version in Version::ALL {
+            let application_version = version.as_str();
+            if to_wire(application_version).is_none() {
+                continue;
+            }
+            let application_identity = ApplicationIdentity::release(application_version);
+            let mut begin_strings = vec![FIXT_1_1];
+            if is_begin_string(application_version) {
+                begin_strings.push(application_version);
+            }
+            for begin_string in begin_strings {
+                let family = self.defaults.get(&DefaultKey {
+                    begin_string: begin_string.to_owned(),
+                    application: None,
+                });
+                let transport = match family {
+                    Some(family) => self.transport_source(family),
+                    None => {
+                        bundled_source(Version::parse(begin_string).expect("bundled transport"))
+                    }
+                };
+                let application_source = if begin_string == application_version {
+                    transport.clone()
+                } else {
+                    bundled_source(version)
+                };
+                let choice = make_choice(
+                    transport,
+                    Some(application_source),
+                    Some(application_identity.clone()),
+                    None,
+                );
+                pairs
+                    .entry(begin_string.to_owned())
+                    .or_default()
+                    .insert(application_identity.clone(), choice);
+            }
+        }
+        for (key, choice) in &self.defaults {
+            if let Some(application) = &key.application {
+                pairs
+                    .entry(key.begin_string.clone())
+                    .or_default()
+                    .insert(application.clone(), choice.clone());
+            }
+        }
+        self.pairs = pairs
+            .into_iter()
+            .map(|(begin_string, pairs)| {
+                let mut choices: Vec<_> = pairs.into_values().collect();
+                choices.sort_by(|left, right| left.application.cmp(&right.application));
+                (begin_string, choices)
+            })
+            .collect();
+    }
+
+    fn transport_source(&self, choice: &DictionaryChoice) -> LoadedSource {
+        LoadedSource {
+            dict: choice.transport.clone(),
+            source: choice.transport_source.clone(),
+            identity: self.transport_identities[&choice.transport_source],
+        }
     }
 
     pub fn definitions(&self) -> &[DictionaryDefinition] {
         &self.definitions
     }
 
+    // Compatibility for consumers migrating to exact pair resolution.
+    #[cfg(test)]
     pub fn resolve(&self, version: &str) -> Option<Dict> {
-        self.by_version
-            .get(version)
-            .or_else(|| self.by_version.get(Version::resolve_alias_str(version)))
-            .cloned()
-            .or_else(|| Version::parse(version).map(|version| Dict::Static(bundled(version))))
+        if version == FIXT_1_1 {
+            return self
+                .default_transport(version)
+                .map(|choice| choice.dict.clone());
+        }
+        let begin_string = super::binding::transport_begin_string(version);
+        self.default_pair(begin_string, &ApplicationIdentity::release(version))
+            .map(|choice| choice.dict.clone())
     }
 
-    pub fn default_names(&self) -> &HashMap<String, String> {
+    pub fn default_name_for_identity(&self, identity: u64) -> Option<&str> {
+        self.default_names.get(&identity).map(String::as_str)
+    }
+
+    pub fn default_names(&self) -> &HashMap<u64, String> {
         &self.default_names
     }
 
-    /// The configured name of the dictionary `resolve(version)` answers with,
-    /// `None` for bundled tables.
-    pub fn default_name(&self, version: &str) -> Option<&str> {
-        self.default_names
-            .get(version)
-            .or_else(|| self.default_names.get(Version::resolve_alias_str(version)))
-            .map(String::as_str)
+    /// Bindings reachable without an explicit dictionary selection.
+    pub(crate) fn default_binding_identities(&self) -> impl Iterator<Item = u64> + '_ {
+        self.transport_defaults
+            .values()
+            .chain(self.pairs.values().flat_map(|pairs| pairs.iter()))
+            .map(|choice| choice.identity)
     }
-
+    #[cfg(test)]
+    pub fn default_name(&self, version: &str) -> Option<&str> {
+        let begin_string = super::binding::transport_begin_string(version);
+        let choice = if version == FIXT_1_1 {
+            self.default_transport(version)
+        } else {
+            self.default_pair(begin_string, &ApplicationIdentity::release(version))
+        }?;
+        self.default_name_for_identity(choice.identity)
+    }
+    #[cfg(test)]
     pub fn bindings(&self) -> Vec<(&str, Dict)> {
-        let mut bindings: Vec<_> = self
-            .by_version
-            .iter()
-            .map(|(version, dict)| (version.as_str(), dict.clone()))
+        let mut bindings: Vec<_> = Version::ALL
+            .into_iter()
+            .filter_map(|version| {
+                self.resolve(version.as_str())
+                    .map(|dict| (version.as_str(), dict))
+            })
             .collect();
-        for version in Version::ALL {
-            let name = version.as_str();
-            if !bindings.iter().any(|(bound, _)| *bound == name) {
-                bindings.push((name, self.resolve(name).expect("bundled version")));
+        for key in self.defaults.keys() {
+            let version = key
+                .application
+                .as_ref()
+                .map_or(key.begin_string.as_str(), |application| {
+                    application.version.as_str()
+                });
+            if !bindings.iter().any(|(bound, _)| *bound == version) {
+                if let Some(dict) = self.resolve(version) {
+                    bindings.push((version, dict));
+                }
             }
         }
         bindings
     }
-
+    #[cfg(test)]
     pub fn named(&self, name: &str) -> Option<Dict> {
         self.choice(name).map(|choice| choice.dict)
     }
-
-    pub fn default_version(&self) -> &str {
-        &self.default_version
-    }
-
-    pub fn default_dict(&self) -> Dict {
-        self.resolve(&self.default_version)
-            .expect("validated default")
-    }
-
     pub fn identity(&self) -> u64 {
         self.identity
     }
 
-    fn validate_default(&mut self, requested: &str, events: &mut Vec<RegistryEvent>) {
-        self.default_version = if self.resolve(requested).is_some() {
-            requested.to_owned()
-        } else {
-            events.push(RegistryEvent::DefaultVersionUnresolved {
-                requested: requested.to_owned(),
+    fn apply_defaults(
+        &mut self,
+        claims: HashMap<DefaultKey, Vec<usize>>,
+        events: &mut Vec<RegistryEvent>,
+    ) {
+        let mut disabled = HashSet::new();
+        let mut reasons = HashMap::new();
+        for indices in claims.values() {
+            if indices.len() > 1 {
+                for index in indices {
+                    disabled.insert(*index);
+                    reasons.insert(*index, "competing defaults for the same exact identity");
+                }
+            }
+        }
+        let mut transports: HashMap<&str, Vec<usize>> = HashMap::new();
+        for index in claims
+            .values()
+            .flatten()
+            .copied()
+            .filter(|index| !disabled.contains(index))
+        {
+            let begin_string = self.definitions[index]
+                .choice
+                .transport
+                .version()
+                .expect("transport version");
+            transports.entry(begin_string).or_default().push(index);
+        }
+        for indices in transports.values() {
+            let first = &self.definitions[indices[0]].choice.transport;
+            if indices
+                .iter()
+                .any(|index| !first.ptr_eq(&self.definitions[*index].choice.transport))
+            {
+                for index in indices {
+                    disabled.insert(*index);
+                    reasons.insert(
+                        *index,
+                        "different physical transport sources for one BeginString",
+                    );
+                }
+            }
+        }
+        let mut conflicting: Vec<_> = disabled.iter().copied().collect();
+        conflicting.sort_unstable();
+        for index in conflicting {
+            let entry = &self.definitions[index];
+            events.push(RegistryEvent::AtSource {
+                source: entry.source.clone(),
+                event: Box::new(RegistryEvent::DefaultConflict {
+                    name: entry.spec.name.clone(),
+                    begin_string: entry
+                        .choice
+                        .transport
+                        .version()
+                        .expect("transport version")
+                        .to_owned(),
+                    detail: reasons[&index].to_owned(),
+                }),
             });
-            DEFAULT_VERSION.to_owned()
-        };
+        }
+        let mut transport_claims: HashMap<String, Vec<usize>> = HashMap::new();
+        for (key, indices) in &claims {
+            for index in indices {
+                if !disabled.contains(index) {
+                    transport_claims
+                        .entry(key.begin_string.clone())
+                        .or_default()
+                        .push(*index);
+                }
+            }
+        }
+        for (begin_string, indices) in transport_claims {
+            let index = indices
+                .into_iter()
+                .min_by_key(|index| {
+                    let entry = &self.definitions[*index];
+                    (
+                        entry.choice.application.is_some(),
+                        std::cmp::Reverse(self.definitions[*index].priority),
+                        entry.spec.name.as_str(),
+                    )
+                })
+                .expect("effective transport claim");
+            let choice = &self.definitions[index].choice;
+            let projected = make_choice(
+                self.transport_source(choice),
+                None,
+                None,
+                choice.name.clone(),
+            );
+            self.default_names.insert(
+                projected.identity,
+                projected.name.clone().expect("registered name"),
+            );
+            self.transport_defaults.insert(begin_string, projected);
+        }
+        for (key, indices) in claims {
+            if indices.iter().any(|index| disabled.contains(index)) {
+                continue;
+            }
+            let choice = self.definitions[indices[0]].choice.clone();
+            self.default_names.insert(
+                choice.identity,
+                choice.name.clone().expect("registered name"),
+            );
+            self.defaults.insert(key, choice);
+        }
     }
 
     fn update_identity(&mut self) {
-        let mut bindings = Vec::new();
-        for (name, dict) in &self.by_name {
-            bindings.push((b'n', name, dict));
-        }
-        for (version, dict) in &self.by_version {
-            bindings.push((b'v', version, dict));
-        }
-        bindings.sort_by_key(|(kind, key, _)| (*kind, *key));
+        let mut sources: Vec<_> = self
+            .by_name
+            .values()
+            .map(|choice| choice.identity)
+            .collect();
+        sources.sort_unstable();
+        sources.dedup();
+        let mut defaults: Vec<_> = self
+            .defaults
+            .iter()
+            .map(|(key, choice)| (format!("{key:?}"), choice.identity))
+            .collect();
+        defaults.sort_unstable();
         let mut identity = Xxh3::new();
-        for (kind, key, dict) in bindings {
-            let content = self
-                .definitions
-                .iter()
-                .find(|entry| entry.choice.dict.ptr_eq(dict))
-                .expect("custom binding has definition")
-                .choice
-                .identity;
-            bind(&mut identity, kind, key, content);
+        for content in sources {
+            identity.update(&content.to_le_bytes());
         }
-        identity.update(self.default_version.as_bytes());
+        for (key, content) in defaults {
+            bind(&mut identity, b'd', &key, content);
+        }
         identity.update(&DICTS_BUILD_HASH.to_le_bytes());
         self.identity = identity.digest();
     }
 
     fn name_problem(&self, name: &str, source: &str) -> Option<String> {
-        if Version::is_version_identifier(name) {
+        if is_reserved_selector(name) {
             return Some(format!(
                 "{source} conflicts with reserved bundled identifier {name}"
             ));
@@ -493,9 +965,53 @@ impl Registry {
             .map(|entry| {
                 format!(
                     "{source} conflicts with {} ({})",
-                    entry.source, entry.spec.path
+                    entry.source,
+                    entry.spec.source_description()
                 )
             })
+    }
+}
+
+fn bundled_source(version: Version) -> LoadedSource {
+    let source = version.as_str().to_owned();
+    let mut identity = Xxh3::new();
+    identity.update(&DICTS_BUILD_HASH.to_le_bytes());
+    identity.update(source.as_bytes());
+    LoadedSource {
+        dict: Dict::Static(bundled(version)),
+        source,
+        identity: identity.digest(),
+    }
+}
+
+fn make_choice(
+    transport: LoadedSource,
+    application: Option<LoadedSource>,
+    application_identity: Option<ApplicationIdentity>,
+    name: Option<String>,
+) -> DictionaryChoice {
+    let mut identity = Xxh3::new();
+    identity.update(&transport.identity.to_le_bytes());
+    if let Some(application) = &application {
+        identity.update(&application.identity.to_le_bytes());
+    }
+    identity.update(format!("{application_identity:?}").as_bytes());
+    let dict = application
+        .as_ref()
+        .map_or(&transport.dict, |application| &application.dict)
+        .clone();
+    let source = application.map_or_else(
+        || transport.source.clone(),
+        |application| application.source,
+    );
+    DictionaryChoice {
+        dict,
+        source,
+        identity: identity.digest(),
+        name,
+        transport: transport.dict,
+        application: application_identity,
+        transport_source: transport.source,
     }
 }
 
@@ -507,6 +1023,10 @@ fn display_path(stamp: &FileStamp) -> String {
 /// `RegistryEvent::LoadFailed` text the client sees.
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
+    #[error("invalid dictionary binding: {detail}")]
+    InvalidBinding { detail: String },
+    #[error("{error}")]
+    Source { path: String, error: Box<LoadError> },
     #[error("dictionary paths are disabled; enable allowDictionaryPath in user TOML or global LSP settings")]
     PathsDisabled,
     #[error("unknown dictionary name {name:?}")]
@@ -604,9 +1124,8 @@ fn load(
 }
 
 /// The identity of a registry with no custom bindings.
-fn empty_identity(default_version: &str) -> u64 {
+fn empty_identity() -> u64 {
     let mut identity = Xxh3::new();
-    identity.update(default_version.as_bytes());
     identity.update(&DICTS_BUILD_HASH.to_le_bytes());
     identity.digest()
 }
@@ -666,6 +1185,9 @@ fn read_stamped(stamp: &FileStamp, limit: u64) -> Result<Source, LoadError> {
 }
 
 fn valid_declared_version(version: &str) -> bool {
+    if version == "FIX.Latest" {
+        return true;
+    }
     let Some(rest) = version
         .strip_prefix("FIX.")
         .or_else(|| version.strip_prefix("FIXT."))
@@ -743,11 +1265,12 @@ mod tests {
     /// last segment, which is distinct per fixture in these tests.
     fn spec(path: &str) -> DictionarySpec {
         DictionarySpec {
-            path: path.to_owned(),
+            path: Some(path.to_owned()),
             // Prefixed: these fixtures are named after FIX versions on
             // purpose, and a name that looks like one is refused.
             name: format!("dict-{}", path.rsplit('/').next().unwrap_or(path)),
             default: true,
+            ..DictionarySpec::default()
         }
     }
 
@@ -774,12 +1297,7 @@ mod tests {
     }
 
     fn build(specs: &[DictionarySpec]) -> (Registry, Vec<RegistryEvent>) {
-        Registry::build(
-            specs,
-            "FIX.4.4",
-            &ctx(None, None),
-            &DictionaryStore::default(),
-        )
+        Registry::build(specs, &ctx(None, None), &DictionaryStore::default())
     }
 
     #[test]
@@ -793,9 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn bindings_apply_the_fixt11_alias_to_a_custom_dictionary() {
-        // The bug this method exists to make unrepresentable: a custom
-        // FIX.5.0SP2 dictionary has to be what `8=FIXT.1.1` resolves to.
+    fn application_defaults_do_not_replace_transport_sources() {
         let d = tmp();
         let p = write(&d, "sp2.xml", QF_44);
         let (registry, events) = build(&[versioned(&p, "FIX.5.0SP2")]);
@@ -807,9 +1323,11 @@ mod tests {
             .find(|(v, _)| *v == "FIXT.1.1")
             .expect("FIXT.1.1 is bound");
         assert!(
-            !alias.1.is_static(),
-            "the custom dictionary answers the alias"
+            alias.1.is_static(),
+            "application defaults preserve bundled transport"
         );
+        assert_eq!(alias.1.version(), Some("FIXT.1.1"));
+        assert!(!registry.resolve("FIX.5.0SP2").unwrap().is_static());
         assert!(alias.1.ptr_eq(&registry.resolve("FIXT.1.1").unwrap()));
     }
 
@@ -841,7 +1359,7 @@ mod tests {
         let dict = reg.resolve("FIX.4.4").unwrap();
         assert!(!dict.is_static() && has_tag(&dict, 9999));
         assert!(reg.resolve("FIX.4.2").unwrap().is_static());
-        assert_eq!(reg.default_dict().version(), Some("FIX.4.4"));
+        assert_eq!(reg.resolve("FIX.4.4").unwrap().version(), Some("FIX.4.4"));
     }
 
     #[test]
@@ -872,10 +1390,10 @@ mod tests {
     #[test]
     fn declared_version_does_not_depend_on_the_filename() {
         let d = tmp();
-        let (reg, events) = build(&[versioned(&write(&d, "a.xml", QF_44), "FIX.9.1")]);
+        let (reg, events) = build(&[versioned(&write(&d, "a.xml", QF_44), "FIX.2.7")]);
         assert!(events.is_empty());
-        assert!(has_tag(&reg.resolve("FIX.9.1").unwrap(), 9999));
-        assert_eq!(reg.resolve("FIX.9.1").unwrap().version(), Some("FIX.9.1"));
+        assert!(has_tag(&reg.resolve("FIX.2.7").unwrap(), 9999));
+        assert_eq!(reg.resolve("FIX.2.7").unwrap().version(), Some("FIX.2.7"));
         assert!(reg.resolve("FIX.4.4").unwrap().is_static());
     }
 
@@ -893,7 +1411,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_default_first_wins_and_reports() {
+    fn duplicate_defaults_disable_every_claim_and_keep_names() {
         let d = tmp();
         let first = write(&d, "a.xml", QF_44);
         let second = write(&d, "b.xml", QF_44_OTHER);
@@ -901,15 +1419,12 @@ mod tests {
             ..named(&second, "other")
         };
         let (reg, events) = build(&[spec(&first), both]);
-        assert_eq!(
-            events,
-            vec![RegistryEvent::DuplicateDefault {
-                version: "FIX.4.4".into(),
-                path: second.clone()
-            }]
-        );
-        assert!(has_tag(&reg.resolve("FIX.4.4").unwrap(), 9999));
-        // The losing entry's name binding still registered (bindings are independent).
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|event| matches!(event, RegistryEvent::DefaultConflict { .. })));
+        assert!(reg.resolve("FIX.4.4").unwrap().is_static());
+        assert!(reg.named(&spec(&first).name).is_some());
         assert!(has_tag(&reg.named("other").unwrap(), 9998));
     }
 
@@ -941,9 +1456,139 @@ mod tests {
                 "{blank:?}: {events:?}"
             );
             assert!(
-                reg.resolve("FIX.9.1").is_none(),
+                reg.resolve("FIX.2.7").is_none(),
                 "{blank:?}: the version binding went with it"
             );
+        }
+    }
+
+    #[test]
+    fn blank_name_warnings_describe_legacy_and_split_sources() {
+        for (entry, expected) in [
+            (
+                DictionarySpec {
+                    path: Some("synthetic.xml".into()),
+                    ..DictionarySpec::default()
+                },
+                "dictionary \"synthetic.xml\" has a blank name; the entry is ignored",
+            ),
+            (
+                DictionarySpec {
+                    transport: Some("FIXT.1.1".into()),
+                    application: Some("synthetic-application.xml".into()),
+                    ..DictionarySpec::default()
+                },
+                "dictionary \"transport: FIXT.1.1, application: synthetic-application.xml\" has a blank name; the entry is ignored",
+            ),
+            (
+                DictionarySpec {
+                    transport: Some("synthetic-transport.xml".into()),
+                    ..DictionarySpec::default()
+                },
+                "dictionary \"transport: synthetic-transport.xml\" has a blank name; the entry is ignored",
+            ),
+        ] {
+            let (registry, events) = build(&[entry]);
+            assert!(registry.definitions().is_empty());
+            assert!(matches!(events.as_slice(), [RegistryEvent::BlankName { .. }]));
+            assert_eq!(events[0].message(), expected);
+        }
+    }
+
+    #[test]
+    fn duplicate_name_warnings_describe_the_original_sources() {
+        let directory = tmp();
+        let legacy = write(&directory, "legacy.xml", QF_44);
+        let transport = write(
+            &directory,
+            "transport.xml",
+            "<fix version='FIXT.1.1'><messages><message name='Heartbeat' msgtype='0' msgcat='admin'/></messages><fields/></fix>",
+        );
+        let application = write(&directory, "application.xml", &synthetic_xml("FIX.5.0SP2"));
+        for (entry, expected_sources) in [
+            (
+                DictionarySpec {
+                    name: "synthetic".into(),
+                    path: Some(legacy.clone()),
+                    ..DictionarySpec::default()
+                },
+                legacy,
+            ),
+            (
+                DictionarySpec {
+                    name: "synthetic".into(),
+                    transport: Some(transport.clone()),
+                    application: Some(application.clone()),
+                    ..DictionarySpec::default()
+                },
+                format!("transport: {transport}, application: {application}"),
+            ),
+            (
+                DictionarySpec {
+                    name: "synthetic".into(),
+                    transport: Some(transport.clone()),
+                    ..DictionarySpec::default()
+                },
+                format!("transport: {transport}"),
+            ),
+        ] {
+            let original = [entry.clone()];
+            let duplicate = [entry];
+            let layers = [
+                DictionaryLayer {
+                    specs: &original,
+                    source: "user.toml:4",
+                    root_dir: None,
+                },
+                DictionaryLayer {
+                    specs: &duplicate,
+                    source: "project.toml:8",
+                    root_dir: None,
+                },
+            ];
+            let (registry, events) = DictionaryStore::default()
+                .build_registry(&layers, &ctx(None, None))
+                .unwrap();
+            assert_eq!(registry.definitions().len(), 1);
+            assert!(matches!(
+                events.as_slice(),
+                [RegistryEvent::AtSource { event, .. }]
+                    if matches!(event.as_ref(), RegistryEvent::BadName { .. })
+            ));
+            assert_eq!(
+                events[0].message(),
+                format!("dictionary name \"synthetic\" rejected: project.toml:8 conflicts with user.toml:4 ({expected_sources})")
+            );
+        }
+    }
+
+    #[test]
+    fn load_failure_warnings_keep_the_specific_failing_source() {
+        let directory = tmp();
+        let broken = write(&directory, "broken.xml", "<fix><messages/><fields/></fix>");
+        for entry in [
+            named(&broken, "legacy"),
+            DictionarySpec {
+                name: "pair".into(),
+                transport: Some("FIXT.1.1".into()),
+                application: Some(broken.clone()),
+                ..DictionarySpec::default()
+            },
+            DictionarySpec {
+                name: "family".into(),
+                transport: Some(broken.clone()),
+                ..DictionarySpec::default()
+            },
+        ] {
+            let (registry, events) = build(&[entry]);
+            assert!(registry.definitions().is_empty());
+            let [event @ RegistryEvent::LoadFailed { path, .. }] = events.as_slice() else {
+                panic!("{events:?}");
+            };
+            assert_eq!(path, &broken);
+            assert!(event
+                .message()
+                .starts_with(&format!("dictionary {broken:?} not loaded: ")));
         }
     }
 
@@ -1015,28 +1660,38 @@ mod tests {
             claiming(&write(&d, "g.xml", QF_44_OTHER), "venue-g"),
         ]);
         assert!(
-            matches!(&events[..], [RegistryEvent::DuplicateDefault { .. }]),
+            events.len() == 2
+                && events
+                    .iter()
+                    .all(|event| matches!(event, RegistryEvent::DefaultConflict { .. })),
             "{events:?}"
         );
     }
 
     #[test]
-    fn custom_fixt11_shadows_the_alias_but_not_fix50sp2() {
+    fn custom_fixt11_transport_preserves_application_defaults() {
         let d = tmp();
-        let (reg, events) = build(&[versioned(&write(&d, "a.xml", QF_44), "FIXT.1.1")]);
+        let (reg, events) = build(&[versioned(
+            &write(
+                &d,
+                "a.xml",
+                &QF_44.replace("msgcat='app'", "msgcat='admin'"),
+            ),
+            "FIXT.1.1",
+        )]);
         assert!(events.is_empty());
         assert!(!reg.resolve("FIXT.1.1").unwrap().is_static());
         assert!(reg.resolve("FIX.5.0SP2").unwrap().is_static());
     }
 
     #[test]
-    fn resolve_falls_back_to_bundled_via_alias() {
+    fn resolve_fixt_returns_standalone_bundled_transport() {
         let reg = Registry::bundled_only();
         let fixt = reg.resolve("FIXT.1.1").unwrap();
         assert!(fixt.is_static());
-        assert_eq!(fixt.version(), Some("FIX.5.0SP2"));
+        assert_eq!(fixt.version(), Some("FIXT.1.1"));
         assert!(reg.resolve("FIX.9.9").is_none());
-        assert_eq!(reg.default_dict().version(), Some("FIX.4.4"));
+        assert_eq!(reg.resolve("FIX.4.4").unwrap().version(), Some("FIX.4.4"));
     }
 
     #[test]
@@ -1090,7 +1745,7 @@ mod tests {
             matches!(err, LoadError::TooLarge { limit: 16, .. }),
             "{err}"
         );
-        let (_, events) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx, &store);
+        let (_, events) = Registry::build(&[spec(&p)], &ctx, &store);
         assert!(
             matches!(&events[..], [RegistryEvent::LoadFailed { detail, .. }] if detail.contains("dictionaryBytes"))
         );
@@ -1118,7 +1773,7 @@ mod tests {
         write(&home, "d.xml", QF_44);
         let ctx = ctx(None, Some(&home));
         let store = DictionaryStore::default();
-        let (reg, events) = Registry::build(&[spec("~/d.xml")], "FIX.4.4", &ctx, &store);
+        let (reg, events) = Registry::build(&[spec("~/d.xml")], &ctx, &store);
         assert!(events.is_empty(), "{events:?}");
         assert!(has_tag(&reg.resolve("FIX.4.4").unwrap(), 9999));
 
@@ -1145,7 +1800,6 @@ mod tests {
         write(&root, "d.xml", QF_44);
         let (reg, events) = Registry::build(
             &[spec("d.xml")],
-            "FIX.4.4",
             &ctx(Some(&root), None),
             &DictionaryStore::default(),
         );
@@ -1179,18 +1833,16 @@ mod tests {
         let p = write(&d, "a.xml", QF_44);
         let ctx = ctx(None, None);
         let store = DictionaryStore::default();
-        let (first, _) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx, &store);
-        let (second, _) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx, &store);
+        let (first, _) = Registry::build(&[spec(&p)], &ctx, &store);
+        let (second, _) = Registry::build(&[spec(&p)], &ctx, &store);
         assert_eq!(second.identity(), first.identity());
 
-        // A changed file, a new binding, or a different default all differ.
+        // Names and the compatibility argument do not affect analysis identity.
         write(&d, "a.xml", QF_44_OTHER);
-        let (reloaded, _) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx, &store);
+        let (reloaded, _) = Registry::build(&[spec(&p)], &ctx, &store);
         assert_ne!(reloaded.identity(), second.identity());
-        let (renamed, _) = Registry::build(&[named(&p, "x")], "FIX.4.4", &ctx, &store);
-        assert_ne!(renamed.identity(), reloaded.identity());
-        let (bundled, _) = Registry::build(&[], "FIX.4.2", &ctx, &store);
-        assert_ne!(bundled.identity(), Registry::bundled_only().identity());
+        let (renamed, _) = Registry::build(&[named(&p, "x")], &ctx, &store);
+        assert_eq!(renamed.identity(), reloaded.identity());
     }
 
     #[test]
@@ -1236,11 +1888,11 @@ mod tests {
         let d = tmp();
         let p = write(&d, "a.xml", QF_44);
         let store = DictionaryStore::default();
-        let (first, _) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx(None, None), &store);
+        let (first, _) = Registry::build(&[spec(&p)], &ctx(None, None), &store);
         assert!(has_tag(&first.resolve("FIX.4.4").unwrap(), 9999));
         write(&d, "a.xml", QF_44_OTHER);
         // Re-stat sees the new size/mtime: the cache is bypassed.
-        let (reg, _) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx(None, None), &store);
+        let (reg, _) = Registry::build(&[spec(&p)], &ctx(None, None), &store);
         assert!(!has_tag(&reg.resolve("FIX.4.4").unwrap(), 9999));
         assert!(has_tag(&reg.resolve("FIX.4.4").unwrap(), 9998));
     }
@@ -1251,8 +1903,8 @@ mod tests {
         let p = write(&d, "a.xml", QF_44);
         let ctx = ctx(None, None);
         let store = DictionaryStore::default();
-        let (first, _) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx, &store);
-        let (second, events) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx, &store);
+        let (first, _) = Registry::build(&[spec(&p)], &ctx, &store);
+        let (second, events) = Registry::build(&[spec(&p)], &ctx, &store);
         assert!(events.is_empty());
         assert_eq!(store.parse_count(), 1);
         let (Dict::Owned(a), Dict::Owned(b)) = (
@@ -1264,12 +1916,12 @@ mod tests {
         assert!(Arc::ptr_eq(&a, &b), "same files → same parsed dictionary");
 
         // Changed XML metadata produces a new dictionary identity.
-        let (third, _) = Registry::build(&[versioned(&p, "FIX.9.1")], "FIX.4.4", &ctx, &store);
-        let Dict::Owned(c) = third.resolve("FIX.9.1").unwrap() else {
+        let (third, _) = Registry::build(&[versioned(&p, "FIX.2.7")], &ctx, &store);
+        let Dict::Owned(c) = third.resolve("FIX.2.7").unwrap() else {
             panic!()
         };
         assert!(!Arc::ptr_eq(&a, &c));
-        assert_eq!(c.version.as_deref(), Some("FIX.9.1"));
+        assert_eq!(c.version.as_deref(), Some("FIX.2.7"));
     }
 
     const QF_44_DOUBLED: &str = "<fix major='4' minor='4'><messages>\
@@ -1313,8 +1965,8 @@ mod tests {
         let ctx = ctx(None, None);
         let store = DictionaryStore::default();
         // Held: the cache keeps only what a live registry still uses.
-        let (_held, first_events) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx, &store);
-        let (_, second_events) = Registry::build(&[spec(&p)], "FIX.4.4", &ctx, &store);
+        let (_held, first_events) = Registry::build(&[spec(&p)], &ctx, &store);
+        let (_, second_events) = Registry::build(&[spec(&p)], &ctx, &store);
         assert_eq!(store.parse_count(), 1, "the second build is a cache hit");
         assert_eq!(first_events, vec![doubled_fault(&p)]);
         assert_eq!(second_events, first_events);
@@ -1497,22 +2149,16 @@ mod tests {
             root_dir: None,
         }];
         let context = ctx(None, None);
-        let (first, events) = store
-            .build_registry(&layers, DEFAULT_VERSION, &context)
-            .unwrap();
+        let (first, events) = store.build_registry(&layers, &context).unwrap();
         assert!(events.is_empty());
-        let (second, events) = store
-            .build_registry(&layers, DEFAULT_VERSION, &context)
-            .unwrap();
+        let (second, events) = store.build_registry(&layers, &context).unwrap();
         assert!(events.is_empty());
         assert!(first
             .named("venue")
             .unwrap()
             .ptr_eq(&second.named("venue").unwrap()));
         assert_eq!(store.parse_count(), 1);
-        let (third, _) = store
-            .build_registry(&layers, DEFAULT_VERSION, &context)
-            .unwrap();
+        let (third, _) = store.build_registry(&layers, &context).unwrap();
         assert!(first
             .named("venue")
             .unwrap()
@@ -1531,9 +2177,7 @@ mod tests {
             root_dir: None,
         }];
         let context = ctx(None, None);
-        let (first, _) = store
-            .build_registry(&layers, DEFAULT_VERSION, &context)
-            .unwrap();
+        let (first, _) = store.build_registry(&layers, &context).unwrap();
         let limits = Limits {
             dictionary_bytes: 16,
             ..Limits::default()
@@ -1541,7 +2185,6 @@ mod tests {
         let (limited, events) = store
             .build_registry(
                 &layers,
-                DEFAULT_VERSION,
                 &BuildContext {
                     limits: &limits,
                     ..context
@@ -1551,12 +2194,10 @@ mod tests {
         assert!(limited.named("venue").is_none());
         assert!(matches!(
             events.as_slice(),
-            [RegistryEvent::LoadFailed { .. }]
+            [RegistryEvent::AtSource { event, .. }] if matches!(event.as_ref(), RegistryEvent::LoadFailed { .. })
         ));
         write(&directory, "venue.xml", QF_44_OTHER);
-        let (changed, _) = store
-            .build_registry(&layers, DEFAULT_VERSION, &context)
-            .unwrap();
+        let (changed, _) = store.build_registry(&layers, &context).unwrap();
         assert!(!first
             .named("venue")
             .unwrap()
@@ -1575,9 +2216,7 @@ mod tests {
             source: "project.toml",
             root_dir: None,
         }];
-        let (project, _) = store
-            .build_registry(&layers, DEFAULT_VERSION, &ctx(None, None))
-            .unwrap();
+        let (project, _) = store.build_registry(&layers, &ctx(None, None)).unwrap();
         let Dict::Owned(parsed) = project.named("venue").unwrap() else {
             panic!("custom dictionary expected");
         };
@@ -1585,42 +2224,11 @@ mod tests {
         drop(parsed);
         drop(project);
         assert!(weak.upgrade().is_none());
-        let (reopened, events) = store
-            .build_registry(&layers, DEFAULT_VERSION, &ctx(None, None))
-            .unwrap();
+        let (reopened, events) = store.build_registry(&layers, &ctx(None, None)).unwrap();
         assert!(events.is_empty());
         assert!(reopened.named("venue").is_some());
         assert_eq!(store.cache.lock().unwrap().len(), 1);
         assert_eq!(store.parse_count(), 2);
-    }
-
-    #[test]
-    fn unresolved_default_version_falls_back_to_fix44_with_event() {
-        let (reg, events) = Registry::build(
-            &[],
-            "FIX.9.9",
-            &ctx(None, None),
-            &DictionaryStore::default(),
-        );
-        assert_eq!(
-            events,
-            vec![RegistryEvent::DefaultVersionUnresolved {
-                requested: "FIX.9.9".into()
-            }]
-        );
-        assert_eq!(reg.default_version(), "FIX.4.4");
-
-        // A custom default for that version satisfies it.
-        let d = tmp();
-        let (reg, events) = Registry::build(
-            &[versioned(&write(&d, "a.xml", QF_44), "FIX.9.9")],
-            "FIX.9.9",
-            &ctx(None, None),
-            &DictionaryStore::default(),
-        );
-        assert!(events.is_empty());
-        assert_eq!(reg.default_version(), "FIX.9.9");
-        assert!(has_tag(&reg.default_dict(), 9999));
     }
 
     /// Only one QuickFIX XML file is read. A directory — a FIX Repository package
@@ -1672,7 +2280,7 @@ mod tests {
             root_dir: None,
         }];
         let error = DictionaryStore::default()
-            .build_registry(&layers, DEFAULT_VERSION, &ctx(None, None))
+            .build_registry(&layers, &ctx(None, None))
             .err()
             .expect("missing XML must fail the transaction");
         assert!(error.is_fatal());
@@ -1702,11 +2310,11 @@ mod tests {
             },
         ];
         let store = DictionaryStore::default();
-        let (registry, events) = store
-            .build_registry(&layers, DEFAULT_VERSION, &ctx(None, None))
-            .unwrap();
+        let (registry, events) = store.build_registry(&layers, &ctx(None, None)).unwrap();
         assert_eq!(registry.definitions().len(), 1);
-        assert!(matches!(events.as_slice(), [RegistryEvent::BadName { .. }]));
+        assert!(
+            matches!(events.as_slice(), [RegistryEvent::AtSource { event, .. }] if matches!(event.as_ref(), RegistryEvent::BadName { .. }))
+        );
         assert!(events[0].is_error());
         assert!(events[0].message().contains("user.toml:4"));
         assert!(events[0].message().contains("project.toml:8"));
@@ -1734,10 +2342,10 @@ mod tests {
             },
         ];
         let (extended, events) = store
-            .build_registry(&extended_layers, DEFAULT_VERSION, &ctx(None, None))
+            .build_registry(&extended_layers, &ctx(None, None))
             .unwrap();
         assert!(events[0].is_error());
-        assert!(extended.resolve("FIX.9.1").is_none());
+        assert!(extended.resolve("FIX.2.7").is_none());
         assert_eq!(extended.identity(), registry.identity());
     }
 
@@ -1762,7 +2370,7 @@ mod tests {
             },
         ];
         let (registry, events) = DictionaryStore::default()
-            .build_registry(&layers, DEFAULT_VERSION, &ctx(None, None))
+            .build_registry(&layers, &ctx(None, None))
             .unwrap();
         assert!(events.is_empty());
         assert!(has_tag(&registry.resolve("FIX.4.4").unwrap(), 9998));
@@ -1791,12 +2399,12 @@ mod tests {
             }]
         };
         let (registry, events) = store
-            .build_registry(&layer(&specs), DEFAULT_VERSION, &ctx(None, None))
+            .build_registry(&layer(&specs), &ctx(None, None))
             .unwrap();
         assert!(events.is_empty());
         write(&directory, "selected.xml", QF_44_OTHER);
         let (updated, events) = store
-            .build_registry(&layer(&specs), DEFAULT_VERSION, &ctx(None, None))
+            .build_registry(&layer(&specs), &ctx(None, None))
             .unwrap();
         assert!(events.is_empty());
         assert!(updated
@@ -1845,9 +2453,7 @@ mod tests {
             },
         ];
         let store = DictionaryStore::default();
-        let (previous, events) = store
-            .build_registry(&layers, DEFAULT_VERSION, &ctx(None, None))
-            .unwrap();
+        let (previous, events) = store.build_registry(&layers, &ctx(None, None)).unwrap();
         assert!(events.is_empty());
         let project_choice = previous.choice("project").unwrap();
         write(
@@ -1855,9 +2461,7 @@ mod tests {
             "global.xml",
             &QF_44.replace("Custom", "Updated"),
         );
-        let (updated, events) = store
-            .build_registry(&layers, DEFAULT_VERSION, &ctx(None, None))
-            .unwrap();
+        let (updated, events) = store.build_registry(&layers, &ctx(None, None)).unwrap();
         assert!(events.is_empty());
         assert!(updated
             .named("project")
@@ -1872,8 +2476,549 @@ mod tests {
 
     // --- the name hover calls a custom dictionary by ----------------------
 
-    fn names(registry: Registry, choice: Option<DictionaryChoice>) -> crate::ctx::DictionaryNames {
-        crate::ctx::DictionaryNames::new(Arc::new(registry), choice.as_ref())
+    fn application_identity(version: &str) -> ApplicationIdentity {
+        ApplicationIdentity::release(version)
+    }
+
+    fn synthetic_xml(version: &str) -> String {
+        format!("<fix version='{version}'><messages><message name='Synthetic' msgtype='D' msgcat='app'/></messages><fields><field number='9999' name='SyntheticField' type='STRING'/></fields></fix>")
+    }
+
+    #[test]
+    fn complete_defaults_fall_back_atomically_and_only_families_compose() {
+        let directory = tmp();
+        let transport = write(&directory, "transport.xml", "<fix version='FIXT.1.1'><messages><message name='Heartbeat' msgtype='0' msgcat='admin'/></messages><fields/></fix>");
+        let complete = DictionarySpec {
+            name: "complete".into(),
+            transport: Some(transport.clone()),
+            application: Some("FIX.5.0".into()),
+            default: true,
+            ..DictionarySpec::default()
+        };
+        let (registry, events) = build(std::slice::from_ref(&complete));
+        assert!(events.is_empty(), "{events:?}");
+        assert!(!registry
+            .default_transport("FIXT.1.1")
+            .unwrap()
+            .dict
+            .is_static());
+        let exact = registry
+            .default_pair("FIXT.1.1", &application_identity("FIX.5.0"))
+            .unwrap();
+        assert!(!exact.transport.is_static());
+        let fallback = registry
+            .default_pair("FIXT.1.1", &application_identity("FIX.5.0SP2"))
+            .unwrap();
+        assert!(
+            fallback.transport.is_static(),
+            "a complete default never lends its transport"
+        );
+        let family = DictionarySpec {
+            name: "family".into(),
+            transport: Some(transport),
+            default: true,
+            ..DictionarySpec::default()
+        };
+        let (registry, events) = build(&[complete, family]);
+        assert!(events.is_empty(), "{events:?}");
+        let composed = registry
+            .default_pair("FIXT.1.1", &application_identity("FIX.5.0SP2"))
+            .unwrap();
+        assert!(!composed.transport.is_static());
+        assert!(composed
+            .transport
+            .ptr_eq(&registry.choice("family").unwrap().transport));
+        assert!(registry
+            .default_transport("FIXT.1.1")
+            .unwrap()
+            .application
+            .is_none());
+        assert!(registry
+            .default_pair("FIX.5.0", &application_identity("FIX.5.0"))
+            .is_none());
+    }
+
+    #[test]
+    fn many_default_profiles_keep_exact_application_identity() {
+        let specs: Vec<_> = (0..512)
+            .rev()
+            .map(|profile| DictionarySpec {
+                name: format!("profile-{profile}"),
+                transport: Some("FIXT.1.1".into()),
+                application: Some("FIX.5.0SP2".into()),
+                custom_version: Some(format!("SYNTHETIC_{profile}")),
+                extension_pack: Some(profile % 3),
+                default: true,
+                ..DictionarySpec::default()
+            })
+            .collect();
+        let (registry, events) = build(&specs);
+        assert!(events.is_empty(), "{events:?}");
+        for spec in &specs {
+            let key = ApplicationKey {
+                version: "FIX.5.0SP2",
+                extension_pack: spec.extension_pack,
+                custom_version: spec.custom_version.as_deref(),
+            };
+            assert_eq!(
+                registry
+                    .default_pair("FIXT.1.1", key)
+                    .unwrap()
+                    .name
+                    .as_deref(),
+                Some(spec.name.as_str())
+            );
+            assert!(registry
+                .default_pair(
+                    "FIXT.1.1",
+                    ApplicationKey {
+                        extension_pack: None,
+                        ..key
+                    }
+                )
+                .is_none());
+        }
+        assert!(registry
+            .default_pair(
+                "FIXT.1.1",
+                ApplicationKey {
+                    version: "FIX.5.0SP2",
+                    extension_pack: Some(0),
+                    custom_version: Some("SYNTHETIC_MISSING"),
+                }
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn exact_extension_and_custom_identity_do_not_fall_back_to_base_release() {
+        let directory = tmp();
+        let path = write(&directory, "app.xml", &synthetic_xml("FIX.5.0SP2"));
+        let extension = DictionarySpec {
+            name: "extended".into(),
+            path: Some(path),
+            default: true,
+            extension_pack: Some(0),
+            custom_version: Some("synthetic".into()),
+            ..DictionarySpec::default()
+        };
+        let (registry, events) = build(&[extension]);
+        assert!(events.is_empty(), "{events:?}");
+        let identity = ApplicationIdentity {
+            version: "FIX.5.0SP2".into(),
+            extension_pack: Some(0),
+            custom_version: Some("synthetic".into()),
+        };
+        let pair = registry.default_pair("FIXT.1.1", &identity).unwrap();
+        assert!(!pair.dict.is_static());
+        assert_eq!(
+            registry.default_name_for_identity(pair.identity),
+            Some("extended")
+        );
+        assert!(registry
+            .default_pair(
+                "FIXT.1.1",
+                &ApplicationIdentity {
+                    extension_pack: None,
+                    ..identity.clone()
+                }
+            )
+            .is_none());
+        assert!(registry
+            .default_pair(
+                "FIXT.1.1",
+                &ApplicationIdentity {
+                    custom_version: None,
+                    ..identity
+                }
+            )
+            .is_none());
+        assert!(registry
+            .default_pair("FIXT.1.1", &application_identity("FIX.5.0SP2"))
+            .unwrap()
+            .dict
+            .is_static());
+    }
+
+    #[test]
+    fn paired_sources_remain_independent_and_shared_files_parse_once() {
+        let directory = tmp();
+        let path = write(&directory, "app.xml", &synthetic_xml("FIX.5.0SP2"));
+        let first = DictionarySpec {
+            name: "first".into(),
+            path: Some(path.clone()),
+            ..DictionarySpec::default()
+        };
+        let second = DictionarySpec {
+            name: "second".into(),
+            transport: Some("FIXT.1.1".into()),
+            application: Some(path),
+            ..DictionarySpec::default()
+        };
+        let store = DictionaryStore::default();
+        let (registry, events) = Registry::build(&[first, second], &ctx(None, None), &store);
+        assert!(events.is_empty(), "{events:?}");
+        let first = registry.choice("first").unwrap();
+        let second = registry.choice("second").unwrap();
+        assert_eq!(store.parse_count(), 1);
+        assert!(first.dict.ptr_eq(&second.dict));
+        assert_eq!(first.identity, second.identity);
+        assert_eq!(first.application_version(), Some("FIX.5.0SP2"));
+        assert!(first
+            .source(SourceRole::Transport)
+            .unwrap()
+            .field_idx(9999)
+            .is_none());
+        assert!(first
+            .source(SourceRole::Application)
+            .unwrap()
+            .field_idx(9999)
+            .is_some());
+    }
+
+    #[test]
+    fn a_fixt_path_with_only_session_categories_is_transport_only() {
+        let directory = tmp();
+        for category in ["admin", "session", "administrative", "Administrative"] {
+            let path = write(
+                &directory,
+                &format!("transport-{category}.xml"),
+                &format!("<fix version='FIXT.1.1'><messages><message name='Heartbeat' msgtype='0' msgcat='{category}'/></messages><fields/></fix>"),
+            );
+            let (registry, events) = build(&[named(&path, "transport")]);
+            assert!(events.is_empty(), "{category}: {events:?}");
+            let choice = registry.choice("transport").expect(category);
+            assert_eq!(choice.application, None, "{category}");
+        }
+    }
+
+    #[test]
+    fn combined_fixt_requires_identity_and_hashes_each_identity_dimension() {
+        let directory = tmp();
+        let path = write(&directory, "combined.xml", &synthetic_xml("FIXT.1.1"));
+        let (registry, events) = build(&[named(&path, "invalid")]);
+        assert!(matches!(
+            events.as_slice(),
+            [RegistryEvent::InvalidBinding { .. }]
+        ));
+        assert!(registry.choice("invalid").is_none());
+        let base = DictionarySpec {
+            name: "base".into(),
+            path: Some(path.clone()),
+            application_version: Some("FIX.5.0SP2".into()),
+            ..DictionarySpec::default()
+        };
+        let variants = [
+            base.clone(),
+            DictionarySpec {
+                name: "release".into(),
+                application_version: Some("FIX.Latest".into()),
+                ..base.clone()
+            },
+            DictionarySpec {
+                name: "extension".into(),
+                extension_pack: Some(0),
+                ..base.clone()
+            },
+            DictionarySpec {
+                name: "custom".into(),
+                custom_version: Some("synthetic".into()),
+                ..base.clone()
+            },
+            DictionarySpec {
+                name: "transport".into(),
+                path: None,
+                transport: Some(path),
+                application_version: None,
+                ..base
+            },
+        ];
+        let store = DictionaryStore::default();
+        let (registry, events) = Registry::build(&variants, &ctx(None, None), &store);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(store.parse_count(), 1);
+        let identities: HashSet<_> = variants
+            .iter()
+            .map(|spec| registry.choice(&spec.name).unwrap().identity)
+            .collect();
+        assert_eq!(identities.len(), variants.len());
+        let combined = registry.choice("base").unwrap();
+        assert!(combined.transport.ptr_eq(&combined.dict));
+        assert!(registry
+            .choice("transport")
+            .unwrap()
+            .source(SourceRole::Application)
+            .is_none());
+    }
+
+    #[test]
+    fn explicit_modern_fix44_profile_supports_latest_without_implicit_fallback() {
+        let directory = tmp();
+        let latest = write(&directory, "latest.xml", &synthetic_xml("FIX.Latest"));
+        let profile = DictionarySpec {
+            name: "modern".into(),
+            transport: Some("FIX.4.4".into()),
+            application: Some(latest),
+            application_version: Some("FIX.Latest".into()),
+            default: true,
+            ..DictionarySpec::default()
+        };
+        let (registry, events) = build(&[profile]);
+        assert!(events.is_empty(), "{events:?}");
+        let pair = registry
+            .default_pair("FIX.4.4", &application_identity("FIX.Latest"))
+            .unwrap();
+        assert_eq!(pair.transport.version(), Some("FIX.4.4"));
+        assert_eq!(pair.dict.version(), Some("FIX.Latest"));
+        assert!(registry
+            .default_pair("FIXT.1.1", &application_identity("FIX.Latest"))
+            .is_none());
+        assert!(registry
+            .default_pair("FIX.4.4", &application_identity("FIX.5.0"))
+            .is_none());
+    }
+
+    #[test]
+    fn conflicting_physical_transports_disable_all_claims_but_keep_unrelated_defaults() {
+        let directory = tmp();
+        let transport_xml = "<fix version='FIXT.1.1'><messages><message name='Heartbeat' msgtype='0' msgcat='admin'/></messages><fields/></fix>";
+        let first = write(&directory, "first.xml", transport_xml);
+        let second = write(&directory, "second.xml", transport_xml);
+        let pair = |name: &str, transport: String, application: &str| DictionarySpec {
+            name: name.into(),
+            transport: Some(transport),
+            application: Some(application.into()),
+            default: true,
+            ..DictionarySpec::default()
+        };
+        let unrelated = named(&write(&directory, "fix44.xml", QF_44), "unrelated");
+        let specs = [
+            pair("first", first, "FIX.5.0"),
+            pair("second", second, "FIX.5.0SP2"),
+            unrelated,
+        ];
+        let (registry, events) = build(&specs);
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|event| matches!(event, RegistryEvent::DefaultConflict { .. })));
+        assert_ne!(
+            registry.choice("first").unwrap().identity,
+            registry.choice("second").unwrap().identity
+        );
+        for name in ["first", "second"] {
+            assert!(registry.choice(name).is_some());
+        }
+        assert!(registry
+            .default_transport("FIXT.1.1")
+            .unwrap()
+            .dict
+            .is_static());
+        assert!(registry
+            .default_pair("FIXT.1.1", &application_identity("FIX.5.0"))
+            .unwrap()
+            .dict
+            .is_static());
+        assert!(!registry
+            .default_pair("FIX.4.4", &application_identity("FIX.4.4"))
+            .unwrap()
+            .dict
+            .is_static());
+        let reversed: Vec<_> = specs.into_iter().rev().collect();
+        let (reversed, _) = build(&reversed);
+        assert_eq!(registry.identity(), reversed.identity());
+    }
+
+    #[test]
+    fn competing_identity_defaults_do_not_disable_an_independent_transport_claim() {
+        let directory = tmp();
+        let transport_xml = "<fix version='FIXT.1.1'><messages><message name='Heartbeat' msgtype='0' msgcat='admin'/></messages><fields/></fix>";
+        let first = write(&directory, "first.xml", transport_xml);
+        let second = write(&directory, "second.xml", transport_xml);
+        let pair = |name: &str, transport: String, application: &str| DictionarySpec {
+            name: name.into(),
+            transport: Some(transport),
+            application: Some(application.into()),
+            default: true,
+            ..DictionarySpec::default()
+        };
+        let specs = [
+            pair("conflict-a", first.clone(), "FIX.5.0"),
+            pair("conflict-b", second, "FIX.5.0"),
+            pair("independent", first, "FIX.5.0SP2"),
+        ];
+        let (registry, events) = build(&specs);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(events.iter().all(|event| matches!(
+            event,
+            RegistryEvent::DefaultConflict { name, detail, .. }
+                if name.starts_with("conflict-")
+                    && detail == "competing defaults for the same exact identity"
+        )));
+        for spec in &specs {
+            assert!(registry.choice(&spec.name).is_some());
+        }
+        let fallback = registry
+            .default_pair("FIXT.1.1", &application_identity("FIX.5.0"))
+            .unwrap();
+        assert!(fallback.transport.is_static());
+        let independent = registry
+            .default_pair("FIXT.1.1", &application_identity("FIX.5.0SP2"))
+            .unwrap();
+        assert_eq!(
+            registry.default_name_for_identity(independent.identity),
+            Some("independent")
+        );
+        assert!(independent
+            .transport
+            .ptr_eq(&registry.choice("independent").unwrap().transport));
+        let reversed: Vec<_> = specs.into_iter().rev().collect();
+        let (reversed, reversed_events) = build(&reversed);
+        assert_eq!(reversed_events.len(), 2);
+        assert_eq!(registry.identity(), reversed.identity());
+    }
+
+    #[test]
+    fn stronger_claim_replaces_lower_conflicts_before_validation() {
+        let directory = tmp();
+        let first = [
+            named(&write(&directory, "a.xml", QF_44), "a"),
+            named(&write(&directory, "b.xml", QF_44_OTHER), "b"),
+        ];
+        let second = [named(&write(&directory, "c.xml", QF_44), "c")];
+        let layers = [
+            DictionaryLayer {
+                specs: &first,
+                source: "parent.toml",
+                root_dir: None,
+            },
+            DictionaryLayer {
+                specs: &second,
+                source: "child.toml",
+                root_dir: None,
+            },
+        ];
+        let (registry, events) = DictionaryStore::default()
+            .build_registry(&layers, &ctx(None, None))
+            .unwrap();
+        assert!(events.is_empty(), "{events:?}");
+        let chosen = registry
+            .default_pair("FIX.4.4", &application_identity("FIX.4.4"))
+            .unwrap();
+        assert_eq!(
+            registry.default_name_for_identity(chosen.identity),
+            Some("c")
+        );
+        for name in ["a", "b", "c"] {
+            assert!(registry.choice(name).is_some());
+        }
+    }
+
+    #[test]
+    fn source_identity_ignores_names_and_defaults_report_the_active_name() {
+        let directory = tmp();
+        let path = write(&directory, "shared.xml", QF_44);
+        let alpha = DictionarySpec {
+            default: false,
+            ..named(&path, "alpha")
+        };
+        let beta = named(&path, "beta");
+        let (registry, events) = build(&[alpha, beta]);
+        assert!(events.is_empty(), "{events:?}");
+        let identity = registry.choice("alpha").unwrap().identity;
+        assert_eq!(identity, registry.choice("beta").unwrap().identity);
+        assert_eq!(registry.default_name_for_identity(identity), Some("beta"));
+        let renamed = [named(&path, "renamed")];
+        let (renamed, _) = build(&renamed);
+        assert_eq!(registry.identity(), renamed.identity());
+        assert_eq!(renamed.default_name_for_identity(identity), Some("renamed"));
+    }
+
+    #[test]
+    fn projected_admin_names_follow_active_defaults_and_transport_identity() {
+        let directory = tmp();
+        let transport = write(&directory, "transport.xml", "<fix version='FIXT.1.1'><messages><message name='Heartbeat' msgtype='0' msgcat='admin'/></messages><fields/></fix>");
+        let pair = |name: &str, application: &str| DictionarySpec {
+            name: name.into(),
+            transport: Some(transport.clone()),
+            application: Some(application.into()),
+            default: true,
+            ..DictionarySpec::default()
+        };
+        let lower = [pair("parent", "FIX.5.0")];
+        let upper = [pair("active", "FIX.5.0SP2")];
+        let layers = [
+            DictionaryLayer {
+                specs: &lower,
+                source: "parent",
+                root_dir: None,
+            },
+            DictionaryLayer {
+                specs: &upper,
+                source: "child",
+                root_dir: None,
+            },
+        ];
+        let store = DictionaryStore::default();
+        let (registry, events) = store.build_registry(&layers, &ctx(None, None)).unwrap();
+        assert!(events.is_empty(), "{events:?}");
+        let projected = registry.default_transport("FIXT.1.1").unwrap();
+        assert_eq!(
+            registry.default_name_for_identity(projected.identity),
+            Some("active")
+        );
+        assert_eq!(names(registry.clone(), None).of("FIXT.1.1"), Some("active"));
+        let family = DictionarySpec {
+            name: "family".into(),
+            transport: Some(transport),
+            default: true,
+            ..DictionarySpec::default()
+        };
+        let (with_family, events) = Registry::build(
+            &[lower[0].clone(), upper[0].clone(), family],
+            &ctx(None, None),
+            &store,
+        );
+        assert!(events.is_empty(), "{events:?}");
+        let family_transport = with_family.default_transport("FIXT.1.1").unwrap();
+        assert_eq!(projected.identity, family_transport.identity);
+        assert_eq!(
+            with_family.default_name_for_identity(family_transport.identity),
+            Some("family")
+        );
+        assert_eq!(names(with_family, None).of("FIXT.1.1"), Some("family"));
+    }
+
+    struct NamedAnalyses {
+        names: crate::ctx::DictionaryNames,
+        context: Arc<crate::ctx::Ctx>,
+    }
+
+    impl NamedAnalyses {
+        fn of(&self, version: &str) -> Option<&str> {
+            let message = if version == FIXT_1_1 {
+                "8=FIXT.1.1|35=0|".to_owned()
+            } else if version.starts_with("FIX.5.") {
+                format!("8=FIXT.1.1|35=D|1128={}|", to_wire(version).unwrap())
+            } else {
+                format!("8={version}|35=D|")
+            };
+            let analysis = crate::ctx::analyze(message.as_bytes(), &self.context);
+            let labels = self.names.of_analysis(analysis.message()?);
+            labels.application.or(labels.transport)
+        }
+    }
+
+    fn names(registry: Registry, choice: Option<DictionaryChoice>) -> NamedAnalyses {
+        let registry = Arc::new(registry);
+        NamedAnalyses {
+            names: crate::ctx::DictionaryNames::new(&registry, choice.as_ref()),
+            context: crate::ctx::Ctx::with_choice(
+                &crate::config::Config::default(),
+                registry,
+                choice,
+            ),
+        }
     }
 
     /// A selected dictionary answers only the versions it is compatible with:
@@ -1883,7 +3028,7 @@ mod tests {
         let directory = tmp();
         let venue = write(&directory, "venue.xml", QF_44);
         let desk = write(&directory, "desk.xml", QF_44_OTHER);
-        let venue = named(&versioned(&venue, "FIX.4.2").path, "venue42");
+        let venue = named(&versioned(&venue, "FIX.4.2").path.unwrap(), "venue42");
         let desk = DictionarySpec {
             default: false,
             ..named(&desk, "desk")
@@ -1897,16 +3042,93 @@ mod tests {
         assert_eq!(names.of("FIX.4.0"), None, "bundled tables have no name");
     }
 
-    /// A custom FIX.5.0SP2 default is what `8=FIXT.1.1` reads, so it names it.
+    /// A selected transport family and a default application pair are two
+    /// bindings, and each role keeps the name of its own binding.
     #[test]
-    fn the_fixt_alias_is_named_after_the_tables_it_reads() {
+    fn a_family_and_a_default_application_name_their_own_roles() {
+        let directory = tmp();
+        let transport = write(&directory, "desk-fixt.xml", "<fix version='FIXT.1.1'><messages><message name='Heartbeat' msgtype='0' msgcat='admin'/></messages><fields/></fix>");
+        let application = write(&directory, "desk-app.xml", QF_44);
+        let family = DictionarySpec {
+            name: "desk-fixt".into(),
+            transport: Some(transport),
+            ..DictionarySpec::default()
+        };
+        let application = named(
+            &versioned(&application, "FIX.5.0SP2").path.unwrap(),
+            "desk-app",
+        );
+        let (registry, events) = build(&[family, application]);
+        assert!(events.is_empty(), "{events:?}");
+        let chosen = registry.choice("desk-fixt");
+        let named = names(registry, chosen);
+        let analysis = crate::ctx::analyze(b"8=FIXT.1.1|35=D|1128=9|54=1|", &named.context);
+        let labels = named.names.of_analysis(analysis.message().unwrap());
+        assert_eq!(labels.transport, Some("desk-fixt"));
+        assert_eq!(labels.application, Some("desk-app"));
+    }
+
+    /// Complete defaults also name their projected transport.
+    #[test]
+    fn complete_application_default_names_its_projected_transport() {
         let directory = tmp();
         let path = write(&directory, "session.xml", QF_44);
-        let (registry, events) = build(&[named(&versioned(&path, "FIX.5.0SP2").path, "venue")]);
+        let (registry, events) = build(&[named(
+            &versioned(&path, "FIX.5.0SP2").path.unwrap(),
+            "venue",
+        )]);
         assert!(events.is_empty(), "{events:?}");
         let names = names(registry, None);
         assert_eq!(names.of("FIXT.1.1"), Some("venue"));
         assert_eq!(names.of("FIX.5.0SP2"), Some("venue"));
+    }
+
+    #[test]
+    fn renaming_an_unselected_nondefault_preserves_active_labels() {
+        let directory = tmp();
+        let path = write(&directory, "inactive.xml", QF_44);
+        let before = DictionarySpec {
+            default: false,
+            ..named(&path, "before")
+        };
+        let after = DictionarySpec {
+            name: "after".into(),
+            ..before.clone()
+        };
+        let (old_registry, old_events) = build(&[before]);
+        let (new_registry, new_events) = build(&[after]);
+        assert!(old_events.is_empty(), "{old_events:?}");
+        assert!(new_events.is_empty(), "{new_events:?}");
+        assert_eq!(old_registry.identity(), new_registry.identity());
+        let old_names = crate::ctx::DictionaryNames::new(&old_registry, None);
+        let new_names = crate::ctx::DictionaryNames::new(&new_registry, None);
+        assert!(old_names.same_as(&new_names));
+        let old_selected = old_registry.choice("before");
+        let new_selected = new_registry.choice("after");
+        let old_names = crate::ctx::DictionaryNames::new(&old_registry, old_selected.as_ref());
+        let new_names = crate::ctx::DictionaryNames::new(&new_registry, new_selected.as_ref());
+        assert!(!old_names.same_as(&new_names));
+    }
+
+    #[test]
+    fn a_nondefault_alias_of_a_reachable_pair_keeps_its_label() {
+        let directory = tmp();
+        let path = write(&directory, "transport.xml", "<fix version='FIXT.1.1'><messages><message name='Heartbeat' msgtype='0' msgcat='admin'/></messages><fields/></fix>");
+        let family = DictionarySpec {
+            name: "family".into(),
+            transport: Some(path.clone()),
+            default: true,
+            ..DictionarySpec::default()
+        };
+        let alias = DictionarySpec {
+            name: "alias".into(),
+            transport: Some(path),
+            application: Some("FIX.5.0SP2".into()),
+            ..DictionarySpec::default()
+        };
+        let (registry, events) = build(&[family, alias]);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(names(registry, None).of("FIX.5.0SP2"), Some("alias"));
     }
 
     /// Both names share one parsed file; each is named as it was selected.

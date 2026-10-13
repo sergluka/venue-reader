@@ -54,6 +54,43 @@ fn throughput(c: &mut Criterion) {
     }
     group.finish();
 
+    let mut fixt = c.benchmark_group("analyze_fixt");
+    for (code, version) in [("7", "FIX.5.0"), ("8", "FIX.5.0SP1"), ("9", "FIX.5.0SP2")] {
+        let messages: Vec<_> = lines
+            .iter()
+            .filter(|line| !line.windows(6).any(|value| value == b"|35=0|"))
+            .take(BATCH)
+            .map(|line| {
+                String::from_utf8_lossy(line)
+                    .replacen("8=FIX.4.4|", &format!("8=FIXT.1.1|1128={code}|"), 1)
+                    .into_bytes()
+            })
+            .collect();
+        assert_eq!(messages.len(), BATCH);
+        for line in &messages {
+            let analysis = analyze(line, &ctx);
+            let message = analysis.message().expect("synthetic FIXT message");
+            assert_eq!(message.resolution.issue, None);
+            if message.application_known() {
+                assert_eq!(message.version.as_ref(), version);
+            }
+        }
+        fixt.throughput(criterion::Throughput::Elements(BATCH as u64));
+        fixt.bench_function(version, |bench| {
+            bench.iter(|| {
+                messages
+                    .iter()
+                    .map(|line| {
+                        analyze(line, &ctx)
+                            .message()
+                            .map_or(0, |message| message.fields.len())
+                    })
+                    .sum::<usize>()
+            })
+        });
+    }
+    fixt.finish();
+
     // Cold walk: a fresh document per iteration, or only the first is cold.
     c.bench_function("cold_walk_transient", |b| {
         b.iter_batched(

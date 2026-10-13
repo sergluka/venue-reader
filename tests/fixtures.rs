@@ -15,7 +15,10 @@ use fix_lsp::rules::{integrity, LineCtx, Registry, Scope};
 
 /// The one rule a repair answers to.
 const INTEGRITY: Scope = Scope {
-    label: None,
+    labels: fix_lsp::ctx::Labels {
+        transport: None,
+        application: None,
+    },
     count_from: None,
     only: Some("integrity"),
 };

@@ -968,8 +968,8 @@ mod tests {
         assert_eq!(version_of(&doc, 1).as_deref(), Some("FIX.4.4"));
         assert_eq!(
             version_of(&doc, 2).as_deref(),
-            Some("FIX.4.4"),
-            "the default"
+            Some(""),
+            "missing BeginString(8) has no dictionary version"
         );
     }
 

@@ -104,6 +104,7 @@ mod tests {
             "dictionary = 'venue'",
             "version = 1",
             "unknown = true",
+            "defaultVersion = 'FIX.4.4'",
         ] {
             assert!(
                 parse(text, Path::new("/home/test/.config/fix-lsp.toml")).is_err(),

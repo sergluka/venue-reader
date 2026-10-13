@@ -1,7 +1,6 @@
 # FIX sample logs
 
-Inputs for the tests, and the only multi-version `.fix` material in the
-repository: FIX 4.2 (SOH-delimited), 4.4 and 5.0SP2 messages, repeating groups,
+Inputs for the tests: FIX 4.2 (SOH-delimited), 4.4 and 5.0SP2 messages, repeating groups,
 and a set of deliberately malformed lines — wrong BodyLength, wrong CheckSum,
 missing either, an unknown BeginString, a fragment, duplicate tags.
 

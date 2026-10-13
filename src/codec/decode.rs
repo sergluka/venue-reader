@@ -1,35 +1,26 @@
-//! Resolving a tokenized line against one dictionary: field and enum indices,
-//! the message type, and repeating-group membership.
+//! Source-owned field lookup and tolerant repeating-group annotation.
 
 use super::packed::Packed16;
-use super::tokenize::{tokenize, FieldSpan, LineKind, LineTokens};
-use super::{Field, GroupInstance, LineAnalysis, MessageAnalysis, NO_GROUP};
-use crate::dictionary::schema::Schema;
-use crate::dictionary::{Dict, GroupIdx, MsgIdx};
+use super::tokenize::{tokenize, LineKind, LineTokens};
+use super::{
+    Field, GroupInstance, LineAnalysis, MessageAnalysis, MessageRef, Resolution, ResolutionIssue,
+    Selector, COUNTER, IN_HEADER, IN_TRAILER, NO_GROUP, SCOPE_MASK,
+};
+use crate::dictionary::{Dict, DictionarySources, FieldIdx, GroupIdx, MsgIdx, SourceRole};
+use crate::tag;
 use std::sync::Arc;
 
-/// Matches `parse.rs`'s component-nesting cap: bounding the recursion by the
-/// field count alone would let a custom dictionary with a long
-/// nested-count-tag chain exhaust the stack.
-pub(crate) const MAX_GROUP_DEPTH: u16 = 32;
-
-/// One more than the largest packable index: the annotator stops when the next
-/// instance would be one `Field::group` cannot address.
+pub(crate) const MAX_GROUP_DEPTH: u8 = 32;
 const MAX_GROUP_INSTANCES: usize = Packed16::MAX_VALUE + 1;
 
-/// Convenience wrapper: tokenizes, then delegates. `analyze` tokenizes once and
-/// calls [`decode_tokenized`] directly.
 pub fn decode(bytes: &[u8], dict: &Dict, version: &Arc<str>) -> LineAnalysis {
     decode_tokenized(bytes, tokenize(bytes), dict, version)
 }
 
-/// Classification only, for a line that resolves to no dictionary.
 pub fn decode_non_message(tokenized: LineTokens) -> LineAnalysis {
     match tokenized.kind {
         LineKind::Empty => LineAnalysis::Empty,
         LineKind::Comment => LineAnalysis::Comment,
-        // A `Message` with no fields cannot happen — the tokenizer classifies by
-        // whether it read any — but treat it as unparsed rather than panicking.
         LineKind::Other | LineKind::Message => LineAnalysis::Other,
     }
 }
@@ -40,112 +31,303 @@ pub fn decode_tokenized(
     dict: &Dict,
     version: &Arc<str>,
 ) -> LineAnalysis {
-    if tokenized.kind != LineKind::Message {
-        return decode_non_message(tokenized);
+    let sources = DictionarySources {
+        transport: Some(dict.clone()),
+        application: Some(dict.clone()),
+    };
+    decode_sources(
+        bytes,
+        tokenized,
+        sources,
+        version.clone(),
+        Resolution::default(),
+    )
+}
+
+/// The transport message of MsgType(35) `value` when that message is a session message.
+pub fn session_message(transport: &Dict, value: &str) -> Option<MsgIdx> {
+    transport
+        .message_idx(value)
+        .filter(|index| transport.message(*index).is_session())
+}
+
+/// The definition of MsgType(35) `value`: the transport one for a session
+/// message, else the application one.
+pub fn message_ref(sources: &DictionarySources, value: &str) -> Option<MessageRef> {
+    if let Some(index) = sources
+        .transport
+        .as_ref()
+        .and_then(|transport| session_message(transport, value))
+    {
+        return Some(MessageRef {
+            owner: SourceRole::Transport,
+            index,
+        });
     }
-
-    let mut fields: Vec<Field> = tokenized
-        .fields
-        .iter()
-        .map(|span| resolve(bytes, span, dict))
-        .collect();
-
-    let msg_type = first_value(bytes, &fields, 35)
-        .and_then(|value| std::str::from_utf8(value).ok())
-        .and_then(|msg_type| dict.message_idx(msg_type));
-
-    let mut groups = Vec::new();
-    if let Some(message) = msg_type {
-        Annotator {
-            bytes,
-            dict,
-            schema: dict.schema(),
-            fields: &mut fields,
-            groups: &mut groups,
-        }
-        .run(message);
-    }
-
-    LineAnalysis::Message(MessageAnalysis {
-        prefix_len: tokenized.prefix_len,
-        dict: dict.clone(),
-        version: version.clone(),
-        fields,
-        groups,
-        msg_type,
+    let index = sources.application.as_ref()?.message_idx(value)?;
+    Some(MessageRef {
+        owner: SourceRole::Application,
+        index,
     })
 }
 
-fn resolve(bytes: &[u8], span: &FieldSpan, dict: &Dict) -> Field {
-    let mut field = Field::new(span);
-    let Some(def) = dict.field_idx(span.tag) else {
-        return field;
-    };
-    field.set_def(def);
-
-    // A value that is not text can match no enum. Resolving it once here keeps
-    // every renderer a direct fetch.
-    let raw = &bytes[span.value_start.index()..span.value_end.index()];
-    if let Some(at) = std::str::from_utf8(raw)
-        .ok()
-        .and_then(|value| dict.enum_idx(def, value))
-    {
-        field.set_enum(at);
-    }
-    field
-}
-
-fn first_value<'a>(bytes: &'a [u8], fields: &[Field], tag: u32) -> Option<&'a [u8]> {
-    fields
+pub fn decode_sources(
+    bytes: &[u8],
+    tokenized: LineTokens,
+    sources: DictionarySources,
+    version: Arc<str>,
+    resolution: Resolution,
+) -> LineAnalysis {
+    let msg_type = tokenized
+        .fields
         .iter()
-        .find(|field| field.tag == tag)
-        .map(|field| field.value(bytes))
+        .find(|field| field.tag == tag::MSG_TYPE)
+        .and_then(|field| {
+            std::str::from_utf8(&bytes[field.value_start.index()..field.value_end.index()]).ok()
+        })
+        .and_then(|value| message_ref(&sources, value));
+    decode_resolved(bytes, tokenized, sources, version, resolution, msg_type)
 }
 
-/// Repeating-group annotation.
+/// [`decode_sources`] for a caller that already resolved MsgType(35).
+pub fn decode_resolved(
+    bytes: &[u8],
+    tokenized: LineTokens,
+    sources: DictionarySources,
+    version: Arc<str>,
+    resolution: Resolution,
+    msg_type: Option<MessageRef>,
+) -> LineAnalysis {
+    if tokenized.kind != LineKind::Message {
+        return decode_non_message(tokenized);
+    }
+    let mut fields: Vec<Field> = tokenized.fields.iter().map(Field::new).collect();
+    let mut groups = Vec::new();
+    let mut annotator = Annotator {
+        bytes,
+        sources: &sources,
+        fields: &mut fields,
+        groups: &mut groups,
+        known_owner: None,
+    };
+    if let Some(message) = msg_type {
+        annotator.run(message);
+    } else {
+        for at in 0..annotator.fields.len() {
+            annotator.scalar(at);
+        }
+    }
+    let mut analysis = MessageAnalysis {
+        prefix_len: tokenized.prefix_len,
+        sources,
+        version,
+        resolution,
+        fields,
+        groups,
+        msg_type,
+    };
+    if let Some((field, selector)) = analysis.fields.iter().find_map(|field| {
+        let selector = Selector::of(field.tag)?;
+        (field.group_idx().is_some() || field.unresolved() && analysis.resolution.issue.is_none())
+            .then_some((field, selector))
+    }) {
+        let issue = if field.group_idx().is_some() {
+            ResolutionIssue::SelectorInGroup(selector)
+        } else {
+            ResolutionIssue::AmbiguousSelector(selector)
+        };
+        analysis.resolution.issue = Some(issue);
+        analysis.sources = DictionarySources {
+            transport: None,
+            application: None,
+        };
+        analysis.msg_type = None;
+        analysis.groups.clear();
+        for field in &mut analysis.fields {
+            field.clear_resolution();
+        }
+    }
+    LineAnalysis::Message(analysis)
+}
+
+fn resolve(bytes: &[u8], field: &mut Field, source: &Dict, owner: SourceRole, flags: u8) {
+    let def = source.field_idx(field.tag);
+    resolve_as(bytes, field, source, owner, flags, def);
+}
+
+/// [`resolve`] for a caller that already looked up the field.
+fn resolve_as(
+    bytes: &[u8],
+    field: &mut Field,
+    source: &Dict,
+    owner: SourceRole,
+    flags: u8,
+    def: Option<FieldIdx>,
+) {
+    field.set_owner(owner, flags);
+    if let Some(def) = def {
+        field.set_def(def);
+        if let Some(index) = field
+            .text(bytes)
+            .and_then(|value| source.enum_idx(def, value))
+        {
+            field.set_enum(index);
+        }
+    }
+}
+
 struct Annotator<'a> {
     bytes: &'a [u8],
-    dict: &'a Dict,
-    schema: Schema<'a>,
+    sources: &'a DictionarySources,
     fields: &'a mut [Field],
     groups: &'a mut Vec<GroupInstance>,
+    known_owner: Option<SourceRole>,
 }
 
 impl Annotator<'_> {
-    /// A top-level count tag opens a group; anything else is skipped.
-    fn run(&mut self, message: MsgIdx) {
-        // The message comes first, so its own group wins a counter the header
-        // or trailer also declares.
-        let scopes = [
-            self.schema.message(message.0),
-            self.schema.header(),
-            self.schema.trailer(),
-        ];
+    /// A field without a place in the message definition.
+    fn scalar(&mut self, at: usize) {
+        if !self.envelope(at) {
+            self.undeclared(at);
+        }
+    }
+
+    /// Header and trailer membership needs no message definition.
+    fn envelope(&mut self, at: usize) -> bool {
+        let Some(transport) = self.sources.transport.as_ref() else {
+            return false;
+        };
+        let schema = transport.schema();
+        let tag = self.fields[at].tag;
+        let flags = if schema.header().find(tag).is_some() {
+            IN_HEADER
+        } else if schema.trailer().find(tag).is_some() {
+            IN_TRAILER
+        } else {
+            return false;
+        };
+        resolve(
+            self.bytes,
+            &mut self.fields[at],
+            transport,
+            SourceRole::Transport,
+            flags,
+        );
+        true
+    }
+
+    /// A field outside the header and the trailer that the message does not
+    /// declare. The application owns it unless only the transport defines it.
+    fn undeclared(&mut self, at: usize) {
+        let tag = self.fields[at].tag;
+        let (owner, source, def) = match (
+            self.sources.transport.as_ref(),
+            self.sources.application.as_ref(),
+        ) {
+            (Some(transport), Some(application)) if transport.ptr_eq(application) => (
+                SourceRole::Application,
+                application,
+                application.field_idx(tag),
+            ),
+            (Some(transport), Some(application)) => match application.field_idx(tag) {
+                Some(def) => (SourceRole::Application, application, Some(def)),
+                None => match transport.field_idx(tag) {
+                    Some(def) => (SourceRole::Transport, transport, Some(def)),
+                    None => (SourceRole::Application, application, None),
+                },
+            },
+            (Some(transport), None) if self.known_owner == Some(SourceRole::Transport) => {
+                (SourceRole::Transport, transport, transport.field_idx(tag))
+            }
+            _ => return,
+        };
+        resolve_as(self.bytes, &mut self.fields[at], source, owner, 0, def);
+    }
+
+    fn run(&mut self, message: MessageRef) {
+        self.known_owner = Some(message.owner);
+        let source = self.sources.source(message.owner).expect("message source");
+        let body = source.schema().message(message.index.0);
+        let transport_schema = self.sources.transport.as_ref().map(Dict::schema);
+        let header = transport_schema.map(|schema| schema.header());
+        let trailer = transport_schema.map(|schema| schema.trailer());
+        let shared_source = self
+            .sources
+            .transport
+            .as_ref()
+            .zip(self.sources.application.as_ref())
+            .is_some_and(|(transport, application)| transport.ptr_eq(application));
         let mut at = 0;
         while at < self.fields.len() {
             let tag = self.fields[at].tag;
-            let opened = scopes
-                .iter()
-                .flat_map(|scope| scope.groups())
-                .find(|(count_tag, _)| *count_tag == tag)
-                .and_then(|(_, member)| member.group());
-            match opened {
-                Some(group) => at = self.group(GroupIdx(group), at, NO_GROUP, 1),
-                None => at += 1,
+            let found = [
+                body.find(tag)
+                    .map(|member| (message.owner, member.group(), 0)),
+                header
+                    .as_ref()
+                    .and_then(|header| header.find(tag))
+                    .map(|member| (SourceRole::Transport, member.group(), IN_HEADER)),
+                trailer
+                    .as_ref()
+                    .and_then(|trailer| trailer.find(tag))
+                    .map(|member| (SourceRole::Transport, member.group(), IN_TRAILER)),
+            ];
+            let candidates = || found.iter().flatten();
+            // Without a shared source, two owners mean two different dictionaries claim the tag.
+            let conflict = !shared_source
+                && candidates()
+                    .next()
+                    .is_some_and(|(first, _, _)| candidates().any(|(owner, _, _)| owner != first));
+            if conflict {
+                if candidates().any(|(_, group, _)| group.is_some()) {
+                    break;
+                }
+                at += 1;
+                continue;
+            }
+            let candidate = candidates()
+                .find(|(_, group, _)| group.is_some())
+                .or(candidates().next())
+                .copied();
+            if let Some((owner, group, flags)) = candidate {
+                let flags = flags | if group.is_some() { COUNTER } else { 0 };
+                resolve(
+                    self.bytes,
+                    &mut self.fields[at],
+                    self.sources.source(owner).expect("source"),
+                    owner,
+                    flags,
+                );
+                at = match group {
+                    Some(group) => {
+                        self.group(owner, GroupIdx(group), at, NO_GROUP, 1, flags & SCOPE_MASK)
+                    }
+                    None => at + 1,
+                };
+            } else {
+                // The loop above already searched the header and the trailer.
+                self.undeclared(at);
+                at += 1;
             }
         }
     }
 
-    /// Consume up to `count` entries. Returns the index just past the group.
-    fn group(&mut self, group: GroupIdx, count_at: usize, parent_idx: u32, depth: u16) -> usize {
+    fn group(
+        &mut self,
+        owner: SourceRole,
+        group: GroupIdx,
+        count_at: usize,
+        parent_idx: u32,
+        depth: u8,
+        flags: u8,
+    ) -> usize {
         if depth > MAX_GROUP_DEPTH {
             return count_at + 1;
         }
-        let count = std::str::from_utf8(self.fields[count_at].value(self.bytes))
-            .ok()
+        let count = self.fields[count_at]
+            .text(self.bytes)
             .and_then(|text| text.parse::<u32>().ok())
             .unwrap_or(0);
-
         let mut at = count_at + 1;
         for entry in 1..=count {
             if at >= self.fields.len() || self.groups.len() >= MAX_GROUP_INSTANCES {
@@ -154,15 +336,13 @@ impl Annotator<'_> {
             let instance = self.groups.len() as u32;
             self.groups.push(GroupInstance {
                 group,
+                owner,
                 entry,
                 count_field_idx: count_at as u32,
                 parent_idx,
                 depth,
             });
-            let (next, consumed) = self.entry(group, at, instance, depth);
-            // Both breaks are load-bearing: a count field followed by a
-            // non-member, and a nested group that consumed nothing, would
-            // otherwise spin.
+            let (next, consumed) = self.entry(owner, group, at, instance, depth, flags);
             if !consumed || next == at {
                 self.groups.pop();
                 break;
@@ -172,10 +352,18 @@ impl Annotator<'_> {
         at
     }
 
-    fn entry(&mut self, group: GroupIdx, start: usize, instance: u32, depth: u16) -> (usize, bool) {
-        let scope = self.schema.group(group.0);
-        let delimiter = self.dict.group(group).delimiter_tag();
-
+    fn entry(
+        &mut self,
+        owner: SourceRole,
+        group: GroupIdx,
+        start: usize,
+        instance: u32,
+        depth: u8,
+        flags: u8,
+    ) -> (usize, bool) {
+        let source = self.sources.source(owner).expect("group source");
+        let scope = source.schema().group(group.0);
+        let delimiter = source.group(group).delimiter_tag();
         let mut at = start;
         let mut consumed = false;
         while at < self.fields.len() {
@@ -186,10 +374,16 @@ impl Annotator<'_> {
             let Some(member) = scope.find(tag) else {
                 break;
             };
-            // A nested count tag belongs to *this* entry, not to its own.
+            resolve(
+                self.bytes,
+                &mut self.fields[at],
+                source,
+                owner,
+                flags | if member.group().is_some() { COUNTER } else { 0 },
+            );
             self.fields[at].set_group(instance);
             at = match member.group() {
-                Some(nested) => self.group(GroupIdx(nested), at, instance, depth + 1),
+                Some(nested) => self.group(owner, GroupIdx(nested), at, instance, depth + 1, flags),
                 None => at + 1,
             };
             consumed = true;
@@ -197,7 +391,6 @@ impl Annotator<'_> {
         (at, consumed)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

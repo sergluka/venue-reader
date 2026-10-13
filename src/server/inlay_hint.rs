@@ -175,7 +175,7 @@ fn answer(params: &InlayHintParams, wanted: &Wanted, snapshot: &Snapshot) -> Han
         }
         let columns = Columns::of(line, wants.iter().map(|want| want.byte), snapshot.encoding);
         // One lookup per line, not per hint: every hint here shares the version.
-        let dictionary = snapshot.names.of(&message.version);
+        let dictionary = snapshot.names.of_analysis(message);
 
         for Want { byte, what } in wants {
             let column = columns.at(byte);
@@ -191,7 +191,16 @@ fn answer(params: &InlayHintParams, wanted: &Wanted, snapshot: &Snapshot) -> Han
             out.push(match what {
                 What::Summary => summary_hint(line, message, snapshot, number, uri),
                 What::Field { kind, at, label } => field_hint(
-                    line, message, at, kind, label, wanted, snapshot, dictionary, number, column,
+                    line,
+                    message,
+                    at,
+                    kind,
+                    label,
+                    wanted,
+                    snapshot,
+                    dictionary.of(message.fields[at].owner()),
+                    number,
+                    column,
                     uri,
                 ),
             });
@@ -341,8 +350,8 @@ pub(super) fn defers_tooltips(caps: &lsp_types::ClientCapabilities) -> bool {
 }
 
 /// The hover markdown a hint's tooltip carries, under the negotiated format.
-/// `dictionary` is `snapshot.names.of(&message.version)`, passed in so a
-/// line's worth of hints looks it up once.
+/// `dictionary` names the dictionary that defines the field. The caller takes
+/// it from the labels of the line, so a line's worth of hints looks them up once.
 pub(super) fn tooltip(
     line: &crate::document::Line,
     message: &crate::codec::MessageAnalysis,
@@ -422,7 +431,10 @@ fn resolve(mut hint: Value, format: &MarkupKind, snapshot: &Snapshot) -> Handler
     if data["tag"].as_u64() != Some(u64::from(message.fields[at].tag)) {
         return Ok(hint);
     }
-    let dictionary = snapshot.names.of(&message.version);
+    let dictionary = snapshot
+        .names
+        .of_analysis(message)
+        .of(message.fields[at].owner());
     if let Some(tip) = tooltip(line, message, at, snapshot, dictionary, format) {
         hint["tooltip"] = tip;
     }

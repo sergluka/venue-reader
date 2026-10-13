@@ -4,8 +4,7 @@
 //! else, so a row that needs its `detail` to be identifiable is not identifiable
 //! everywhere.
 
-use crate::codec::MessageAnalysis;
-use crate::dictionary::GroupIdx;
+use crate::codec::{GroupRef, MessageAnalysis};
 
 use super::{summary, Options, Template};
 
@@ -40,7 +39,7 @@ pub fn field(line: &[u8], analysis: &MessageAnalysis, at: usize) -> String {
     if let Some(value) = field.text(line).filter(|text| !text.is_empty()) {
         out.push_str(" = ");
         out.push_str(value);
-        if let Some(label) = analysis.enum_label(field) {
+        if let Some(label) = super::value_name(analysis, field) {
             out.push_str(" (");
             out.push_str(label);
             out.push(')');
@@ -56,9 +55,14 @@ pub fn group(
     line: &[u8],
     analysis: &MessageAnalysis,
     count_field_idx: usize,
-    of: GroupIdx,
+    of: GroupRef,
 ) -> String {
-    let name = analysis.dict.group(of).name();
+    let name = analysis
+        .sources
+        .source(of.owner)
+        .expect("group source")
+        .group(of.index)
+        .name();
     let Some(count) = analysis.fields.get(count_field_idx) else {
         return name.to_owned();
     };
@@ -114,7 +118,10 @@ mod tests {
                 text.as_bytes(),
                 message,
                 first.count_field_idx as usize,
-                first.group
+                GroupRef {
+                    owner: first.owner,
+                    index: first.group
+                }
             ),
             "NoPartyIDs (453) = 2"
         );

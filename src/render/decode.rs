@@ -128,7 +128,7 @@ mod tests {
     /// The same marked name the hint draws, through the same `tag_label`.
     #[test]
     fn a_tag_standard_fix_names_and_the_dictionary_lacks_is_marked() {
-        let bytes = b"8=FIX.5.0|35=0|1328=x|10=171|";
+        let bytes = b"8=FIXT.1.1|35=D|1128=7|1328=x|10=171|";
         let message = message_under(bytes, "FIX.5.0");
         let decoded = line(&message, bytes, message.fields.iter(), &Options::default());
         assert!(decoded.contains("|1328(RejectText?)=x|"), "{decoded}");

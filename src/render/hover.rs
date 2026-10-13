@@ -4,19 +4,14 @@ use std::fmt::Write as _;
 
 use crate::codec::MessageAnalysis;
 use crate::dictionary::{
-    bundled, newest_defining, standard, Dict, EnumIdx, FieldIdx, Lifecycle, Standard, Version,
+    bundled, reference_message_source, reference_source, standard, Dict, EnumIdx, FieldIdx,
+    Lifecycle, MessageView, Standard, Version,
 };
 use crate::tag;
 
 use super::Options;
 
-/// The field at `at`, or `None` when neither the dictionary nor standard FIX
-/// can name its tag. `label` names the custom dictionary that decoded the
-/// line, if it has one.
-///
-/// No `Dict` argument: a `FieldIdx`/`EnumIdx` means nothing except against the
-/// dictionary that produced it, which the analysis pins as `analysis.dict`.
-/// Taking one separately would let a caller pair an index with the wrong tables.
+/// Source-local indices are resolved only against the analysis that owns them.
 pub fn hover(
     line: &[u8],
     analysis: &MessageAnalysis,
@@ -25,23 +20,37 @@ pub fn hover(
     label: Option<&str>,
 ) -> Option<String> {
     let field = analysis.fields.get(at)?;
-    let dict = &analysis.dict;
-    let against = Version::parse(&analysis.version);
-    let source = match field.def() {
-        Some(idx) => Source::Defined(dict, idx),
-        None => Source::Standard,
+    let dict = analysis.field_dict(field);
+    let version = analysis.field_version(field);
+    let against = version.and_then(Version::parse);
+    let source = match (dict, field.def()) {
+        (Some(dict), Some(index)) => Source::Defined(dict, index),
+        _ => Source::Standard,
     };
     let About {
         paragraphs,
         standing,
-    } = about(source, field.tag, against, label, !dict.is_static())?;
+    } = about(
+        source,
+        field.tag,
+        against,
+        analysis.standard(field),
+        label,
+        dict.is_some_and(|dict| !dict.is_static()),
+    )?;
 
-    let mut value = value_paragraph(source, field.tag, field.value(line), field.enum_value());
+    let message = (field.tag == tag::MSG_TYPE)
+        .then(|| analysis.message_definition())
+        .flatten();
+    let label = field
+        .enum_value()
+        .filter(|_| field.tag != tag::MSG_TYPE || message.is_some());
+    let mut value = value_paragraph(source, field.value(line), label, message);
     if let Some(path) = analysis.group_path(field, line) {
         value.push(format!("Group: `{path}`"));
     }
 
-    let link = link(options, &analysis.version, field.tag, &standing);
+    let link = link(options, version, field.tag, &standing);
     Some(sections(paragraphs, value, link))
 }
 
@@ -49,12 +58,13 @@ pub fn hover(
 /// edition nor FIX Latest defines it.
 ///
 /// No version to measure against: the question is what the tag means, not
-/// whether some edition has it. So the newest edition that defines it answers —
-/// the current meaning, and the fullest code set — and the tag's own lifespan
-/// says when it arrived and, where it left, when it left. Hover's "not in this
-/// version" note has no subject here and is not printed.
+/// whether some edition has it. So the reference source answers: FIXT 1.1 for
+/// a transport field, else the newest edition that defines the tag — the
+/// current meaning, and the fullest code set. The tag's own lifespan says when
+/// it arrived and, where it left, when it left. Hover's "not in this version"
+/// note has no subject here and is not printed.
 pub fn describe(tag: u32, value: Option<&str>, options: &Options) -> Option<String> {
-    let answering = newest_defining(tag);
+    let answering = reference_source(tag);
     // Bound here rather than in the `match`: a `Dict` built inside an arm is
     // dropped at its end, and `Source` borrows it.
     let dict = answering.map(|version| Dict::Static(bundled(version)));
@@ -66,7 +76,11 @@ pub fn describe(tag: u32, value: Option<&str>, options: &Options) -> Option<Stri
         _ => Source::Standard,
     };
 
-    let About { mut paragraphs, .. } = about(source, tag, None, None, false)?;
+    let standing = dict.as_ref().map_or_else(
+        || Standard::of_tag(None, tag),
+        |dict| Standard::of_source(dict, tag),
+    );
+    let About { mut paragraphs, .. } = about(source, tag, None, standing, None, false)?;
     // When it arrived is the one fact FIX Latest alone can vouch for. Not in
     // `about`, which hover also calls without a version — for a line whose
     // version has no bundled tables — and which must not grow a line there.
@@ -81,22 +95,20 @@ pub fn describe(tag: u32, value: Option<&str>, options: &Options) -> Option<Stri
         Source::Defined(dict, idx) => value.and_then(|value| dict.enum_idx(idx, value)),
         Source::Standard => None,
     };
+    let message_dict = value
+        .filter(|_| tag == tag::MSG_TYPE)
+        .and_then(reference_message_source)
+        .map(|version| Dict::Static(bundled(version)));
+    let message = message_dict
+        .as_ref()
+        .and_then(|dict| Some(dict.message(dict.message_idx(value?)?)));
     let value = value_paragraph(
         source,
-        tag,
         value.map(str::as_bytes).unwrap_or_default(),
-        label,
+        label.filter(|_| tag != tag::MSG_TYPE || message.is_some()),
+        message,
     );
-    // Gated on the answering edition's own standing: a link asks whether the
-    // tag is on that edition's pages, and only a bundled edition has pages.
-    let link = answering.and_then(|version| {
-        link(
-            options,
-            version.as_str(),
-            tag,
-            &Standard::of_tag(Some(version), tag),
-        )
-    });
+    let link = link(options, answering.map(Version::as_str), tag, &standing);
     Some(sections(paragraphs, value, link))
 }
 
@@ -126,10 +138,10 @@ fn about(
     source: Source,
     tag: u32,
     against: Option<Version>,
+    standing: Standard,
     label: Option<&str>,
     custom: bool,
 ) -> Option<About> {
-    let standing = Standard::of_tag(against, tag);
     let mut paragraphs = Vec::new();
     match source {
         Source::Defined(dict, idx) => {
@@ -190,26 +202,36 @@ fn about(
 ///
 /// Standard FIX names a tag and says nothing about the values of one, so a
 /// `Standard` source renders the value alone.
-fn value_paragraph(source: Source, tag: u32, raw: &[u8], label: Option<EnumIdx>) -> Vec<String> {
+fn value_paragraph(
+    source: Source,
+    raw: &[u8],
+    label: Option<EnumIdx>,
+    message: Option<MessageView<'_>>,
+) -> Vec<String> {
     if raw.is_empty() {
         return Vec::new();
     }
-    let Source::Defined(dict, idx) = source else {
-        return vec![value_line(raw)];
+    let label = match source {
+        Source::Defined(dict, index) => label.map(|label| dict.enum_at(index, label)),
+        Source::Standard => None,
     };
-
     let mut value = Vec::new();
-    let mut line_ = value_line(raw);
-    let label = label.map(|at| dict.enum_at(idx, at));
-    if let Some(label) = &label {
-        line_.push_str(" — **");
-        line_.push_str(label.name());
-        line_.push_str("**");
+    let mut line = value_line(raw);
+    let name = message
+        .as_ref()
+        .map(MessageView::name)
+        .or_else(|| label.as_ref().map(|label| label.name()));
+    if let Some(name) = name {
+        line.push_str(" — **");
+        line.push_str(name);
+        line.push_str("**");
     }
-    value.push(line_);
+    value.push(line);
     if let Some(label) = &label {
-        // Only when it says something the name did not.
-        if !label.description().is_empty() && label.description() != label.name() {
+        if message.is_none()
+            && !label.description().is_empty()
+            && label.description() != label.name()
+        {
             value.push(label.description().to_owned());
         }
         value.extend(lifecycle(&Lifecycle {
@@ -218,18 +240,12 @@ fn value_paragraph(source: Source, tag: u32, raw: &[u8], label: Option<EnumIdx>)
             removed_in: None,
         }));
     }
-    if tag == tag::MSG_TYPE {
-        if let Some(message) = std::str::from_utf8(raw)
-            .ok()
-            .and_then(|value| dict.message_idx(value))
-            .map(|at| dict.message(at))
-        {
-            if !message.description().is_empty() {
-                value.push(message.description().to_owned());
-            }
-            if !message.category().is_empty() {
-                value.push(format!("*Category: {}*", message.category()));
-            }
+    if let Some(message) = message {
+        if !message.description().is_empty() {
+            value.push(message.description().to_owned());
+        }
+        if !message.category().is_empty() {
+            value.push(format!("*Category: {}*", message.category()));
         }
     }
     value
@@ -245,9 +261,12 @@ fn value_line(raw: &[u8]) -> String {
 /// names whatever site the URL points at, so a desk that redirects
 /// `documentLink.url` at its own browser does not get a link still claiming
 /// to be Onixs. A link into a version's pages asserts the tag is there.
-fn link(options: &Options, version: &str, tag: u32, standing: &Standard) -> Option<String> {
+fn link(options: &Options, version: Option<&str>, tag: u32, standing: &Standard) -> Option<String> {
+    if options.tag_url.requires_version() && version.is_none() {
+        return None;
+    }
     (!options.tag_url.is_versioned() || *standing == Standard::InVersion)
-        .then(|| options.tag_url.of(version, tag))
+        .then(|| options.tag_url.of(version.unwrap_or_default(), tag))
         .flatten()
         .map(|url| match options.tag_url.host() {
             Some(host) => format!("[FIX Reference: {host}]({url})"),
@@ -279,7 +298,7 @@ fn standing_note(
     let note = match standing {
         Standard::InVersion if !custom => return None,
         Standard::Nowhere => {
-            return Some(match label {
+            return Some(match label.filter(|_| custom) {
                 Some(label) => format!("*Custom field, introduced in \"{label}\"*"),
                 None => "*Custom field*".to_owned(),
             });
@@ -320,6 +339,7 @@ mod tests {
     use super::*;
     use crate::codec::LineAnalysis;
     use crate::ctx::{analyze, Ctx};
+    use crate::dictionary::newest_defining;
 
     /// The line, its analysis under `ctx`, and the index of the field carrying `tag`.
     fn at_tag_in(ctx: &Ctx, line: &str, tag: u32) -> (Vec<u8>, MessageAnalysis, usize) {
@@ -352,11 +372,11 @@ mod tests {
     }
 
     /// The point of one renderer, as an equality: a description *is* the hover
-    /// for that tag on a line of the newest edition that defines it. No version
-    /// is asked about, so the two can differ in nothing — not the header, not
-    /// the lifespan, not the link.
+    /// for that tag on a line of its reference source. No version is asked
+    /// about, so the two can differ in nothing — not the header, not the
+    /// lifespan, not the link.
     #[test]
-    fn a_description_is_the_hover_under_the_newest_edition_that_defines_the_tag() {
+    fn a_description_is_the_hover_under_the_reference_source() {
         for (tag, value) in [
             (49u32, "CLIENT1"),
             (54, "1"),
@@ -368,9 +388,16 @@ mod tests {
             (47, "A"),   // newest edition FIX.4.3, retired after it
             (9000, "1"), // QuickFIX-only: *Custom field*, and no link either side
         ] {
-            let version = newest_defining(tag).expect("a bundled edition defines it");
+            let version = reference_source(tag).unwrap_or(Version::Fixt11);
             let version = version.as_str();
-            let line = format!("8={version}|9=5|35=0|{tag}={value}|10=0|");
+            let prefix = match version {
+                "FIX.5.0" => "8=FIXT.1.1|9=5|35=D|1128=7|".to_owned(),
+                "FIX.5.0SP1" => "8=FIXT.1.1|9=5|35=D|1128=8|".to_owned(),
+                "FIX.5.0SP2" => "8=FIXT.1.1|9=5|35=D|1128=9|".to_owned(),
+                "FIXT.1.1" => "8=FIXT.1.1|9=5|35=A|".to_owned(),
+                _ => format!("8={version}|9=5|35=0|"),
+            };
+            let line = format!("{prefix}{tag}={value}|10=0|");
             let (bytes, analysis, at) = at_tag(&line, version, tag);
             let hovered = hover(&bytes, &analysis, at, &Options::default(), None).expect("hover");
             assert_eq!(
@@ -381,29 +408,36 @@ mod tests {
 
             // And without a value: an empty one leaves hover no value section,
             // which is the shape a description with no value argument has.
-            let bare = format!("8={version}|9=5|35=0|{tag}=|10=0|");
+            let bare = format!("{prefix}{tag}=|10=0|");
             let (bytes, analysis, at) = at_tag(&bare, version, tag);
             let hovered = hover(&bytes, &analysis, at, &Options::default(), None).expect("hover");
             assert_eq!(
-                described(tag).as_deref(),
+                describe(tag, None, &Options::default()).as_deref(),
                 Some(hovered.as_str()),
                 "tag {tag} under {version}, no value"
             );
         }
     }
 
-    /// MsgType(35) has to be the line's own, so it cannot join the table above;
-    /// the message description and category come through the same paragraph.
     #[test]
-    fn a_description_of_msg_type_is_its_hover_too() {
-        let line = "8=FIX.5.0SP2|9=5|35=D|10=0|";
+    fn msg_type_reference_and_hover_resolve_the_application_message() {
+        let line = "8=FIXT.1.1|9=5|35=D|1128=9|10=0|";
         let (bytes, analysis, at) = at_tag(line, "FIX.5.0SP2", tag::MSG_TYPE);
         let hovered = hover(&bytes, &analysis, at, &Options::default(), None).expect("hover");
-        assert!(hovered.contains("**NewOrderSingle**"), "{hovered}");
-        assert_eq!(
-            describe(tag::MSG_TYPE, Some("D"), &Options::default()).as_deref(),
-            Some(hovered.as_str())
-        );
+        let described =
+            describe(tag::MSG_TYPE, Some("D"), &Options::default()).expect("description");
+        for rendered in [&hovered, &described] {
+            assert!(
+                rendered.contains("Value: `D` — **NewOrderSingle**"),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("The NewOrderSingle(35=D) message"),
+                "{rendered}"
+            );
+        }
+        assert!(hovered.ends_with("/fixt1.1/tagNum_35.html)"), "{hovered}");
+        assert_eq!(described, hovered);
     }
 
     /// A description is asked about a tag, not about a version, so it names
@@ -480,9 +514,7 @@ mod tests {
         );
     }
 
-    /// The link needs a version to be built from, which only a bundled edition
-    /// supplies: under a flat template a QuickFIX-only tag links as hover links
-    /// it, while a tag only FIX Latest knows cannot.
+    /// Flat reference templates need no bundled version.
     #[test]
     fn a_description_links_what_a_bundled_edition_answers_for() {
         let flat = with_url("https://fix.internal/t{tag}");
@@ -493,10 +525,10 @@ mod tests {
             "a flat template needs no version"
         );
         assert!(
-            !describe(2891, None, &flat)
+            describe(2891, None, &flat)
                 .expect("described")
                 .contains("[FIX Reference"),
-            "no bundled edition answers, so there is no version to link"
+            "a version-independent reference does not need a bundled edition"
         );
 
         let off = with_url("");
@@ -597,9 +629,12 @@ mod tests {
     fn a_value_orchestra_restored_is_labelled_like_any_other() {
         // The line's own BeginString decides the version, so it varies too.
         let party = |version: &str, value: &str| {
-            format!(
-                "8={version}|9=57|35=D|453=1|448=A|447=D|452=1|802=1|523=S1|803={value}|10=171|"
-            )
+            let prefix = if version == "FIX.5.0SP2" {
+                "8=FIXT.1.1|9=57|35=D|1128=9|".to_owned()
+            } else {
+                format!("8={version}|9=57|35=D|")
+            };
+            format!("{prefix}453=1|448=A|447=D|452=1|802=1|523=S1|803={value}|10=171|")
         };
         let in_44 = rendered(&party("FIX.4.4", "1"), "FIX.4.4", 803).expect("803 is known");
         assert!(in_44.contains("Value: `1` — **Firm**"), "{in_44}");
@@ -709,7 +744,12 @@ mod tests {
     #[test]
     fn an_undefined_tag_is_named_and_placed_by_standard_fix() {
         assert_eq!(
-            rendered("8=FIX.5.0|9=57|35=0|1328=x|10=171|", "FIX.5.0", 1328).as_deref(),
+            rendered(
+                "8=FIXT.1.1|9=57|35=D|1128=7|1328=x|10=171|",
+                "FIX.5.0",
+                1328
+            )
+            .as_deref(),
             Some(
                 "**RejectText** (1328)\n\n\
                  *Not in FIX.5.0, introduced in FIX.5.0SP1*\n\n\
@@ -722,7 +762,7 @@ mod tests {
     #[test]
     fn an_undefined_tag_only_fix_latest_knows_is_dated_fix_latest() {
         assert_eq!(
-            rendered("8=FIX.4.4|9=57|35=0|2891=x|10=171|", "FIX.4.4", 2891).as_deref(),
+            rendered("8=FIX.4.4|9=57|35=D|2891=x|10=171|", "FIX.4.4", 2891).as_deref(),
             Some("**UPICode** (2891)\n\n*Not in FIX.4.4, introduced in FIX Latest*\n\n---\n\nValue: `x`")
         );
     }
@@ -742,7 +782,7 @@ mod tests {
     #[test]
     fn a_disputed_or_unknown_undefined_tag_has_no_hover() {
         assert_eq!(
-            rendered("8=FIX.4.2|9=57|35=0|220=USD|10=171|", "FIX.4.2", 220),
+            rendered("8=FIX.4.2|9=57|35=D|220=USD|10=171|", "FIX.4.2", 220),
             None,
             "disputed"
         );
@@ -756,7 +796,7 @@ mod tests {
     #[test]
     fn an_undefined_tag_with_no_value_has_no_value_section() {
         assert_eq!(
-            rendered("8=FIX.5.0|9=57|35=0|1328=|10=171|", "FIX.5.0", 1328).as_deref(),
+            rendered("8=FIXT.1.1|9=57|35=D|1128=7|1328=|10=171|", "FIX.5.0", 1328).as_deref(),
             Some("**RejectText** (1328)\n\n*Not in FIX.5.0, introduced in FIX.5.0SP1*")
         );
     }
@@ -770,11 +810,9 @@ mod tests {
         assert!(!hover.contains("Removed in"), "{hover}");
     }
 
-    /// A FIXT line reads the FIX.5.0SP2 tables while keeping its own version
-    /// string, so its lifecycle facts are 5.0SP2's. Correct, and pinned so that
-    /// nobody "fixes" it into reporting FIXT's own non-existent editions.
+    /// Transport fields keep their independently published lifecycle facts.
     #[test]
-    fn a_fixt_line_reports_the_tables_it_actually_read() {
+    fn a_fixt_line_reports_transport_field_lifecycle() {
         let line = "8=FIXT.1.1|9=57|35=0|49=CLIENT1|56=BROKER1|10=171|";
         let hover = rendered(line, "FIX.5.0SP2", 49).expect("49 is known");
         assert!(hover.contains("*Introduced in FIX.2.7*"), "{hover}");
@@ -788,16 +826,16 @@ mod tests {
     fn an_ep_dated_tag_is_dated_by_the_release_that_shipped_it() {
         // RejectText(1328): FIX.5.0 EP55, first in the FIX.5.0SP1 file.
         for (line, version) in [
-            ("8=FIX.5.0SP2|9=5|35=0|1328=x|10=0|", "FIX.5.0SP2"),
-            ("8=FIXT.1.1|9=5|35=0|1328=x|10=0|", "FIXT.1.1"),
+            ("8=FIXT.1.1|9=5|35=D|1128=9|1328=x|10=0|", "FIX.5.0SP2"),
+            ("8=FIXT.1.1|9=5|35=D|1128=9|1328=x|10=0|", "FIXT.1.1"),
         ] {
             let hover = rendered(line, version, 1328).expect("1328 is in the tables");
             assert!(hover.contains("*Introduced in FIX.5.0SP1*"), "{hover}");
         }
 
         // NoStrategyParameters(957): FIX.4.4 EP2, first in the FIX.5.0 file.
-        let parameters =
-            rendered("8=FIX.5.0|9=5|35=0|957=1|10=0|", "FIX.5.0", 957).expect("957 is in 5.0");
+        let parameters = rendered("8=FIXT.1.1|9=5|35=D|1128=7|957=1|10=0|", "FIX.5.0", 957)
+            .expect("957 is in 5.0");
         assert!(
             parameters.contains("*Introduced in FIX.5.0*"),
             "{parameters}"
@@ -805,8 +843,12 @@ mod tests {
 
         // DefaultApplExtID(1407): EP56, and the files put it in SP2 rather than
         // the SP1 the pack implies — a date that does not hold is not printed.
-        let ext_id = rendered("8=FIX.5.0SP2|9=5|35=0|1407=x|10=0|", "FIX.5.0SP2", 1407)
-            .expect("1407 is in the SP2 tables");
+        let ext_id = rendered(
+            "8=FIXT.1.1|9=5|35=D|1128=9|1407=x|10=0|",
+            "FIX.5.0SP2",
+            1407,
+        )
+        .expect("1407 is in the SP2 tables");
         assert!(!ext_id.contains("Introduced in"), "{ext_id}");
     }
 
@@ -836,13 +878,12 @@ mod tests {
         );
     }
 
-    /// The link follows the line's own version string, which for a FIXT line is
-    /// `FIXT.1.1` — and the site documents its tables under 5.0.SP2.
+    /// Transport links use FIXT pages even with an application default.
     #[test]
-    fn a_fixt_line_links_into_the_tables_it_reads() {
+    fn a_fixt_line_links_to_its_transport_reference() {
         let line = "8=FIXT.1.1|9=57|35=0|49=CLIENT1|56=BROKER1|10=171|";
         let hover = rendered(line, "FIX.4.4", 49).expect("49 is known");
-        assert!(hover.ends_with("/5.0.SP2/tagNum_49.html)"), "{hover}");
+        assert!(hover.ends_with("/fixt1.1/tagNum_49.html)"), "{hover}");
     }
 
     // --- how a tag stands against standard FIX --------------------------
@@ -854,7 +895,12 @@ mod tests {
 
     /// Hover over `tag` on a one-field line of `version`, `dict` answering for it.
     fn under(version: &str, dict: ParsedDict, tag: u32, options: &Options) -> String {
-        let line = format!("8={version}|35=0|{tag}=x|");
+        let line = match version {
+            "FIX.5.0" => format!("8=FIXT.1.1|35=D|1128=7|{tag}=x|"),
+            "FIX.5.0SP1" => format!("8=FIXT.1.1|35=D|1128=8|{tag}=x|"),
+            "FIX.5.0SP2" => format!("8=FIXT.1.1|35=D|1128=9|{tag}=x|"),
+            _ => format!("8={version}|35=0|{tag}=x|"),
+        };
         let (bytes, message, at) = at_tag_in(&Ctx::for_test_with_dict(version, dict), &line, tag);
         hover(&bytes, &message, at, options, Some("selected")).expect("something to hover")
     }
@@ -991,13 +1037,19 @@ mod tests {
     #[test]
     fn bundled_dictionaries_change_only_where_the_sources_do() {
         // No source dates the QuickFIX/J-only tags, so no life is claimed either.
-        let qfj_only = rendered("8=FIX.5.0|9=5|35=0|9000=1|10=0|", "FIX.5.0", 9000).unwrap();
+        let qfj_only =
+            rendered("8=FIXT.1.1|9=5|35=D|1128=7|9000=1|10=0|", "FIX.5.0", 9000).unwrap();
         assert_eq!(
             qfj_only,
             "**NoNestedUserData** (9000) — INT\n\n*Custom field*\n\n---\n\nValue: `1`"
         );
 
-        let sp2 = rendered("8=FIX.5.0SP2|9=5|35=0|1328=x|10=0|", "FIX.5.0SP2", 1328).unwrap();
+        let sp2 = rendered(
+            "8=FIXT.1.1|9=5|35=D|1128=9|1328=x|10=0|",
+            "FIX.5.0SP2",
+            1328,
+        )
+        .unwrap();
         assert!(sp2.ends_with("/5.0.SP2/tagNum_1328.html)"), "{sp2}");
         assert!(
             !sp2.contains("Standard FIX"),
@@ -1005,7 +1057,12 @@ mod tests {
         );
 
         // ApplReportType(1426): in the SP1 file, dated SP2.
-        let disputed = rendered("8=FIX.5.0SP1|9=5|35=0|1426=0|10=0|", "FIX.5.0SP1", 1426).unwrap();
+        let disputed = rendered(
+            "8=FIXT.1.1|9=5|35=D|1128=8|1426=0|10=0|",
+            "FIX.5.0SP1",
+            1426,
+        )
+        .unwrap();
         let about = disputed.split("\n\n---\n\n").next().unwrap();
         assert!(!about.contains("Not in"), "{disputed}");
         assert!(
@@ -1051,29 +1108,29 @@ mod tests {
     }
 
     #[test]
-    fn session_tags_the_sp1_file_lacks_are_not_claimed_absent() {
-        for (tag, name) in [(108, "HeartBtInt"), (1407, "DefaultApplExtID")] {
-            let shown = custom("FIX.5.0SP1", tag, name);
-            assert!(
-                !shown.contains("Not in") && !shown.contains("Standard FIX"),
-                "{shown}"
-            );
-            assert!(!shown.contains("[FIX Reference"), "{shown}");
+    fn transport_fields_are_not_judged_against_application_history() {
+        for code in ["7", "8", "9"] {
+            for tag in [108, 1400, 1407] {
+                let line = format!("8=FIXT.1.1|35=A|{tag}=30|");
+                let shown = rendered(&line, "FIX.4.4", tag).expect("transport field");
+                assert!(!shown.contains("Not in"), "{shown}");
+                assert!(
+                    shown.ends_with(&format!("/fixt1.1/tagNum_{tag}.html)")),
+                    "{shown}"
+                );
+                let application = format!("8=FIXT.1.1|35=D|1128={code}|{tag}=30|");
+                let shown = rendered(&application, "FIX.4.4", tag).expect("transport field");
+                assert!(!shown.contains("Not in"), "{shown}");
+            }
         }
-        let listed = custom("FIX.5.0SP1", 1400, "EncryptedPasswordMethod");
-        assert!(listed.contains("*Standard FIX.5.0SP1*"), "{listed}");
-        assert!(listed.ends_with("/5.0.SP1/tagNum_1400.html)"), "{listed}");
-        let before = custom("FIX.5.0", 1407, "DefaultApplExtID");
-        assert!(before.contains("*Not in FIX.5.0*"), "{before}");
-        assert!(!before.contains("[FIX Reference"), "{before}");
     }
 
     #[test]
-    fn a_fixt_binding_is_compared_with_the_tables_it_reads() {
-        let fixt = |tag, name| custom("FIXT.1.1", tag, name);
-        assert!(fixt(1328, "RejectText").contains("*Standard FIX.5.0SP2*"));
-        assert!(fixt(20001, "DeskMode").contains("*Custom field, introduced in \"selected\"*"));
-        assert!(fixt(47, "Rule80A").contains("*Not in FIX.5.0SP2, retired after FIX.4.3*"));
+    fn standalone_transport_reference_does_not_invent_application_membership() {
+        let text = described(1407).expect("transport reference");
+        assert!(text.starts_with("**DefaultApplExtID** (1407)"), "{text}");
+        assert!(text.ends_with("/fixt1.1/tagNum_1407.html)"), "{text}");
+        assert!(newest_defining(1407).is_none());
     }
 
     /// The one fact that tells this apart from a tag the desk's dictionary
@@ -1112,7 +1169,7 @@ mod tests {
     fn an_undefined_tag_under_a_version_without_tables_keeps_its_name() {
         assert_eq!(
             missing_from("FIX.9.1", 55, &Options::default()),
-            "**Symbol** (55)\n\n*Not defined by \"selected\"*\n\n---\n\nValue: `x`"
+            "**Symbol** (55)\n\n---\n\nValue: `x`"
         );
         let flat = missing_from("FIX.9.1", 55, &with_url("https://fix.internal/t{tag}"));
         assert!(flat.ends_with("(https://fix.internal/t55)"), "{flat}");
@@ -1141,42 +1198,32 @@ mod tests {
         );
     }
 
-    /// No bundled tables to check "Not in" against, and no site page to link.
     #[test]
-    fn a_version_without_bundled_tables_claims_nothing_but_custom() {
-        for version in ["FIX.3.0", "FIX.9.1"] {
+    fn unsupported_wire_versions_cannot_restore_dictionary_definitions() {
+        for version in ["FIX.9.1", "FIX.5.0", "FIX.5.0SP1", "FIX.5.0SP2"] {
+            let line = format!("8={version}|35=D|55=SYNTHETIC|20001=1|");
+            let context =
+                Ctx::for_test_with_dict(version, quickfix(version, &field(20001, "SyntheticMode")));
+            let (bytes, message, at) = at_tag_in(&context, &line, 55);
             for (template, links) in [
-                (crate::config::DocumentLink::default().url, false),
-                ("https://fix.internal/{fixVersion}/{tag}".to_owned(), true),
-                ("https://fix.internal/t{tag}".to_owned(), true),
+                ("https://reference.example/{version}/{tag}", false),
+                ("https://reference.example/{fixVersion}/{tag}", false),
+                ("https://reference.example/{tag}", true),
             ] {
-                let options = with_url(&template);
-                let standard = under(
-                    version,
-                    quickfix(version, &field(55, "Symbol")),
-                    55,
-                    &options,
-                );
+                let shown = hover(&bytes, &message, at, &with_url(template), Some("selected"))
+                    .expect("standard name");
                 assert!(
-                    !standard.contains("Not in") && !standard.contains("Standard FIX"),
-                    "{standard}"
+                    !shown.contains("Not in") && !shown.contains("Not defined by"),
+                    "{shown}"
                 );
-                assert_eq!(
-                    standard.contains("[FIX Reference"),
-                    links,
-                    "{version} {template}"
-                );
-                let custom = under(
-                    version,
-                    quickfix(version, &field(20001, "DeskMode")),
-                    20001,
-                    &options,
-                );
-                assert!(
-                    custom.contains("*Custom field, introduced in \"selected\"*"),
-                    "{custom}"
-                );
+                assert_eq!(shown.contains("[FIX Reference"), links, "{shown}");
             }
+            let at = message
+                .fields
+                .iter()
+                .position(|field| field.tag == 20001)
+                .unwrap();
+            assert!(hover(&bytes, &message, at, &Options::default(), Some("selected")).is_none());
         }
     }
 }

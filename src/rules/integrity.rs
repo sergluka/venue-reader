@@ -328,8 +328,10 @@ mod tests {
 
     #[test]
     fn a_line_too_short_to_reason_about_is_left_alone() {
-        assert!(codes("8=FIX.4.4|").is_empty());
-        assert!(codes("8=FIX.4.4").is_empty());
+        for line in ["8=FIX.4.4|", "8=FIX.4.4"] {
+            assert_eq!(codes(line), ["missingMsgType"]);
+            assert!(repair_of(line).is_none());
+        }
     }
 
     #[test]
