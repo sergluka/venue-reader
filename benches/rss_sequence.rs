@@ -8,7 +8,7 @@
 //!
 //! ```sh
 //! cargo bench --bench rss_sequence
-//! cargo bench --features no-line-cache --bench rss_sequence
+//! cargo bench --features bench-no-line-cache --bench rss_sequence
 //! ```
 //!
 //! The difference is what the cache costs on a sequence someone performs.
@@ -69,7 +69,7 @@ fn main() {
     }
     let after = rss();
 
-    let label = if cfg!(feature = "no-line-cache") {
+    let label = if cfg!(feature = "bench-no-line-cache") {
         "sequence (no cache)"
     } else {
         "sequence"

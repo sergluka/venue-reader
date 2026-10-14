@@ -96,7 +96,7 @@ fn answer(params: &HoverParams, format: &MarkupKind, snapshot: &Snapshot) -> Han
 }
 
 // Every test here asserts the cache exists, so the module goes with it.
-#[cfg(all(test, not(feature = "no-line-cache")))]
+#[cfg(all(test, not(feature = "bench-no-line-cache")))]
 mod tests {
     use super::*;
     use crate::server::testing::{state_with, HEARTBEAT};

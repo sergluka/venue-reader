@@ -25,7 +25,7 @@ pub use position::{
     byte_to_position, position_to_byte, Column, Columns, Offsets, PositionEncoding,
 };
 
-#[cfg(feature = "cache-stats")]
+#[cfg(feature = "bench-cache-stats")]
 #[doc(hidden)]
 pub mod stats;
 
@@ -195,23 +195,23 @@ impl Line {
     /// pairs for it.
     ///
     /// Returns an owned `Arc` rather than a reference into the slot, so that
-    /// the `no-line-cache` build — which has no slot to borrow from — is the
+    /// the `bench-no-line-cache` build — which has no slot to borrow from — is the
     /// same function rather than a different one.
     pub fn cached_analysis(&self, ctx: &Ctx, population: &Population) -> Arc<LineAnalysis> {
-        #[cfg(feature = "no-line-cache")]
+        #[cfg(feature = "bench-no-line-cache")]
         {
             let _ = population;
             // Recorded too, and always a miss — which is what "no cache" means,
             // and keeps the two builds' counters comparable.
-            #[cfg(feature = "cache-stats")]
+            #[cfg(feature = "bench-cache-stats")]
             stats::record(false);
             Arc::new(analyze(&self.bytes, ctx))
         }
-        #[cfg(not(feature = "no-line-cache"))]
+        #[cfg(not(feature = "bench-no-line-cache"))]
         {
             let mut slot = self.slot();
             let hit = slot.is_some();
-            #[cfg(feature = "cache-stats")]
+            #[cfg(feature = "bench-cache-stats")]
             stats::record(hit);
             let analysis = slot
                 .get_or_insert_with(|| Arc::new(analyze(&self.bytes, ctx)))
@@ -922,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn analysis_is_computed_once_per_line() {
         let doc = open(b"8=FIX.4.4|35=0", 1);
         let first = doc.lines[0]
@@ -938,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn an_edit_invalidates_only_the_touched_line() {
         let mut doc = open(b"8=FIX.4.4|35=0\n8=FIX.4.4|35=1\n8=FIX.4.4|35=2", 1);
         let keep = doc.lines[2]
@@ -997,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn setting_the_same_context_keeps_the_analyses() {
         let mut doc = open(b"8=FIX.4.4|35=0", 1);
         let before = doc.lines[0]
@@ -1031,7 +1031,7 @@ mod tests {
         ));
     }
 
-    #[cfg(not(feature = "no-line-cache"))] // every assertion on it needs one
+    #[cfg(not(feature = "bench-no-line-cache"))] // every assertion on it needs one
     fn cached(doc: &Document) -> usize {
         doc.lines
             .iter()
@@ -1046,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn below_the_bound_a_sweep_touches_nothing() {
         let doc = open(b"35=0\n35=1\n35=2\n35=3", 1);
         populate(&doc, 0..4);
@@ -1062,7 +1062,7 @@ mod tests {
     /// Second chance: the first sweep over a line only clears its mark, the
     /// next one evicts it — unless it was read in between.
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn a_line_is_evicted_by_the_second_sweep_it_goes_unread_across() {
         let doc = open(b"35=0\n35=1\n35=2\n35=3\n35=4\n35=5", 1);
         populate(&doc, 0..6);
@@ -1083,7 +1083,7 @@ mod tests {
     /// An edit drops analyses without telling the count; the next sweep
     /// recounts. In between the count is only ever too high.
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn the_count_is_an_overcount_after_edits_until_a_sweep_recounts() {
         let mut doc = open(b"35=0\n35=1\n35=2\n35=3", 1);
         populate(&doc, 0..4);
@@ -1119,7 +1119,7 @@ mod tests {
     /// below is provably behind it. Storing the survivor count instead of
     /// adjusting by it fails here.
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn a_population_the_sweep_walked_past_survives_it() {
         let doc = Arc::new(open(["8=FIX.4.4|35=0|34=1|"; 10].join("\n").as_bytes(), 1));
         populate(&doc, 0..10);
@@ -1151,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn a_new_context_resets_the_count_with_the_analyses() {
         let mut doc = open(b"35=0\n35=1", 1);
         populate(&doc, 0..2);
@@ -1161,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "no-line-cache")]
+    #[cfg(feature = "bench-no-line-cache")]
     fn without_a_cache_the_count_never_moves() {
         let doc = open(b"35=0\n35=1", 1);
         populate(&doc, 0..2);

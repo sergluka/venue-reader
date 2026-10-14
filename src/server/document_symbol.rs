@@ -525,7 +525,7 @@ fn representable(message: &MessageAnalysis, mut owner: Option<u32>) -> Option<u3
 mod tests {
     use super::*;
     use crate::config::SymbolDepth;
-    #[cfg(not(feature = "no-line-cache"))]
+    #[cfg(not(feature = "bench-no-line-cache"))]
     use crate::server::testing::cached;
     use crate::server::testing::heartbeats;
     use crate::server::testing::{answered, answered_with, state_with, HEARTBEAT};
@@ -697,9 +697,9 @@ mod tests {
 
     /// The contract's fifth hand-written witness: a whole-document walk may
     /// not populate a line's cache. Gated on the cache existing — under
-    /// `no-line-cache` nothing can be populated and the assertion would hold
+    /// `bench-no-line-cache` nothing can be populated and the assertion would hold
     /// without proving anything.
-    #[cfg(not(feature = "no-line-cache"))]
+    #[cfg(not(feature = "bench-no-line-cache"))]
     #[test]
     fn walking_the_document_populates_nothing() {
         let (mut state, uri) = state_with(&heartbeats(5));

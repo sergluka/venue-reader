@@ -412,7 +412,7 @@ mod level_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "no-line-cache")))]
+#[cfg(all(test, not(feature = "bench-no-line-cache")))]
 mod tests {
     use super::*;
     use crate::server::testing::{answered, cached, heartbeats, state_with};

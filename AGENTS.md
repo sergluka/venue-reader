@@ -140,6 +140,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo deny check          # after any dependency change
+ruff check tools
 python3 -m unittest discover -s tools   # the dictionary projection's own tests
 ```
 

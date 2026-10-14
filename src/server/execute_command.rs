@@ -366,7 +366,7 @@ fn overlaps(field: &Field, start: usize, end: usize) -> bool {
 mod tests {
     use super::*;
     use crate::document::PositionEncoding;
-    #[cfg(not(feature = "no-line-cache"))]
+    #[cfg(not(feature = "bench-no-line-cache"))]
     use crate::server::testing::cached;
     use crate::server::testing::{answered, state_with, HEARTBEAT};
     use lsp_types::Uri;
@@ -731,7 +731,7 @@ mod tests {
 
     /// A yank is one-shot: the contract permits it to cache and it declines.
     #[test]
-    #[cfg(not(feature = "no-line-cache"))]
+    #[cfg(not(feature = "bench-no-line-cache"))]
     fn a_decode_caches_nothing() {
         let (mut state, uri) = state_with(THREE);
         ask(&mut state, &uri, json!([range(0, 0, 2, 27)]));

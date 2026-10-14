@@ -1,11 +1,11 @@
 """Verify the inventory against independently read, public XML sources."""
 
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import tag_inventory as inventory
 
@@ -71,7 +71,7 @@ class InventoryTests(unittest.TestCase):
             output = Path(directory) / "tags.md"
             command = [sys.executable, str(Path(inventory.__file__)),
                        "--xml-dir", str(self.directory), "--output", str(output)]
-            missing = subprocess.run([*command, "--check"], capture_output=True)
+            missing = subprocess.run([*command, "--check"], check=False, capture_output=True)
             self.assertEqual(missing.returncode, 1)
             subprocess.run(command, check=True, capture_output=True)
             document = output.read_text(encoding="utf-8")
@@ -79,7 +79,7 @@ class InventoryTests(unittest.TestCase):
             self.assertIn("| DefaultApplExtID(1407) |", document)
             subprocess.run([*command, "--check"], check=True, capture_output=True)
             output.write_text(document + "Changed\n", encoding="utf-8")
-            changed = subprocess.run([*command, "--check"], capture_output=True)
+            changed = subprocess.run([*command, "--check"], check=False, capture_output=True)
             self.assertEqual(changed.returncode, 1)
             self.assertIn(b"differs; regenerate", changed.stderr)
 

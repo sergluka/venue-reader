@@ -813,7 +813,7 @@ mod tests {
     /// the module doc: a viewport is bounded by the screen and may cache, and
     /// nothing that walks a whole document may.
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn a_viewport_caches_exactly_the_lines_it_answered_about() {
         let (mut state, uri) = coloured(&super::super::testing::heartbeats(5), 100);
         ask_range(&mut state, &uri, 1, 3);

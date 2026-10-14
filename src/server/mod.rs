@@ -801,7 +801,7 @@ mod tests {
     /// the third sweep is the first that finds anything unread. Second chance
     /// is what keeps all eight after the second.
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn the_loop_sweeps_a_cache_that_grew_past_its_bound() {
         let (mut state, uri) = testing::state_with(&testing::heartbeats(12));
         state.config.base.limits.cached_lines = 4;

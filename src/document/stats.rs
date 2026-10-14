@@ -1,4 +1,4 @@
-//! Hit and miss counts for the line cache. Compiled only under `cache-stats`.
+//! Hit and miss counts for the line cache. Compiled only under `bench-cache-stats`.
 //!
 //! Process-wide rather than per-document: they serve one scripted benchmark
 //! sequence run with nothing else in the process, and per-document counters

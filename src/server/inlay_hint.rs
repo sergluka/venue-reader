@@ -462,7 +462,7 @@ mod tests {
     }
 
     // Only the cache-asserting tests use it.
-    #[cfg(not(feature = "no-line-cache"))]
+    #[cfg(not(feature = "bench-no-line-cache"))]
     fn all_on() -> Value {
         json!({
             "inlayHints": {
@@ -475,7 +475,7 @@ mod tests {
     /// The contract's permitted caller, held to what it was permitted for: the
     /// lines the client asked about, and not one more.
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn a_viewport_populates_the_lines_it_covers_and_no_others() {
         let (mut state, uri) = state_with(&heartbeats(6));
         state.config.base = serde_json::from_value(all_on()).expect("config");
@@ -518,7 +518,7 @@ mod tests {
     /// A resolve is one line the user is looking at, so it may populate — but
     /// only its own.
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn a_resolve_populates_only_its_own_line() {
         let (mut state, uri) = state_with(&heartbeats(6));
         state.config.base = serde_json::from_value(all_on()).expect("config");
@@ -542,7 +542,7 @@ mod tests {
     /// keeps the permitted caller, and work-order item 16 decides from a number
     /// instead of from a worry.
     #[test]
-    #[cfg(not(feature = "no-line-cache"))] // asserts a cache exists
+    #[cfg(not(feature = "bench-no-line-cache"))] // asserts a cache exists
     fn scrolling_a_document_populates_all_of_it() {
         const LINES: u32 = 60;
         const PAGE: u32 = 10;

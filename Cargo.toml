@@ -15,8 +15,6 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dependencies]
 lsp-server = "0.10"
-# gen-lsp-types aliased as lsp-types. With `url`, `Uri` is `url::Url` (parsed,
-# normalised, convertible to a file path) instead of a string newtype.
 lsp-types = { package = "gen-lsp-types", version = "0.11", features = ["url"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -31,16 +29,16 @@ globset = "0.4"
 percent-encoding = "2"
 
 # Both dev-only and both off by default: they exist for work-order item 16,
-# which measures what the line cache is worth. `cache-stats` counts hits and
-# misses; `no-line-cache` is the counterfactual — the same runs without a cache,
+# which measures what the line cache is worth. `bench-cache-stats` counts hits and
+# misses; `bench-no-line-cache` is the counterfactual — the same runs without a cache,
 # measured rather than modelled.
 [features]
-cache-stats = []
-no-line-cache = []
+bench-cache-stats = []
+bench-no-line-cache = []
 
 [dev-dependencies]
 proptest = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 criterion = { version = "0.8", default-features = false, features = [
   "cargo_bench_support",
 ] }
@@ -64,7 +62,7 @@ harness = false
 [[bench]]
 name = "cache_sequence"
 harness = false
-required-features = ["cache-stats"]
+required-features = ["bench-cache-stats"]
 
 [[bench]]
 name = "rss_sequence"
