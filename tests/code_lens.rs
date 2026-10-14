@@ -1,9 +1,6 @@
 //! `textDocument/codeLens` through the protocol.
 //!
-//! The list is classification only — a lens per message line, `command`
-//! unfilled — because `CodeLensParams` carries no range and the summary would
-//! otherwise be whole-document work. What `resolve` puts in the title is its
-//! own test.
+//! Listing stays lazy for guaranteed nonempty summaries and omits empty ones.
 
 mod harness;
 
@@ -55,8 +52,7 @@ fn a_lens_marks_every_message_line_and_only_those() {
     client.shutdown();
 }
 
-/// The list is classification: it says *where* a summary would go, not what it
-/// says. Filling `command` here would render every summary in the document.
+/// The default template keeps listing lazy and leaves titles for resolve.
 #[test]
 fn the_list_carries_no_command() {
     let mut client = open(HEARTBEAT);
@@ -65,6 +61,118 @@ fn the_list_carries_no_command() {
     assert!(found[0].get("command").is_none(), "{:#?}", found[0]);
     assert_eq!(found[0]["data"]["line"], 0);
     assert_eq!(found[0]["data"]["version"], 1);
+    client.shutdown();
+}
+
+#[test]
+fn only_lines_with_effective_summary_text_have_lenses() {
+    let with_text = format!("{HEARTBEAT}58=hello|");
+    let empty_text = format!("{HEARTBEAT}58=|");
+    let duplicate = format!("{HEARTBEAT}43=Y|");
+    let text = [HEARTBEAT, ORDER, &with_text, &empty_text, &duplicate].join("\n");
+    for (template, details, expected_lines) in [
+        ("", false, vec![]),
+        ("", true, vec![1]),
+        ("{details}", false, vec![1]),
+        ("{58}", false, vec![2]),
+        ("{58|missing}", false, vec![0, 1, 2, 3, 4]),
+        ("{possDup|unused}", false, vec![4]),
+    ] {
+        let mut client = TestClient::start();
+        client.initialize_with(json!({
+            "capabilities": { "general": { "positionEncodings": ["utf-8"] } },
+            "initializationOptions": { "fix": { "messageSummary": {
+                "template": template, "details": details,
+            } } },
+        }));
+        client.did_open(URI, &text, 1);
+        let found = lenses(&mut client);
+        let actual_lines: Vec<u64> = found
+            .iter()
+            .map(|lens| lens["range"]["start"]["line"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            actual_lines, expected_lines,
+            "{template:?}, details={details}"
+        );
+        for lens in found {
+            assert!(lens.get("command").is_none(), "{lens}");
+            let line = lens["range"]["start"]["line"].as_u64().unwrap();
+            let resolved = client.request("codeLens/resolve", lens).expect("answered");
+            let title = resolved["command"]["title"].as_str().expect("a title");
+            match template {
+                "{58}" => assert_eq!(title, "hello"),
+                "{58|missing}" => assert_eq!(title, if line == 2 { "hello" } else { "missing" }),
+                "{possDup|unused}" => assert_eq!(title, " [POSS DUP]"),
+                _ => assert!(!title.is_empty(), "{resolved}"),
+            }
+        }
+        client.shutdown();
+    }
+}
+
+#[test]
+fn configuration_refresh_removes_empty_summaries_and_restores_them() {
+    let mut client = TestClient::start();
+    client.initialize_with(json!({
+        "capabilities": {
+            "general": { "positionEncodings": ["utf-8"] },
+            "workspace": { "configuration": true, "codeLens": { "refreshSupport": true } },
+        },
+    }));
+    let (request_id, method, _) = client.recv_server_request();
+    assert_eq!(method, "workspace/configuration");
+    client.reply(
+        request_id,
+        json!([{ "messageSummary": {
+        "template": "before", "details": false,
+    } }]),
+    );
+    client.did_open(URI, HEARTBEAT, 1);
+    client.drain_server_methods(std::time::Duration::from_millis(20));
+    let unresolved = lenses(&mut client)[0].clone();
+    let resolved = client
+        .request("codeLens/resolve", unresolved.clone())
+        .expect("answered");
+    assert_eq!(resolved["command"]["title"], "before");
+
+    for template in ["", "after"] {
+        client.notify(
+            "workspace/didChangeConfiguration",
+            json!({ "settings": null }),
+        );
+        let (request_id, method, _) = client.recv_server_request();
+        assert_eq!(method, "workspace/configuration");
+        client.reply(
+            request_id,
+            json!([{ "messageSummary": {
+            "template": template, "details": false,
+        } }]),
+        );
+        let (refresh_id, method, _) = client.recv_server_request();
+        assert_eq!(method, "workspace/codeLens/refresh");
+        client.reply(refresh_id, Value::Null);
+        client.wait_ready(URI);
+
+        let found = lenses(&mut client);
+        if template.is_empty() {
+            assert!(found.is_empty(), "{found:?}");
+            for held in [&unresolved, &resolved] {
+                assert_eq!(
+                    client
+                        .request("codeLens/resolve", held.clone())
+                        .expect_err("empty summary"),
+                    harness::CONTENT_MODIFIED,
+                );
+            }
+        } else {
+            assert_eq!(found.len(), 1, "{found:?}");
+            let fresh = client
+                .request("codeLens/resolve", found[0].clone())
+                .expect("answered");
+            assert_eq!(fresh["command"]["title"], "after");
+        }
+    }
     client.shutdown();
 }
 

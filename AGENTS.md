@@ -102,6 +102,10 @@ follows is what is easy to get wrong here and not visible from any one file.
   is in flight is held and walked once at the commit, so no walk runs under
   rules the batch is about to replace.
 
+## Documentation
+
+- README must describe current behavior, not introduced changes or fixes.
+
 ## Comments
 
 - Document public structs and their public fields with brief `///` comments when

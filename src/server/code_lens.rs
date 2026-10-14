@@ -1,15 +1,10 @@
-//! `textDocument/codeLens`: one lens per message line, carrying the summary.
+//! `textDocument/codeLens`: one lens per message with a nonempty summary.
 //!
-//! **The list is whole-document by protocol** — `CodeLensParams` has no range —
-//! so the first response is *classification only*: a line's range and the fact
-//! that it is a message, which one `tokenize` answers without a dictionary,
-//! groups or integrity. The summary is rendered in `codeLens/resolve`, which a
-//! client calls for the lenses it displays. That is what keeps the expensive
-//! half viewport-bounded when the cheap half cannot be.
+//! Templates with fixed text need only classification when listing. Other
+//! templates need rendering to omit empty summaries before the client resolves.
 //!
-//! **Neither path populates the line cache.** The list walks the document, and
-//! the protocol does not promise a client resolves only what it shows — so a
-//! resolve is not viewport-bounded either. Both analyse and drop.
+//! Neither path may cache: listing walks the document, and clients may resolve
+//! every lens rather than only those in the viewport.
 
 use lsp_types::CodeLensParams;
 use serde_json::{json, Value};
@@ -65,14 +60,27 @@ fn list(params: &CodeLensParams, cap: usize, snapshot: &Snapshot) -> HandlerResu
     if snapshot.content_lines() > cap {
         return Ok(json!([]));
     }
+    let render = &snapshot.render;
+    if render.template.is_empty() && !render.details {
+        return Ok(json!([]));
+    }
+    let guaranteed_title = render.template.has_nonempty_literal();
     let uri = params.text_document.uri.as_str();
     let mut out = Vec::new();
     for (number, line) in snapshot.lines.iter().enumerate() {
-        // `tokenize`, not `analyze`: the latter also resolves the dictionary,
-        // decodes every field and annotates groups, none of which a lens needs
-        // before it is resolved.
-        if tokenize(&line.bytes).kind != LineKind::Message {
-            continue;
+        if guaranteed_title {
+            if tokenize(&line.bytes).kind != LineKind::Message {
+                continue;
+            }
+        } else {
+            // An unresolved empty lens can make clients resolve on every redraw.
+            let analysis = crate::ctx::analyze(&line.bytes, &snapshot.ctx);
+            let Some(message) = analysis.message() else {
+                continue;
+            };
+            if crate::render::summary_joined(&line.bytes, message, render).is_none() {
+                continue;
+            }
         }
         let number = LineNo::new(number as u32);
         out.push(json!({
@@ -88,10 +96,6 @@ fn list(params: &CodeLensParams, cap: usize, snapshot: &Snapshot) -> HandlerResu
 }
 
 impl ServerState {
-    /// `codeLens/resolve`: the lens comes back and leaves with its title.
-    ///
-    /// This is where the summary is rendered — the half that is expensive and
-    /// that a client asks for only where it draws.
     pub(super) fn code_lens_resolve_task(&mut self, params: &Value) -> Dispatched {
         let lens = params.clone();
         let data = &params["data"];
@@ -136,8 +140,10 @@ fn resolve(mut lens: Value, snapshot: &Snapshot) -> HandlerResult {
     // One flat string, because `Command.title` is one — this is the channel
     // that cannot keep the summary's halves apart.
     let Some(title) = crate::render::summary_joined(&line.bytes, message, &snapshot.render) else {
-        // Nothing to say: a lens with no title at all, rather than an empty one.
-        return Ok(lens);
+        return Err(super::content_modified(
+            super::method::CODE_LENS_RESOLVE,
+            "the summary is empty",
+        ));
     };
     lens["command"] = json!({ "title": title, "command": "" });
     Ok(lens)
@@ -146,38 +152,43 @@ fn resolve(mut lens: Value, snapshot: &Snapshot) -> HandlerResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::testing::{cached_lines, heartbeats, state_with};
+    use crate::server::testing::{cached_lines, heartbeats, settle, state_with};
 
     fn uncached(snapshot: &Snapshot) -> bool {
         cached_lines(snapshot).iter().all(|seen| !seen)
     }
 
-    /// Neither lens path may populate: the list walks the whole document, and
-    /// the protocol does not promise a client resolves only the lenses it
-    /// shows. Asserted by looking rather than by a memory number, because a
-    /// benchmark measures how much was retained and not who retained it.
     #[test]
     fn neither_listing_nor_resolving_populates_the_cache() {
-        let (mut state, uri) = state_with(&heartbeats(3));
-        let snapshot = state.snapshot_for(&uri).expect("open");
-        let params: CodeLensParams = serde_json::from_value(json!({
-            "textDocument": { "uri": uri.as_str() },
-        }))
-        .expect("params");
+        for (summary, expected) in [
+            (json!({}), 3),
+            (json!({"template":"", "details":false}), 0),
+            (json!({"template":"", "details":true}), 0),
+            (json!({"template":"{35:name}", "details":false}), 3),
+            (json!({"template":"{58}", "details":false}), 0),
+        ] {
+            let (mut state, uri) = state_with(&heartbeats(3));
+            state.apply_base_value(&json!({"messageSummary":summary}));
+            settle(&mut state);
+            let snapshot = state.snapshot_for(&uri).expect("open");
+            let params: CodeLensParams = serde_json::from_value(json!({
+                "textDocument": { "uri": uri.as_str() },
+            }))
+            .expect("params");
 
-        let lenses = list(&params, 100, &snapshot).expect("listed");
-        let lenses = lenses.as_array().expect("an array");
-        assert_eq!(lenses.len(), 3);
-        assert!(uncached(&snapshot), "the list analysed nothing it kept");
+            let lenses = list(&params, 100, &snapshot).expect("listed");
+            let lenses = lenses.as_array().expect("an array");
+            assert_eq!(lenses.len(), expected, "{summary}");
+            assert!(uncached(&snapshot), "listing retained analysis: {summary}");
 
-        let resolved = resolve(lenses[0].clone(), &snapshot).expect("resolved");
-        assert!(
-            resolved["command"]["title"].is_string(),
-            "and it did render: {resolved}"
-        );
-        assert!(
-            uncached(&snapshot),
-            "from an owned analysis it then dropped"
-        );
+            for lens in lenses {
+                let resolved = resolve(lens.clone(), &snapshot).expect("resolved");
+                assert!(resolved["command"]["title"].is_string(), "{resolved}");
+            }
+            assert!(
+                uncached(&snapshot),
+                "resolving retained analysis: {summary}"
+            );
+        }
     }
 }

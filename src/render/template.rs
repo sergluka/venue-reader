@@ -104,6 +104,16 @@ impl Template {
         self.mentions_details
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pieces.is_empty()
+    }
+
+    pub(crate) fn has_nonempty_literal(&self) -> bool {
+        self.pieces
+            .iter()
+            .any(|piece| matches!(piece, Piece::Literal(text) if !text.is_empty()))
+    }
+
     pub fn parse(text: &str) -> Result<Template, TemplateError> {
         let pieces: Vec<Piece> = scan(text, parse_slot)?
             .into_iter()

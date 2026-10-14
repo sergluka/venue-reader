@@ -200,6 +200,10 @@ Detail renderers cover NewOrderSingle, ExecutionReport, Logout, ResendRequest,
 and SequenceReset. These summarize fields from an individual message; they do
 not reconstruct order lifecycles or correlate session history.
 
+Summary lenses are display-only: their command identifier is empty. Neovim
+0.12.0 and 0.12.6 warn when native CodeLens run selects a summary; they do not
+execute a server command.
+
 ### Hover
 
 Hover over a tag or its value to inspect the field's dictionary definition,

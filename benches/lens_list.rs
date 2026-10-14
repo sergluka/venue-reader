@@ -1,4 +1,4 @@
-//! What a whole-document `textDocument/codeLens` costs, at exactly the cap.
+//! Whole-document CodeLens cost at the cap, for default and conditional templates.
 //!
 //! The stage's premise, measured before anything is built on it. Stage 4b
 //! declined a worker pool on the grounds that classification is cheap — a claim
@@ -58,6 +58,20 @@ const PAYLOAD_MB: usize = 4;
 const URI: &str = "file:///bench.fix";
 
 fn main() {
+    for (label, summary, expected) in [
+        ("default", json!({}), AT_CAP),
+        (
+            "conditional",
+            json!({"template":"{35:name}", "details":false}),
+            AT_CAP,
+        ),
+        ("empty", json!({"template":"", "details":false}), 0),
+    ] {
+        measure(label, summary, expected);
+    }
+}
+
+fn measure(label: &str, summary: Value, expected: usize) {
     let text = String::from_utf8(generate_lines(AT_CAP)).expect("the corpus is ASCII");
     let (server_conn, client) = Connection::memory();
     let server = std::thread::spawn(move || fix_lsp::server::main_loop(server_conn));
@@ -66,7 +80,10 @@ fn main() {
         &client,
         1,
         "initialize",
-        json!({ "capabilities": { "general": { "positionEncodings": ["utf-8"] } } }),
+        json!({
+            "capabilities": { "general": { "positionEncodings": ["utf-8"] } },
+            "initializationOptions": {"fix": {"messageSummary": summary}},
+        }),
     );
     notify(&client, "initialized", json!({}));
     notify(
@@ -87,9 +104,7 @@ fn main() {
     );
     let elapsed = started.elapsed();
 
-    // Where the time went, because "over the threshold" does not say what to
-    // fix. Classification is what a cheaper `classify` would replace; if it is
-    // a small share, replacing it buys nothing and the cost is the payload.
+    // Compare the classifier alone with listing, which may also render.
     let classified = Instant::now();
     let mut messages = 0usize;
     for line in text.split('\n') {
@@ -98,7 +113,7 @@ fn main() {
         }
     }
     let classifying = classified.elapsed();
-    println!("  of which classification: {classifying:?} for {messages} messages");
+    println!("  standalone classification: {classifying:?} for {messages} messages");
 
     // The bulk of what the writer thread will do with this response.
     // `Connection::memory()` passes a `Message` through a channel and never
@@ -111,11 +126,11 @@ fn main() {
 
     let lenses = answer.as_array().map_or(0, Vec::len);
     println!(
-        "lens_list at {AT_CAP} lines: {lenses} lenses, payload {} KB\n           round trip {elapsed:?}, of which classification {classifying:?}; \
+        "lens_list {label} at {AT_CAP} lines: {lenses} lenses, payload {} KB\n           round trip {elapsed:?}, classifier baseline {classifying:?}; \
          serialising would add {wire:?}",
         payload / 1024
     );
-    assert!(lenses == AT_CAP, "a lens per line: {lenses}");
+    assert_eq!(lenses, expected, "{label}");
     // The payload is gated; the timings are printed and not.
     //
     // Work-order item 12 is why: a wall-clock figure taken inside an agent
@@ -130,7 +145,9 @@ fn main() {
         "payload {payload} bytes exceeds the {PAYLOAD_MB} MB threshold"
     );
 
-    resolve_burst(&client, answer.as_array().expect("an array"));
+    if lenses > 0 {
+        resolve_burst(&client, answer.as_array().expect("an array"));
+    }
 
     notify(&client, "exit", Value::Null);
     drop(client);
