@@ -56,6 +56,121 @@ fn last_publish(notes: &[(String, Value)], uri: &str) -> Option<Value> {
 }
 
 #[test]
+fn every_missing_envelope_field_is_published_once_under_integrity() {
+    let framed = harness::frame("FIX.4.4", "35=0|");
+    let lines: Vec<String> = (0..8)
+        .map(|present| {
+            framed
+                .split_inclusive('|')
+                .filter(|field| match field.split_once('=') {
+                    Some(("8", _)) => present & 1 != 0,
+                    Some(("9", _)) => present & 2 != 0,
+                    Some(("10", _)) => present & 4 != 0,
+                    _ => true,
+                })
+                .collect()
+        })
+        .collect();
+    let mut client = TestClient::start();
+    open(&mut client, &lines.join("\n"));
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    let diagnostics = published["diagnostics"].as_array().unwrap();
+    for (present, line) in lines.iter().enumerate() {
+        let found: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic["range"]["start"]["line"] == present)
+            .collect();
+        let mut actual: Vec<_> = found
+            .iter()
+            .map(|diagnostic| diagnostic["code"].as_str().unwrap())
+            .collect();
+        actual.sort();
+        let expected: Vec<_> = [(1, "beginString"), (2, "bodyLength"), (4, "checkSum")]
+            .into_iter()
+            .filter(|(bit, _)| present & bit == 0)
+            .map(|(_, code)| code)
+            .collect();
+        assert_eq!(actual, expected, "{line}");
+        for diagnostic in found {
+            assert_eq!(diagnostic["data"]["rule"], "integrity");
+            assert_eq!(diagnostic["severity"], 1);
+        }
+    }
+    client.shutdown();
+}
+
+#[test]
+fn fragments_report_presence_without_guessing_envelope_values() {
+    let lines = [
+        "55=X|",
+        "8=FIX.4.4|",
+        "9=wrong|35=0|10=wrong|",
+        "",
+        "# comment",
+    ];
+    let mut client = TestClient::start();
+    open(&mut client, &lines.join("\n"));
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    let diagnostics = published["diagnostics"].as_array().unwrap();
+    for (line, expected) in [
+        (0, vec!["beginString", "bodyLength", "checkSum"]),
+        (1, vec!["bodyLength", "checkSum"]),
+        (2, vec!["beginString"]),
+        (3, vec![]),
+        (4, vec![]),
+    ] {
+        let mut actual: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic["range"]["start"]["line"] == line
+                    && diagnostic["data"]["rule"] == "integrity"
+            })
+            .map(|diagnostic| diagnostic["code"].as_str().unwrap())
+            .collect();
+        actual.sort();
+        assert_eq!(actual, expected, "{}", lines[line]);
+    }
+    client.shutdown();
+}
+
+#[test]
+fn integrity_severity_and_disable_govern_all_three_envelope_codes() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    client.did_open(URI, "55=X|", 1);
+    let published = client.wait_for("textDocument/publishDiagnostics");
+    assert_eq!(codes(&published).len(), 3);
+    for diagnostic in published["diagnostics"].as_array().unwrap() {
+        assert_eq!(diagnostic["severity"], 1);
+        assert_eq!(diagnostic["data"]["rule"], "integrity");
+    }
+
+    pull(
+        &mut client,
+        json!({"diagnostics": {"rules": {"integrity": {"severity": "hint"}}}}),
+    );
+    let published = last_publish(&client.drain_notifications(QUIET), URI).expect("regraded");
+    assert_eq!(published["version"], 1);
+    let mut found = codes(&published);
+    found.sort();
+    assert_eq!(found, ["beginString", "bodyLength", "checkSum"]);
+    for diagnostic in published["diagnostics"].as_array().unwrap() {
+        assert_eq!(diagnostic["severity"], 4);
+        assert_eq!(diagnostic["data"]["rule"], "integrity");
+    }
+
+    pull(
+        &mut client,
+        json!({"diagnostics": {"rules": {"integrity": false}}}),
+    );
+    let published = last_publish(&client.drain_notifications(QUIET), URI).expect("cleared");
+    assert_eq!(published["version"], 1);
+    assert!(codes(&published).is_empty());
+    client.shutdown();
+}
+
+#[test]
 fn opening_a_document_publishes_its_problems() {
     let mut client = TestClient::start();
     open(&mut client, BAD_BOTH);
@@ -322,13 +437,13 @@ fn the_cap_keeps_the_most_severe_problems() {
     let mut client = TestClient::start();
     client.initialize_caps(TestClient::caps_with_pull());
     client.answer_base_pull();
-    // Two fragments reported by `beginString`, then one line with two errors.
-    let text = ["55=BTCUSD|", "55=BTCUSD|", BAD_BOTH].join("\n");
+    let unknown = harness::frame("FIX.4.4", "35=0|9000=x|");
+    let text = [unknown.as_str(), &unknown, BAD_BOTH].join("\n");
     pull(
         &mut client,
         json!({
             "limits": { "diagnosticsPerDocument": 2 },
-            "diagnostics": { "rules": { "beginString": { "severity": "hint" } } },
+            "diagnostics": { "rules": { "unknownTag": { "severity": "hint" } } },
         }),
     );
     client.did_open(URI, &text, 1);

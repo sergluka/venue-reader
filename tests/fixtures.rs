@@ -29,10 +29,8 @@ const INTEGRITY: Scope = Scope {
 const MESSAGES: usize = 33;
 const FIELDS: usize = 450;
 const REPAIRABLE: usize = 18;
-/// Silent for a reason other than being right: three fragments carry no
-/// BeginString, which gives an inserted BodyLength nothing to sit after, and
-/// `8=FIX.4.4|` alone is below the two fields the rule needs.
-const DECLINED: usize = 4;
+/// Three fragments lack BeginString(8); a lone BeginString(8) cannot be repaired.
+const UNREPAIRABLE: usize = 4;
 
 #[test]
 fn every_field_span_is_ordered_and_inside_its_line() {
@@ -67,14 +65,11 @@ fn every_field_span_is_ordered_and_inside_its_line() {
     assert_eq!((messages, fields), (MESSAGES, FIELDS));
 }
 
-/// The code-action handler looks for the diagnostic and then asks for the
-/// repair, so a line where one exists without the other would silently offer
-/// nothing or claim nothing.
 #[test]
-fn a_repair_is_offered_for_exactly_the_lines_that_report_one() {
+fn repairs_require_findings_but_presence_findings_can_be_unrepairable() {
     let ctx = harness::test_ctx();
     let rules = Registry::from_config(&Diagnostics::default());
-    let mut reported = 0;
+    let (mut repairable, mut unrepairable) = (0, 0);
 
     for (at, bytes) in harness::fixture_lines() {
         let analysis = analyze(&bytes, &ctx);
@@ -82,15 +77,20 @@ fn a_repair_is_offered_for_exactly_the_lines_that_report_one() {
         let repair = analysis
             .message()
             .and_then(|message| integrity::repair(&LineCtx::new(&bytes, message)));
-        assert_eq!(
-            reports > 0,
-            repair.is_some(),
-            "{at}: {reports} integrity diagnostics"
-        );
-        reported += usize::from(reports > 0);
+        if repair.is_some() {
+            assert!(reports > 0, "{at}: repair without a finding");
+            repairable += 1;
+        } else if reports > 0 {
+            let message = analysis.message().expect("findings require fields");
+            assert!(
+                message.fields.len() < 2 || message.first(8).is_none(),
+                "{at}: fixture has {reports} findings but no repair"
+            );
+            unrepairable += 1;
+        }
     }
 
-    assert_eq!(reported, REPAIRABLE);
+    assert_eq!((repairable, unrepairable), (REPAIRABLE, UNREPAIRABLE));
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn a_repaired_line_has_nothing_left_to_repair() {
 fn a_line_nothing_reports_on_agrees_with_its_own_trailer() {
     let ctx = harness::test_ctx();
     let rules = Registry::from_config(&Diagnostics::default());
-    let (mut clean, mut declined) = (0, 0);
+    let mut clean = 0;
 
     for (at, bytes) in harness::fixture_lines() {
         let analysis = analyze(&bytes, &ctx);
@@ -157,23 +157,14 @@ fn a_line_nothing_reports_on_agrees_with_its_own_trailer() {
                 .first(tag)
                 .map(|field| String::from_utf8_lossy(field.value(&bytes)).into_owned())
         };
-        let (Some(length), Some(sum)) = (written(9), written(10)) else {
-            // The other way silence is earned: the rule declined to look.
-            assert!(
-                message.fields.len() < 2 || message.first(8).is_none(),
-                "{at}: silent, with a trailer to check and no reason to decline"
-            );
-            declined += 1;
-            continue;
-        };
+        assert!(message.first(8).is_some(), "{at}: missing BeginString(8)");
+        let length = written(9).expect("silent line has BodyLength(9)");
+        let sum = written(10).expect("silent line has CheckSum(10)");
         let facts = message.integrity(&bytes);
         assert_eq!(length, facts.body_length.to_string(), "{at}");
         assert_eq!(sum, format!("{:03}", facts.check_sum), "{at}");
         clean += 1;
     }
 
-    assert_eq!(
-        (clean, declined),
-        (MESSAGES - REPAIRABLE - DECLINED, DECLINED)
-    );
+    assert_eq!(clean, MESSAGES - REPAIRABLE - UNREPAIRABLE);
 }

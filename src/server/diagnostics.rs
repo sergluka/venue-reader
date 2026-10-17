@@ -1104,12 +1104,12 @@ mod tests {
         (total, held)
     }
 
-    /// Two fragments' `beginString` warnings fill the cap first; the errors
-    /// further down still take it.
+    /// Informational unknown tags fill the cap before later errors replace them.
     #[test]
     fn a_less_severe_finding_never_keeps_an_error_out() {
         use crate::config::Severity::*;
-        let lines = ["1=x|", "1=x|", BAD].join("\n");
+        let unknown = crate::rules::tests::repaired("8=FIX.4.4|9=0|35=0|9000=x|10=000|");
+        let lines = [unknown.as_str(), &unknown, BAD].join("\n");
         let (total, held) = kept_after(&job(&lines, Arc::new(AtomicBool::new(false)), 2));
         assert_eq!(total, 4);
         assert_eq!(held, [(2, Error), (2, Error)]);
@@ -1118,8 +1118,8 @@ mod tests {
         assert_eq!(total, 4);
         assert_eq!(
             held,
-            [(0, Warning), (2, Error), (2, Error)],
-            "the earlier warning stays"
+            [(0, Info), (2, Error), (2, Error)],
+            "the earlier informational finding stays"
         );
     }
 

@@ -256,21 +256,21 @@ compatibility certifications.
 
 ## Diagnostics and quick fixes
 
-All six FIX rules are enabled by default:
+All five FIX rules are enabled by default:
 
 | Rule | What it checks | Default severity |
 | --- | --- | --- |
-| `beginString` | Parsed fields without `BeginString(8)`. | Warning |
 | `unknownVersion` | Missing, invalid, or unresolved transport/application identity. | Warning |
 | `dictionaryVersion` | A selected dictionary conflicts with the message's version. | Warning |
-| `integrity` | Missing or incorrect `BodyLength(9)` or `CheckSum(10)`. | Error |
+| `integrity` | Missing `BeginString(8)`, `BodyLength(9)`, or `CheckSum(10)`; incorrect length or checksum. | Error |
 | `unknownMsgType` | Missing `MsgType(35)`, or a message the dictionary does not define. | Error |
 | `unknownTag` | A tag the resolved dictionary does not define. | Info |
 
 For the `Heartbeat` above, change `CheckSum(10)` to `000` to see an integrity
 diagnostic. A quick fix repairs both length and checksum together and keeps
-the line's separator. Integrity checks require `BeginString(8)` and at least
-two parsed fields; they normalize separators to wire SOH for the calculation.
+the line's separator. Integrity checks for missing envelope fields on any
+line with parsed fields. Value calculations and repairs require `BeginString(8)`
+and at least two parsed fields; they normalize separators to wire SOH.
 
 TODO: Add a screenshot of integrity diagnostics and the quick-fix action.
 
@@ -278,7 +278,7 @@ Rules can be disabled or assigned a severity through `diagnostics.rules`.
 Disabling diagnostics or the integrity rule also disables its quick fix.
 Configuration errors remain visible when FIX diagnostics are disabled.
 
-**Limit:** This is not full FIX schema validation. Required fields, field
+**Limit:** This is not full FIX schema validation. Other required fields, field
 membership, enum values, group-count consistency, and sequence gaps are not
 checked. See [Diagnostics](../fix-lsp.wiki/Diagnostics.md) for rule conditions,
 codes, and repair behavior.

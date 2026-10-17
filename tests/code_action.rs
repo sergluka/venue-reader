@@ -60,6 +60,27 @@ fn a_sound_line_offers_nothing() {
 }
 
 #[test]
+fn missing_begin_string_and_a_lone_begin_string_offer_no_repair() {
+    let lines = [
+        "55=X|",
+        "9=wrong|35=0|10=wrong|",
+        "8=FIX.4.4|",
+        "# fix: dictionary=FIX.4.4",
+        "35=0|9=wrong|10=wrong|",
+    ];
+    let mut client = open(&lines.join("\n"));
+    for line in [0, 1, 2, 4] {
+        assert_eq!(
+            actions(&mut client, on_line(line)),
+            Vec::<Value>::new(),
+            "{}",
+            lines[line as usize]
+        );
+    }
+    client.shutdown();
+}
+
+#[test]
 fn a_line_wrong_in_two_ways_offers_one_action() {
     let mut client = open(BAD_BOTH);
     let offered = actions(&mut client, on_line(0));

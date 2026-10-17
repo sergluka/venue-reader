@@ -1,24 +1,12 @@
-//! BodyLength(9) and CheckSum(10) against what the line carries.
-//!
-//! The numbers themselves come from `codec::integrity`, which computed them
-//! while walking the field spans; this decides what to say about them.
-//!
-//! **One rule, two codes.** The two are one property of the line — the trailer
-//! arithmetic — computed in one pass and repairable only together, since
-//! correcting the length changes the bytes the sum is taken over. Two switches
-//! over one property produce a state nothing can answer: half of it silenced,
-//! and a repair that must still correct both.
-//!
-//! The repairs are Stage 4a-2: a diagnostic carries no edits, because an edit
-//! computed here would be stale by the time the user invokes it.
+//! Envelope presence and arithmetic share one configuration control.
+//! Repairs keep BodyLength(9) and CheckSum(10) consistent without guessing BeginString(8).
 
 use super::{Diag, Edit, LineCtx, Precondition, Repair, Rule};
 use crate::codec::tokenize;
 use crate::config::Severity;
 use crate::tag;
 
-/// Below this the rule declines — too broken to reason about. Anchoring a
-/// repair needs a field to put it next to.
+/// Arithmetic and repairs need more than a single field to describe a message.
 const MIN_FIELDS: usize = 2;
 
 pub struct Integrity;
@@ -29,7 +17,7 @@ impl Rule for Integrity {
     }
 
     fn precondition(&self) -> Precondition {
-        Precondition::FixMessage
+        Precondition::Fields
     }
 
     fn default_severity(&self) -> Severity {
@@ -37,28 +25,65 @@ impl Rule for Integrity {
     }
 
     fn check(&self, ctx: &LineCtx, severity: Severity) -> Vec<Diag> {
-        let facts = ctx.integrity();
-        let mut found = Claim {
-            code: "bodyLength",
-            name: "BodyLength",
-            tag: 9,
-            at: facts.body_length_field,
-            // A missing BodyLength is anchored on BeginString, where it belongs.
-            anchor: facts.begin_string.unwrap_or(0),
-            expected: &facts.body_length.to_string(),
-            compare: Compare::Value,
-            severity,
+        let fields = &ctx.message.fields;
+        let Some((first, rest)) = fields.split_first() else {
+            return Vec::new();
+        };
+        let last = rest.last().unwrap_or(first);
+        let begin_string = ctx.message.first(tag::BEGIN_STRING);
+        let mut found = Vec::new();
+        if begin_string.is_none() {
+            found.push(Diag {
+                code: "beginString",
+                rule: self.id(),
+                start: first.tag_start,
+                end: last.value_end(),
+                message: "Not a FIX message: missing BeginString(8)".into(),
+                severity,
+                document_key: None,
+            });
         }
-        .report(ctx);
+        for (code, name, tag, anchor) in [
+            (
+                "bodyLength",
+                "BodyLength",
+                tag::BODY_LENGTH,
+                begin_string.unwrap_or(first),
+            ),
+            ("checkSum", "CheckSum", tag::CHECK_SUM, last),
+        ] {
+            if ctx.message.first(tag).is_none() {
+                found.push(Diag {
+                    code,
+                    rule: self.id(),
+                    start: anchor.tag_start,
+                    end: anchor.value_end(),
+                    message: format!("Missing {name} (tag {tag})"),
+                    severity,
+                    document_key: None,
+                });
+            }
+        }
+        if begin_string.is_none() || fields.len() < MIN_FIELDS {
+            return found;
+        }
+        let facts = ctx.integrity();
+        found.extend(
+            Claim {
+                code: "bodyLength",
+                name: "BodyLength",
+                at: facts.body_length_field,
+                expected: &facts.body_length.to_string(),
+                compare: Compare::Value,
+                severity,
+            }
+            .report(ctx),
+        );
         found.extend(
             Claim {
                 code: "checkSum",
                 name: "CheckSum",
-                tag: 10,
                 at: facts.check_sum_field,
-                // A missing CheckSum is anchored on the last field: that is
-                // where it would be appended.
-                anchor: ctx.message.fields.len().saturating_sub(1) as u32,
                 expected: &format!("{:03}", facts.check_sum),
                 compare: Compare::Text,
                 severity,
@@ -69,20 +94,10 @@ impl Rule for Integrity {
     }
 }
 
-/// The edits that make the line's trailer arithmetic true, or `None` when
-/// there is nothing wrong or nothing to anchor a correction to.
-///
-/// A free function rather than a method on `Rule`: a rule says what is wrong,
-/// and two of the four codes have no repair at all.
-///
-/// The edits are in field order — which is not the order they may be applied
-/// in, since correcting BodyLength moves every span after it.
+/// Edits in field order; BeginString(8) is never inserted or guessed.
 pub fn repair(ctx: &LineCtx) -> Option<Repair> {
     let fields = &ctx.message.fields;
-    // The rule's own `Precondition::FixMessage`, restated because a repair is
-    // reached by a free function that no precondition guards. Arithmetic over a
-    // line that is not a message is arithmetic about nothing — and offering to
-    // rewrite a line nothing was reported on is worse than not offering at all.
+    // Presence findings on fragments do not provide enough information for a repair.
     if fields.len() < MIN_FIELDS || ctx.message.first(tag::BEGIN_STRING).is_none() {
         return None;
     }
@@ -213,58 +228,32 @@ fn replacing(ctx: &LineCtx, at: u32, text: String) -> Edit {
     }
 }
 
-/// What the rule claims about one of the two quantities. Named rather than
-/// passed positionally because `at` and `anchor` are both field indices:
-/// swapping them compiles and produces a diagnostic on the wrong field.
+/// A value check, separate from presence checking on incomplete fragments.
 struct Claim<'a> {
     code: &'static str,
     name: &'a str,
-    tag: u32,
     /// Where the tag is written, when it is.
     at: Option<u32>,
-    /// Field a missing tag is reported over.
-    anchor: u32,
     expected: &'a str,
     compare: Compare,
     severity: Severity,
 }
 
 impl Claim<'_> {
-    /// A missing tag is reported over `anchor`, a wrong value over its own span.
-    fn report(self, ctx: &LineCtx) -> Vec<Diag> {
-        let fields = &ctx.message.fields;
-        if fields.len() < MIN_FIELDS {
-            return Vec::new();
-        }
-        let (code, name, tag, severity) = (self.code, self.name, self.tag, self.severity);
-        let rule = Integrity.id();
-        match written(ctx, self.at, self.expected, self.compare) {
-            Written::Correct => Vec::new(),
-            Written::Missing => {
-                let anchor = &fields[self.anchor as usize];
-                vec![Diag {
-                    code,
-                    rule,
-                    start: anchor.tag_start,
-                    end: anchor.value_end(),
-                    message: format!("Missing {name} (tag {tag})"),
-                    severity,
-                    document_key: None,
-                }]
-            }
-            Written::Wrong { at, text } => {
-                let field = &fields[at as usize];
-                vec![Diag {
-                    code,
-                    rule,
-                    start: field.value_start(),
-                    end: field.value_end(),
-                    message: format!("{name} is {text}, expected {}", self.expected),
-                    severity,
-                    document_key: None,
-                }]
-            }
-        }
+    fn report(self, ctx: &LineCtx) -> Option<Diag> {
+        let Written::Wrong { at, text } = written(ctx, self.at, self.expected, self.compare) else {
+            return None;
+        };
+        let field = &ctx.message.fields[at as usize];
+        Some(Diag {
+            code: self.code,
+            rule: Integrity.id(),
+            start: field.value_start(),
+            end: field.value_end(),
+            message: format!("{} is {text}, expected {}", self.name, self.expected),
+            severity: self.severity,
+            document_key: None,
+        })
     }
 }
 
@@ -283,6 +272,23 @@ mod tests {
     #[test]
     fn a_sound_line_reports_nothing() {
         assert!(codes(VALID_HEARTBEAT).is_empty());
+    }
+
+    #[test]
+    fn missing_envelope_fields_use_their_presence_anchors() {
+        let line = "  35=0|55=X| suffix";
+        let found = diags(line);
+        assert_eq!(found.len(), 3);
+        assert_eq!((found[0].start, found[0].end), (byte(2), byte(11)));
+        assert_eq!(
+            found[0].message,
+            "Not a FIX message: missing BeginString(8)"
+        );
+        assert_eq!((found[1].start, found[1].end), (byte(2), byte(6)));
+        assert_eq!((found[2].start, found[2].end), (byte(7), byte(11)));
+        for diagnostic in found {
+            assert_eq!(diagnostic.rule, "integrity");
+        }
     }
 
     #[test]
@@ -327,9 +333,9 @@ mod tests {
     }
 
     #[test]
-    fn a_line_too_short_to_reason_about_is_left_alone() {
+    fn a_lone_begin_string_has_presence_findings_but_no_repair() {
         for line in ["8=FIX.4.4|", "8=FIX.4.4"] {
-            assert_eq!(codes(line), ["missingMsgType"]);
+            assert_eq!(codes(line), ["bodyLength", "checkSum", "missingMsgType"]);
             assert!(repair_of(line).is_none());
         }
     }
@@ -497,27 +503,13 @@ mod tests {
         assert_eq!(codes(&padded), vec!["checkSum"]);
     }
 
-    /// The rule declines when BodyLength is absent and there is no field to
-    /// insert it before. A fragment never reaches this — it fails the
-    /// FixMessage precondition first — so it takes a message whose BeginString(8) is
-    /// last.
     #[test]
     fn a_line_with_nothing_to_anchor_an_insertion_to_is_declined() {
         assert_eq!(repair_of("35=0|8=FIX.4.4|"), None);
     }
 
-    /// The report and the repair must agree about which lines have an
-    /// integrity problem: a line this rule leaves alone must not be offered a
-    /// fix. Task 5's handler rests on it — no integrity diagnostic, no action.
-    ///
-    /// One field is such a line whatever that field is, including a lone BodyLength(9).
-    /// That case is what `MIN_FIELDS` is for and what the missing-anchor guard
-    /// does not catch, BodyLength(9) being present being the branch that needs no
-    /// anchor. A line with no BeginString is such a line at any width: the rule
-    /// never runs on it.
-    /// (`beginString` still reports on some of these; it has no repair.)
     #[test]
-    fn a_line_this_rule_leaves_alone_is_not_repaired() {
+    fn presence_findings_do_not_make_fragments_repairable() {
         for line in [
             "8=FIX.4.4|",
             "8=FIX.4.4",
@@ -530,7 +522,7 @@ mod tests {
                 .filter(|diag| diag.rule == "integrity")
                 .map(|diag| diag.code)
                 .collect();
-            assert_eq!(reported, Vec::<&str>::new(), "{line}");
+            assert!(!reported.is_empty(), "{line}");
             assert_eq!(repair_of(line), None, "{line}");
         }
     }

@@ -233,14 +233,6 @@
           "type": "object",
           "description": "Built-in diagnostic rules. Unknown identifiers are non-fatal configuration errors and are ignored.",
           "properties": {
-            "beginString": {
-              "allOf": [
-                {
-                  "$ref": "#/$defs/rule"
-                }
-              ],
-              "default": true
-            },
             "unknownVersion": {
               "allOf": [
                 {
@@ -259,7 +251,7 @@
                 "enabled": true,
                 "severity": "error"
               },
-              "description": "BodyLength and CheckSum, checked as one rule: they are recomputed from the same walk of the line and a repair fixes both, so two ids would be two ways to half-fix a message."
+              "description": "Check presence of BeginString(8), BodyLength(9), and CheckSum(10) on every parsed field sequence. With BeginString(8) and at least two fields, also check length and checksum values and offer their joint repair. Never guess or insert BeginString(8)."
             },
             "dictionaryVersion": {
               "allOf": [

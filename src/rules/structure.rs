@@ -1,4 +1,4 @@
-//! Whether the line is a FIX message at all, and whether its version is known.
+//! Version resolution and dictionary compatibility findings.
 //!
 //! Resolution failures are explicit facts, independent of rule settings.
 
@@ -6,44 +6,6 @@ use super::{Diag, LineCtx, Precondition, Rule};
 use crate::codec::ResolutionIssue;
 use crate::config::Severity;
 use crate::tag;
-
-/// The tokenizer parses any run of `tag=value` pairs, so a log can hold
-/// fragments — a dumped repeating group, a truncated line — that the other
-/// rules can say nothing useful about. This is what says so, and the same fact
-/// is what their `FixMessage` precondition tests.
-pub struct BeginString;
-
-impl Rule for BeginString {
-    fn id(&self) -> &'static str {
-        "beginString"
-    }
-
-    fn precondition(&self) -> Precondition {
-        Precondition::Fields
-    }
-
-    fn default_severity(&self) -> Severity {
-        Severity::Warning
-    }
-
-    fn check(&self, ctx: &LineCtx, severity: Severity) -> Vec<Diag> {
-        let fields = &ctx.message.fields;
-        // The precondition guarantees the line has fields; a line that also has
-        // a BeginString is a message, and there is nothing to report.
-        if fields.is_empty() || ctx.message.first(tag::BEGIN_STRING).is_some() {
-            return Vec::new();
-        }
-        vec![Diag {
-            code: self.id(),
-            rule: self.id(),
-            start: fields[0].tag_start,
-            end: fields[fields.len() - 1].value_end(),
-            message: "Not a FIX message: missing BeginString(8)".into(),
-            severity,
-            document_key: None,
-        }]
-    }
-}
 
 /// An explicit failure to resolve the message's transport or application.
 pub struct UnknownVersion;
@@ -66,7 +28,7 @@ impl Rule for UnknownVersion {
             return Vec::new();
         };
         let (selector, message) = match issue {
-            // The existing beginString rule owns this finding even when disabled.
+            // Integrity owns missing BeginString(8), even when disabled.
             ResolutionIssue::MissingBeginString => return Vec::new(),
             ResolutionIssue::UnsupportedBeginString => {
                 let written = ctx
@@ -277,20 +239,6 @@ mod tests {
         let line = "8=FIX.4.4|9=57|35=0|34=1|49=CLIENT1|56=BROKER1|\
 52=20251026-09:02:00.000|10=171|";
         assert!(codes(line).is_empty(), "{:?}", diags(line));
-    }
-
-    #[test]
-    fn a_fragment_is_reported_over_all_of_its_fields() {
-        let line = "35=D|49=CLIENT1|56=BROKER1|11=ORDER1|55=BTCUSD|54=1|38=10";
-        let found = diags(line);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].code, "beginString");
-        assert_eq!(found[0].start, byte(0));
-        assert_eq!(found[0].end, byte(line.len() as u32));
-        assert_eq!(
-            found[0].message,
-            "Not a FIX message: missing BeginString(8)"
-        );
     }
 
     #[test]

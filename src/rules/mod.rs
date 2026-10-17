@@ -22,7 +22,6 @@ use crate::tag;
 
 /// Every rule this server knows, in the order they are checked.
 pub const BUILTINS: &[&dyn Rule] = &[
-    &structure::BeginString,
     &structure::UnknownVersion,
     &structure::DictionaryVersion,
     &integrity::Integrity,
@@ -66,17 +65,11 @@ pub struct Repair {
 }
 
 /// What a line must already be for a rule to have anything to say about it.
-///
-/// Stated as a precondition rather than as an ordering rule, so it lives on
-/// the rule that has it: BodyLength arithmetic over a fragment is arithmetic
-/// about nothing, and that is a fact about the integrity rules rather than
-/// about which rule ran first. It also holds when `beginString` is switched
-/// off, where a silencing scheme would stop silencing anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Precondition {
     /// Any line the tokenizer read fields from.
     Fields,
-    /// …and it carries a BeginString.
+    /// Fields including BeginString(8), independent of enabled rules.
     FixMessage,
     /// At least one source is known under an explicit, valid interpretation.
     Bound,
@@ -90,8 +83,7 @@ pub struct LineCtx<'a> {
     /// The names of the dictionaries that decoded the line — configured, else
     /// the file name; `None` for bundled tables.
     pub labels: Labels<'a>,
-    /// Both integrity rules need this and neither owns it: shared scratch,
-    /// computed at most once per line.
+    /// Arithmetic shared by integrity value checks, computed once per line.
     integrity: OnceCell<Integrity>,
 }
 
@@ -423,7 +415,7 @@ pub(crate) mod tests {
         assert_eq!(found.len(), 2);
         assert!(found.iter().all(|diag| diag.rule == "integrity"));
         assert!(registry
-            .check(bad, &analysis, &only("beginString"))
+            .check(bad, &analysis, &only("unknownVersion"))
             .diags
             .is_empty());
 
@@ -498,20 +490,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_fragment_gets_one_begin_string_diagnostic_and_nothing_else() {
-        assert_eq!(codes(FRAGMENT), vec!["beginString"]);
+    fn a_fragment_gets_all_missing_envelope_diagnostics() {
+        assert_eq!(
+            codes(FRAGMENT),
+            vec!["beginString", "bodyLength", "checkSum"]
+        );
     }
 
-    /// What a silencing scheme keyed on *reporting* would get wrong: disabling
-    /// `beginString` would stop it silencing anything, and a dumped repeating
-    /// group would start collecting "Missing CheckSum". The precondition is on
-    /// the rule, so switching another rule off cannot reach it.
     #[test]
-    fn a_fragment_stays_silent_even_with_begin_string_disabled() {
+    fn a_fragment_is_silent_with_integrity_disabled() {
         let mut config = Diagnostics::default();
         config
             .rules
-            .insert("beginString".into(), RuleSetting::Enabled(false));
+            .insert("integrity".into(), RuleSetting::Enabled(false));
         assert!(diags_with(FRAGMENT, &config).is_empty());
     }
 
@@ -544,17 +535,12 @@ pub(crate) mod tests {
         assert_eq!(check_sum.severity, Severity::Hint);
     }
 
-    /// BodyLength and CheckSum are one property of a line — the trailer
-    /// arithmetic — and one repair. Two switches over one property produce a
-    /// state nothing can answer: half of it silenced, and an edit that must
-    /// still correct both.
     #[test]
-    fn integrity_is_one_rule_reporting_two_codes() {
+    fn integrity_is_one_rule_reporting_three_codes() {
         let ids: Vec<&str> = BUILTINS.iter().map(|rule| rule.id()).collect();
         assert_eq!(
             ids,
             vec![
-                "beginString",
                 "unknownVersion",
                 "dictionaryVersion",
                 "integrity",
@@ -564,47 +550,47 @@ pub(crate) mod tests {
         );
 
         let bad = "8=FIX.4.4|9=7|35=0|34=1|49=A|56=B|10=001|";
-        let found = diags(bad);
+        let mut found = diags(bad);
+        found.extend(diags("9=0|35=0|10=000|"));
         let mut codes: Vec<&str> = found.iter().map(|d| d.code).collect();
         codes.sort_unstable();
         assert_eq!(
             codes,
-            vec!["bodyLength", "checkSum"],
+            vec!["beginString", "bodyLength", "checkSum"],
             "the codes do not move"
         );
         assert!(
             found.iter().all(|d| d.rule == "integrity"),
-            "one rule owns both"
+            "one rule owns all three"
         );
     }
 
     #[test]
-    fn disabling_integrity_silences_both_codes_and_nothing_else() {
+    fn disabling_integrity_preserves_version_findings() {
         let mut config = Diagnostics::default();
         config
             .rules
             .insert("integrity".into(), RuleSetting::Enabled(false));
         let bad = "8=FIX.4.4|9=7|35=0|34=1|49=A|56=B|10=001|";
         assert!(diags_with(bad, &config).is_empty());
+        assert!(diags_with(FRAGMENT, &config).is_empty());
         assert_eq!(
-            diags_with(FRAGMENT, &config)
+            diags_with("8=FIX.9.9|9=0|35=0|10=000|", &config)
                 .into_iter()
                 .map(|d| d.code)
                 .collect::<Vec<_>>(),
-            vec!["beginString"],
+            vec!["unknownVersion"],
             "an unrelated rule is untouched"
         );
     }
 
-    /// The keys 4a-1 shipped are gone. Silently doing nothing is what the
-    /// unknown-id warning exists to prevent.
     #[test]
-    fn the_old_per_quantity_keys_are_now_unknown() {
+    fn diagnostic_codes_are_not_integrity_configuration_keys() {
         let mut config = Diagnostics::default();
-        for id in ["bodyLength", "checkSum"] {
+        for id in ["beginString", "bodyLength", "checkSum"] {
             config.rules.insert(id.into(), RuleSetting::Enabled(false));
         }
-        for id in ["bodyLength", "checkSum"] {
+        for id in ["beginString", "bodyLength", "checkSum"] {
             assert!(
                 !Registry::known_ids().contains(&id),
                 "{id} is claimed again"
@@ -612,5 +598,6 @@ pub(crate) mod tests {
         }
         let bad = "8=FIX.4.4|9=7|35=0|34=1|49=A|56=B|10=001|";
         assert_eq!(diags_with(bad, &config).len(), 2, "and they change nothing");
+        assert_eq!(diags_with(FRAGMENT, &config).len(), 3);
     }
 }

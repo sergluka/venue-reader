@@ -5,6 +5,8 @@
 
 pub const BEGIN_SEQ_NO: u32 = 7;
 pub const BEGIN_STRING: u32 = 8;
+pub const BODY_LENGTH: u32 = 9;
+pub const CHECK_SUM: u32 = 10;
 pub const CL_ORD_ID: u32 = 11;
 pub const END_SEQ_NO: u32 = 16;
 pub const EXEC_ID: u32 = 17;

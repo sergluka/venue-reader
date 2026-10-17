@@ -294,7 +294,10 @@ fn missing_begin_string_stays_raw_under_modeline_and_session_selection() {
     let text = "# fix: dictionary=FIX.4.4\n35=D|54=1|";
     let mut client = open(&workspace, json!({}), text);
     select(&mut client, "FIX.5.0SP2");
-    assert_eq!(codes_on(&diagnostics(&mut client), 1), ["beginString"]);
+    assert_eq!(
+        codes_on(&diagnostics(&mut client), 1),
+        ["beginString", "bodyLength", "checkSum"]
+    );
     let side = hover(&mut client, text, 1, "54=");
     assert!(side.contains("Value: `1`"), "{side}");
     assert!(!side.contains("**Buy**"), "{side}");

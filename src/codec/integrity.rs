@@ -6,10 +6,7 @@
 //! canonical wire form uses SOH. That is what makes a `|`-separated log and its
 //! SOH twin produce the same numbers.
 //!
-//! The rules compare these against what the line carries and own the severity
-//! decisions — including the gate that declines to report on a line with fewer
-//! than two fields, which is rule-level and belongs with them rather than
-//! here.
+//! The rule gates arithmetic separately from envelope presence checks.
 
 use super::Field;
 

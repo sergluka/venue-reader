@@ -418,7 +418,7 @@ pub fn filter_foreign(value: &mut Value, prefix: &str) {
 mod tests {
     use super::*;
 
-    const KNOWN_RULES: &[&str] = &["beginString", "dictionaryVersion", "integrity"];
+    const KNOWN_RULES: &[&str] = &["dictionaryVersion", "integrity"];
 
     #[test]
     fn application_defaults_merge_globally_and_per_document_including_null() {

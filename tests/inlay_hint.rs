@@ -595,7 +595,7 @@ fn nothing_is_asked_without_support_or_without_a_change() {
         // channel reads, so neither would say anything new.
         (
             refresh_caps(),
-            json!({ "diagnostics": { "rules": { "beginString": false } } }),
+            json!({ "diagnostics": { "rules": { "integrity": false } } }),
             "nothing an annotation says",
         ),
     ];

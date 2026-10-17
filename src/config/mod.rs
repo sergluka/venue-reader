@@ -949,14 +949,14 @@ mod tests {
     #[test]
     fn a_rule_can_be_switched_off_either_way() {
         let cfg: Config = serde_json::from_value(json!({
-            "diagnostics": { "rules": { "unknownVersion": false, "beginString": { "enabled": false } } }
+            "diagnostics": { "rules": { "unknownVersion": false, "integrity": { "enabled": false } } }
         }))
         .unwrap();
         assert_eq!(
             cfg.diagnostics.rules["unknownVersion"].enabled(),
             Some(false)
         );
-        assert_eq!(cfg.diagnostics.rules["beginString"].enabled(), Some(false));
+        assert_eq!(cfg.diagnostics.rules["integrity"].enabled(), Some(false));
     }
 
     #[test]
