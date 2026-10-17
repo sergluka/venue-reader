@@ -210,25 +210,22 @@ mod tests {
         );
     }
 
-    /// `tagNames` gates and `groupPaths` modifies. Under the schema's own
-    /// defaults — tags off, paths on — a field inside a group must draw
-    /// nothing; reading the two as independent switches would draw the path.
-    ///
-    /// The two now arrive from different places — the gate from `InlayHints`,
-    /// the modifier from `Options`, which is what lets `fix.decode` honour it —
-    /// so the config they are built from is the thing that keeps them agreeing.
+    /// Group paths must not enable tag hints that the user disabled.
     #[test]
     fn group_paths_is_a_modifier_and_not_a_second_gate() {
         let (bytes, analysis) = one(GROUPS);
         let index = at(&analysis, 269);
-        let defaults = Config::default();
+        let tags_off: Config = serde_json::from_value(serde_json::json!({
+            "inlayHints": { "tagNames": { "enabled": false } }
+        }))
+        .expect("config");
         assert!(
-            !defaults.inlay_hints.tag_names() && defaults.inlay_hints.group_paths(),
+            !tags_off.inlay_hints.tag_names() && tags_off.inlay_hints.group_paths(),
             "the shape"
         );
-        let rendered = Options::from_config(&defaults).0;
+        let rendered = Options::from_config(&tags_off).0;
         assert_eq!(
-            tag(&analysis, index, &defaults.inlay_hints, &bytes, &rendered),
+            tag(&analysis, index, &tags_off.inlay_hints, &bytes, &rendered),
             None
         );
 

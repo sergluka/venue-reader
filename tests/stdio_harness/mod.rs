@@ -44,7 +44,7 @@ impl StdioClient {
         Self::spawn(label, personal_config, true, configuration_reply)
     }
 
-    /// `XDG_CONFIG_HOME` unset, so the personal file goes to the `$HOME/.config`
+    /// `XDG_CONFIG_HOME` unset, so the personal file goes to `$HOME/.config/fix-lsp`
     /// default the server must fall back to. Only `process_location` resolves
     /// that; `location`'s own unit tests cannot reach it.
     pub fn start_without_config_home(
@@ -87,9 +87,10 @@ impl StdioClient {
         } else {
             command.env_remove("XDG_CONFIG_HOME");
             home.join(".config")
-        };
+        }
+        .join("fix-lsp");
         std::fs::create_dir_all(&personal_directory).expect("create personal configuration dir");
-        let personal_file = personal_directory.join("fix-lsp.toml");
+        let personal_file = personal_directory.join("config.toml");
         if let Some(contents) = personal_config {
             std::fs::write(&personal_file, contents).expect("write personal configuration");
         }

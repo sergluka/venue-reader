@@ -55,7 +55,7 @@ impl Rule for UnknownMsgType {
     }
 
     fn default_severity(&self) -> Severity {
-        Severity::Info
+        Severity::Error
     }
 
     fn check(&self, ctx: &LineCtx, severity: Severity) -> Vec<Diag> {
@@ -332,6 +332,7 @@ mod tests {
         assert_eq!(checked.diags.len(), 1);
         assert_eq!(checked.diags[0].code, "missingMsgType");
         assert_eq!(checked.diags[0].rule, "unknownMsgType");
+        assert_eq!(checked.diags[0].severity, Severity::Error);
 
         let context = LineCtx::new(line, analysis.message().unwrap());
         assert_eq!(UnknownMsgType.count(&context), Some(1));

@@ -5,13 +5,9 @@
 //! on this machine move 70–80% between runs of the same binary, while a count
 //! of cache lookups is immune to core class and neighbours.
 //!
-//! **The client profile is part of the measurement, not a detail.** Under the
-//! schema's defaults this bench would measure nothing at all: `tagNames` and
-//! `enumValues` are off, `messageSummary.channels.inlayHints` is off, and the
-//! handler returns before it takes a snapshot when nothing would be drawn. So
-//! everything is switched on below, and the responses are asserted non-empty
-//! before any counter is read — an empty response with zero counters looks
-//! exactly like a deterministic result.
+//! The client profile explicitly enables tag, enum and summary hints. Responses
+//! must be non-empty before counters are read: empty responses with zero counts
+//! would make a disabled channel look deterministic.
 //!
 //! **Two traces, because one of them flatters the cache.** `navigate` resolves
 //! the few hints a reader inspects; `resolve-everything` resolves every hint of

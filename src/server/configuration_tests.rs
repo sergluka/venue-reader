@@ -355,7 +355,7 @@ fn describe_does_not_observe_unrefreshed_user_file_changes() {
     let directory =
         std::env::temp_dir().join(format!("fix-lsp-describe-readonly-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
-    let path = directory.join("fix-lsp.toml");
+    let path = directory.join("config.toml");
     std::fs::write(&path, "[hover]\nenabled = false\n").unwrap();
     let (mut state, uri) = testing::state_with(testing::HEARTBEAT);
     state.user_path = Some(path.clone());

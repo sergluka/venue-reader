@@ -73,13 +73,7 @@ impl Default for ConfigOverrides {
     }
 }
 
-/// The schema's `$defs/enabled`: a section that is nothing but a switch.
-///
-/// `enabled` is optional rather than a plain `bool` because the *property's*
-/// default differs from section to section — `inlayHints.groupPaths` defaults
-/// on while its two siblings default off — and a shared type with one `Default`
-/// cannot say that. `None` means "the section was written but said nothing",
-/// which has to fall back to the owner's default rather than to the type's.
+/// An optional switch; omission keeps the owning setting's default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Toggle {
@@ -129,10 +123,7 @@ pub struct Label {
     format: Option<String>,
 }
 
-/// `fix.inlayHints` — which hints are drawn beside the bytes, and how.
-///
-/// Read through the accessors, never through the fields: each carries its own
-/// schema default, and two of the three switches are **off**.
+/// Inline field labels and repeating-group paths, read through their default-aware accessors.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct InlayHints {
@@ -145,22 +136,15 @@ impl InlayHints {
     /// Whether a tag is annotated at all. **The gate**: with this off there is
     /// no tag hint, whatever `group_paths` says.
     pub fn tag_names(&self) -> bool {
-        self.tag_names.enabled.unwrap_or(false)
+        self.tag_names.enabled.unwrap_or(true)
     }
 
     /// Whether known enum values are annotated with their dictionary labels.
     pub fn enum_values(&self) -> bool {
-        self.enum_values.enabled.unwrap_or(false)
+        self.enum_values.enabled.unwrap_or(true)
     }
 
-    /// Whether an annotated tag inside a repeating group shows its path instead
-    /// of its name. **A modifier, not a second gate**: the path is chosen
-    /// first and the gate asked afterwards, so reading these as independent
-    /// switches would draw group hints under the default `tagNames = false`,
-    /// which is the opposite of what was asked for.
-    ///
-    /// It is what a tag format's hole resolves to: the path inside a group when
-    /// this is on, else the dictionary's name.
+    /// Whether tag labels use group paths; applies only when tag hints are enabled.
     pub fn group_paths(&self) -> bool {
         self.group_paths.or(true)
     }
@@ -773,16 +757,16 @@ mod tests {
         let written: Config = serde_json::from_value(json!({
             "inlayHints": {
                 "tagNames": { "format": "[{}]" },
-                "enumValues": { "enabled": true },
+                "enumValues": { "enabled": false },
             }
         }))
         .expect("config");
         assert_eq!(written.inlay_hints.tag_format(), "[{}]");
         assert!(
-            !written.inlay_hints.tag_names(),
-            "a format is not a switch: writing one does not turn the hint on"
+            written.inlay_hints.tag_names(),
+            "a format-only setting keeps the enabled default"
         );
-        assert!(written.inlay_hints.enum_values());
+        assert!(!written.inlay_hints.enum_values());
         assert_eq!(
             written.inlay_hints.value_format(),
             crate::render::DEFAULT_LABEL_FORMAT,
@@ -797,8 +781,8 @@ mod tests {
         assert!(cfg.dictionaries.is_empty());
         assert_eq!(cfg.limits.dictionary_bytes, 16 * 1024 * 1024);
         assert!(cfg.hover.enabled);
-        assert!(!cfg.inlay_hints.tag_names(), "off by default");
-        assert!(!cfg.inlay_hints.enum_values(), "off by default");
+        assert!(cfg.inlay_hints.tag_names(), "on by default");
+        assert!(cfg.inlay_hints.enum_values(), "on by default");
         assert!(cfg.inlay_hints.group_paths(), "on by default");
         assert_eq!(
             cfg.document_link.url,
@@ -887,30 +871,27 @@ mod tests {
         assert_eq!(low.limits.cache_bound(), 50, "as applied");
     }
 
-    /// Each toggle carries its own default, so a section written but left empty
-    /// must fall back to *that* default and not to a shared one — `groupPaths`
-    /// on, its two siblings off. A plain `bool` field would have made all three
-    /// agree, silently, with whichever one was chosen.
+    /// Empty sections keep defaults; explicit false settings still take effect.
     #[test]
     fn an_empty_hint_section_keeps_its_own_default() {
         let empty: Config = serde_json::from_value(json!({
             "inlayHints": { "tagNames": {}, "enumValues": {}, "groupPaths": {} }
         }))
         .expect("config");
-        assert!(!empty.inlay_hints.tag_names());
-        assert!(!empty.inlay_hints.enum_values());
+        assert!(empty.inlay_hints.tag_names());
+        assert!(empty.inlay_hints.enum_values());
         assert!(empty.inlay_hints.group_paths());
 
         let flipped: Config = serde_json::from_value(json!({
             "inlayHints": {
-                "tagNames": { "enabled": true },
+                "tagNames": { "enabled": false },
                 "groupPaths": { "enabled": false },
             }
         }))
         .expect("config");
-        assert!(flipped.inlay_hints.tag_names());
+        assert!(!flipped.inlay_hints.tag_names());
         assert!(!flipped.inlay_hints.group_paths());
-        assert!(!flipped.inlay_hints.enum_values(), "untouched, still off");
+        assert!(flipped.inlay_hints.enum_values(), "untouched, still on");
     }
 
     /// The schema's default is on, and the manual `Default` has to agree with

@@ -160,7 +160,7 @@
             }
           ],
           "default": {
-            "enabled": false,
+            "enabled": true,
             "format": "({})"
           }
         },
@@ -171,7 +171,7 @@
             }
           ],
           "default": {
-            "enabled": false,
+            "enabled": true,
             "format": "({})"
           }
         },
@@ -284,7 +284,7 @@
               ],
               "default": {
                 "enabled": true,
-                "severity": "info"
+                "severity": "error"
               },
               "description": "A MsgType(35) the line's dictionary does not list. Silent under a dictionary that lists no session message, whose table cannot be trusted to be complete. Only on a line whose dictionary was chosen, not fallen back to."
             },

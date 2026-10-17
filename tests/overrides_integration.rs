@@ -473,7 +473,7 @@ fn dictionary_version_mismatch_uses_normal_rule_gates_and_one_finding_per_versio
 fn all_layers_merge_sparsely_and_describe_reports_effective_values() {
     let fixture = Workspace::new("overrides");
     let user_file = fixture.write(
-        "personal/fix-lsp.toml",
+        "personal/fix-lsp/config.toml",
         "hover.enabled = false\ninlayHints.tagNames.enabled = true\ndiagnostics.enabled = false\n",
     );
     fixture.write(
@@ -533,7 +533,7 @@ fn all_layers_merge_sparsely_and_describe_reports_effective_values() {
 fn removing_a_client_leaf_reveals_personal_defaults_without_erasing_other_values() {
     let fixture = Workspace::new("overrides");
     let user_file = fixture.write(
-        "personal/fix-lsp.toml",
+        "personal/fix-lsp/config.toml",
         "hover.enabled = false\ninlayHints.tagNames.enabled = true\ndiagnostics.enabled = false\n",
     );
     let mut client = TestClient::start_with_user_file(Some(user_file));
@@ -561,7 +561,7 @@ fn removing_a_client_leaf_reveals_personal_defaults_without_erasing_other_values
 fn describe_does_not_reload_edited_user_or_project_toml() {
     let fixture = Workspace::new("overrides");
     let user_file = fixture.write(
-        "personal/fix-lsp.toml",
+        "personal/fix-lsp/config.toml",
         "inlayHints.tagNames.enabled = true\ndiagnostics.enabled = false\n",
     );
     let project_file = fixture.write(".fix-lsp.toml", "hover.enabled = false\n");

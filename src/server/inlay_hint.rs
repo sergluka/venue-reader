@@ -498,6 +498,10 @@ mod tests {
     fn a_channel_that_draws_nothing_populates_nothing() {
         let (mut state, uri) = state_with(&heartbeats(6));
         state.config.base = serde_json::from_value(json!({
+            "inlayHints": {
+                "tagNames": { "enabled": false },
+                "enumValues": { "enabled": false },
+            },
             "messageSummary": { "channels": { "inlayHints": false } }
         }))
         .expect("config");
@@ -505,7 +509,7 @@ mod tests {
         assert!(
             !state.config.base.inlay_hints.tag_names()
                 && !state.config.base.inlay_hints.enum_values(),
-            "and the two field hints are off by schema default"
+            "both field hints are explicitly disabled"
         );
 
         assert_eq!(run(&mut state, viewport(&uri, 0, 6)), json!([]));

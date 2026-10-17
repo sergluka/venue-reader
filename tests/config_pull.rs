@@ -201,7 +201,10 @@ fn application_default_can_be_cleared_and_removed_version_key_stays_unknown() {
 #[test]
 fn project_and_user_application_defaults_change_decoding_and_reject_invalid_files() {
     let fixture = Workspace::new("application-file-defaults");
-    let user_file = fixture.write("personal/fix-lsp.toml", "defaultApplVerID = 'FIX.5.0'\n");
+    let user_file = fixture.write(
+        "personal/fix-lsp/config.toml",
+        "defaultApplVerID = 'FIX.5.0'\n",
+    );
     let mut client = TestClient::start_with_user_file(Some(user_file.clone()));
     fixture.initialize(&mut client, json!({}));
     let document = fixture.uri("orders.fix");

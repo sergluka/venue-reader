@@ -222,6 +222,53 @@ fn without_xdg_config_home_the_personal_file_comes_from_the_home_default() {
     assert!(stderr.contains(&expected), "{stderr}");
 }
 
+#[test]
+fn old_personal_config_paths_are_ignored() {
+    for in_config_home in [true, false] {
+        let mut client = if in_config_home {
+            StdioClient::start("old-xdg-config", None, None)
+        } else {
+            StdioClient::start_without_config_home("old-home-config", None, None)
+        };
+        assert!(!client.personal_file().exists());
+        let old_file = client
+            .personal_file()
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("configuration base directory")
+            .join("fix-lsp.toml");
+        std::fs::write(&old_file, "hover.enabled = false\n").expect("write old configuration");
+
+        let message = include_str!("fixtures/validation/valid.fix");
+        let uri = client.write_workspace("heartbeat.fix", message.as_bytes());
+        client.request("initialize", json!({ "capabilities": {} }));
+        client.notify("initialized", json!({}));
+        client.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "fix",
+                    "version": 1,
+                    "text": message
+                }
+            }),
+        );
+        client.wait_for_notification("textDocument/publishDiagnostics", |params| {
+            params["uri"] == uri && params["version"] == 1
+        });
+        let hover = client.request(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": 0 }
+            }),
+        );
+        assert!(hover["contents"].is_object(), "{hover}");
+        assert!(client.shutdown_and_exit().success(), "{}", client.stderr());
+    }
+}
+
 fn replace_marker_with_raw_byte(body: &mut Vec<u8>, marker: &[u8], byte: u8) {
     let positions: Vec<usize> = body
         .windows(marker.len())

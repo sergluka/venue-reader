@@ -6,17 +6,15 @@ use std::path::{Path, PathBuf};
 use crate::overrides::project::{self, LoadedFile, ProjectFile};
 use crate::overrides::SourceKind;
 
-const FILE_NAME: &str = "fix-lsp.toml";
+const FILE_NAME: &str = "config.toml";
 
-/// `$XDG_CONFIG_HOME/fix-lsp.toml`, or `~/.config/fix-lsp.toml` without it. The
-/// XDG Base Directory specification says an unset, empty or relative
-/// `XDG_CONFIG_HOME` must be ignored, so a bad value falls back rather than
-/// resolving against the working directory.
+/// Ignore relative XDG paths so lookup never depends on the working directory.
 fn location(config_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
-    config_home
+    let directory = config_home
         .filter(|directory| directory.is_absolute())
-        .map(|directory| directory.join(FILE_NAME))
-        .or_else(|| home.map(|directory| directory.join(".config").join(FILE_NAME)))
+        .map(Path::to_path_buf)
+        .or_else(|| home.map(|directory| directory.join(".config")))?;
+    Some(directory.join("fix-lsp").join(FILE_NAME))
 }
 
 /// The location for this process. The only place the configuration directory is
@@ -50,11 +48,20 @@ mod tests {
         });
         assert_eq!(
             location(Some(config_home), Some(home_directory)),
-            Some(config_home.join("fix-lsp.toml"))
+            Some(config_home.join("fix-lsp").join("config.toml"))
+        );
+        assert_eq!(
+            location(Some(config_home), None),
+            Some(config_home.join("fix-lsp").join("config.toml"))
         );
         assert_eq!(
             location(None, Some(home_directory)),
-            Some(home_directory.join(".config").join("fix-lsp.toml"))
+            Some(
+                home_directory
+                    .join(".config")
+                    .join("fix-lsp")
+                    .join("config.toml")
+            )
         );
         assert_eq!(location(None, None), None);
     }
@@ -69,14 +76,24 @@ mod tests {
         for value in ["relative/config", ""] {
             assert_eq!(
                 location(Some(Path::new(value)), Some(home_directory)),
-                Some(home_directory.join(".config").join("fix-lsp.toml")),
+                Some(
+                    home_directory
+                        .join(".config")
+                        .join("fix-lsp")
+                        .join("config.toml")
+                ),
                 "{value:?}"
             );
         }
         if cfg!(windows) {
             assert_eq!(
                 location(Some(Path::new("/xdg")), Some(home_directory)),
-                Some(home_directory.join(".config").join("fix-lsp.toml"))
+                Some(
+                    home_directory
+                        .join(".config")
+                        .join("fix-lsp")
+                        .join("config.toml")
+                )
             );
         }
         assert_eq!(location(Some(Path::new("relative/config")), None), None);
@@ -86,7 +103,7 @@ mod tests {
     fn sparse_client_leaves_do_not_erase_user_defaults() {
         let user = parse(
             "hover.enabled = false\ninlayHints.tagNames.enabled = true\nallowDictionaryPath = true",
-            Path::new("/home/test/.config/fix-lsp.toml"),
+            Path::new("/home/test/.config/fix-lsp/config.toml"),
         )
         .unwrap();
         let client = parse_client(json!({"hover": {"enabled": true}})).unwrap();
@@ -107,7 +124,7 @@ mod tests {
             "defaultVersion = 'FIX.4.4'",
         ] {
             assert!(
-                parse(text, Path::new("/home/test/.config/fix-lsp.toml")).is_err(),
+                parse(text, Path::new("/home/test/.config/fix-lsp/config.toml")).is_err(),
                 "{text}"
             );
         }
@@ -121,7 +138,7 @@ mod tests {
     fn dictionary_versions_are_not_a_config_setting() {
         assert!(parse(
             "[[dictionaries]]\nname='venue'\npath='dict.xml'\nversion='FIX.4.4'",
-            Path::new("/home/test/.config/fix-lsp.toml")
+            Path::new("/home/test/.config/fix-lsp/config.toml")
         )
         .is_err());
     }

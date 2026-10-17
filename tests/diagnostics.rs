@@ -500,7 +500,7 @@ fn an_application_only_custom_dictionary_publishes_unknown_message_types() {
     let mut client = workspace.client(workspace.desk_dictionary(dictionary));
     client.did_open(URI, "8=FIX.4.4|35=U1|", 1);
     let published = client.wait_for("textDocument/publishDiagnostics");
-    assert_eq!(unknown_findings(&published), [finding("unknownMsgType", 3)]);
+    assert_eq!(unknown_findings(&published), [finding("unknownMsgType", 1)]);
     assert_eq!(
         message_on(&published, "unknownMsgType", "U1"),
         "\"desk\" does not define MsgType(35) = U1"
@@ -532,8 +532,8 @@ fn the_two_rules_are_toggled_and_regraded_apart() {
     let first = client.wait_for("textDocument/publishDiagnostics");
     assert_eq!(
         unknown_findings(&first),
-        [finding("unknownMsgType", 3), finding("unknownTag", 3)],
-        "information by default"
+        [finding("unknownMsgType", 1), finding("unknownTag", 3)],
+        "message types are errors; unknown tags remain information"
     );
     assert_eq!(
         message_on(&first, "unknownMsgType", "U1"),
@@ -547,11 +547,11 @@ fn the_two_rules_are_toggled_and_regraded_apart() {
     for (rules, expected) in [
         (
             json!({ "unknownTag": false }),
-            vec![finding("unknownMsgType", 3)],
+            vec![finding("unknownMsgType", 1)],
         ),
         (
             json!({ "unknownTag": { "severity": "hint" } }),
-            vec![finding("unknownMsgType", 3), finding("unknownTag", 4)],
+            vec![finding("unknownMsgType", 1), finding("unknownTag", 4)],
         ),
         (
             json!({ "unknownMsgType": false }),
@@ -560,6 +560,10 @@ fn the_two_rules_are_toggled_and_regraded_apart() {
         (
             json!({ "unknownMsgType": { "severity": "hint" } }),
             vec![finding("unknownMsgType", 4), finding("unknownTag", 3)],
+        ),
+        (
+            json!({ "unknownMsgType": { "severity": "info" } }),
+            vec![finding("unknownMsgType", 3), finding("unknownTag", 3)],
         ),
     ] {
         pull(&mut client, json!({ "diagnostics": { "rules": rules } }));
@@ -579,11 +583,11 @@ fn a_modeline_toggles_and_regrades_each_rule_apart() {
     client.answer_base_pull();
     client.did_open(URI, VENUE_LINE, 1);
     for (version, setting, expected) in [
-        (2, "unknownTag=false", vec![finding("unknownMsgType", 3)]),
+        (2, "unknownTag=false", vec![finding("unknownMsgType", 1)]),
         (
             3,
             "unknownTag.severity=hint",
-            vec![finding("unknownMsgType", 3), finding("unknownTag", 4)],
+            vec![finding("unknownMsgType", 1), finding("unknownTag", 4)],
         ),
         (4, "unknownMsgType=false", vec![finding("unknownTag", 3)]),
         (
@@ -637,7 +641,7 @@ fn a_modeline_edit_publishes_once_and_fresh() {
     );
     assert_eq!(
         unknown_findings(at_two[0]),
-        [finding("unknownMsgType", 3)],
+        [finding("unknownMsgType", 1)],
         "the first and only set already follows the modeline\n{}",
         trace(&notes)
     );
@@ -683,7 +687,7 @@ fn an_edit_during_a_pull_waits_for_its_rules() {
         .map(|(_, params)| params)
         .collect();
     assert_eq!(at_two.len(), 1, "one publish for the edit: {at_two:#?}");
-    assert_eq!(unknown_findings(at_two[0]), [finding("unknownMsgType", 3)]);
+    assert_eq!(unknown_findings(at_two[0]), [finding("unknownMsgType", 1)]);
     client.shutdown();
 }
 
@@ -732,7 +736,8 @@ fn info_findings_never_keep_an_error_out() {
     client.initialize_caps(TestClient::caps_with_pull());
     client.answer_base_pull();
     let venue = repaired("8=FIX.4.4|9=0|35=D|9000=a|9000=b|10=000|");
-    let text = [venue.as_str(), &venue, BAD_BOTH, &venue].join("\n");
+    let unknown_type = repaired("8=FIX.4.4|9=0|35=U1|9000=a|9000=b|10=000|");
+    let text = [venue.as_str(), &venue, BAD_BOTH, &unknown_type].join("\n");
     pull(
         &mut client,
         json!({ "limits": { "diagnosticsPerDocument": 3 } }),
@@ -743,13 +748,13 @@ fn info_findings_never_keep_an_error_out() {
     assert_eq!(
         shown(&last),
         [
-            ("unknownTag".to_owned(), 3, 0),
             ("bodyLength".to_owned(), 1, 2),
             ("checkSum".to_owned(), 1, 2),
+            ("unknownMsgType".to_owned(), 1, 3),
             ("truncated".to_owned(), 3, 0),
         ]
     );
-    assert_eq!(truncated_message(&last), "5 more problems not shown");
+    assert_eq!(truncated_message(&last), "6 more problems not shown");
     client.shutdown();
 }
 
@@ -922,9 +927,9 @@ fn fixt_application_tables_publish_unknown_types_without_a_session_layer() {
     assert_eq!(
         unknown_findings(&published),
         [
-            finding("unknownMsgType", 3),
-            finding("unknownMsgType", 3),
-            finding("unknownMsgType", 3)
+            finding("unknownMsgType", 1),
+            finding("unknownMsgType", 1),
+            finding("unknownMsgType", 1)
         ]
     );
     assert!(!codes(&published)
@@ -987,6 +992,21 @@ fn missing_message_type_and_integrity_fields_keep_their_existing_rule_controls()
         .find(|diagnostic| diagnostic["code"] == "missingMsgType")
         .unwrap();
     assert_eq!(problem["data"]["rule"], "unknownMsgType");
+    assert_eq!(problem["severity"], 1, "missing MsgType(35) is an error");
+    pull(
+        &mut client,
+        json!({"diagnostics": {"rules": {"unknownMsgType": {"severity": "info"}}}}),
+    );
+    let notes = client.drain_notifications(QUIET);
+    let published = last_publish(&notes, URI).expect("republished");
+    assert_eq!(
+        shown(&published),
+        [
+            ("bodyLength".to_owned(), 1, 0),
+            ("checkSum".to_owned(), 1, 0),
+            ("missingMsgType".to_owned(), 3, 0),
+        ]
+    );
     pull(
         &mut client,
         json!({"diagnostics": {"rules": {"unknownMsgType": false}}}),

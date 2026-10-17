@@ -14,7 +14,7 @@ const URI: &str = "file:///a.fix";
 const HEARTBEAT: &str =
     "8=FIX.4.4|9=57|35=0|34=1|49=CLIENT1|56=BROKER1|52=20251026-09:02:00.000|10=171|";
 
-/// Both hint kinds are off by default, so every test that wants them says so.
+/// Keep protocol tests independent of the configured defaults.
 fn hints_on() -> Value {
     json!({
         "inlayHints": {
@@ -57,8 +57,8 @@ fn over(client: &mut TestClient, from: (u32, u32), to: (u32, u32)) -> Vec<Value>
 }
 
 #[test]
-fn a_tag_and_its_value_are_labelled_where_they_end() {
-    let mut client = open_with(hints_on(), plain_caps(), HEARTBEAT);
+fn a_tag_and_its_value_are_labelled_where_they_end_by_default() {
+    let mut client = open_with(json!({}), plain_caps(), HEARTBEAT);
     let hints = over(&mut client, (0, 0), (0, 400));
 
     let tag_end = HEARTBEAT.find("49=").unwrap() as u32 + 2;
@@ -116,7 +116,10 @@ fn each_label_is_written_by_its_own_format() {
 #[test]
 fn a_tag_the_dictionary_does_not_define_draws_nothing() {
     let mut client = open_with(
-        json!({ "inlayHints": { "tagNames": { "enabled": true, "format": "<{}>" } } }),
+        json!({ "inlayHints": {
+            "tagNames": { "enabled": true, "format": "<{}>" },
+            "enumValues": { "enabled": false },
+        } }),
         plain_caps(),
         "8=FIX.4.4|35=0|9999=x|10=1|",
     );
@@ -136,7 +139,10 @@ fn a_tag_the_dictionary_does_not_define_draws_nothing() {
 fn a_tag_standard_fix_names_and_the_dictionary_lacks_is_marked() {
     const LINE: &str = "8=FIXT.1.1|35=D|1128=7|1328=x|10=1|";
     let mut client = open_with(
-        json!({ "inlayHints": { "tagNames": { "enabled": true, "format": "<{}>" } } }),
+        json!({ "inlayHints": {
+            "tagNames": { "enabled": true, "format": "<{}>" },
+            "enumValues": { "enabled": false },
+        } }),
         plain_caps(),
         LINE,
     );
@@ -207,7 +213,10 @@ fn a_marked_hints_tooltip_resolves_to_the_hover() {
 fn a_marked_tag_inside_a_group_draws_the_mark_not_a_path() {
     const LINE: &str = "8=FIX.4.4|35=W|55=BTCUSD|268=1|269=0|270=65000.50|1328=x|10=1|";
     let mut client = open_with(
-        json!({ "inlayHints": { "tagNames": { "enabled": true, "groupPaths": true, "format": "<{}>" } } }),
+        json!({ "inlayHints": {
+            "tagNames": { "enabled": true, "groupPaths": true, "format": "<{}>" },
+            "enumValues": { "enabled": false },
+        } }),
         plain_caps(),
         LINE,
     );
@@ -228,12 +237,35 @@ fn a_marked_tag_inside_a_group_draws_the_mark_not_a_path() {
     client.shutdown();
 }
 
-/// Off by default, and the test that would otherwise pass by accident.
 #[test]
-fn nothing_is_drawn_until_it_is_asked_for() {
-    let mut client = open_with(json!({}), plain_caps(), HEARTBEAT);
-    assert_eq!(over(&mut client, (0, 0), (0, 400)), Vec::<Value>::new());
-    client.shutdown();
+fn each_hint_kind_can_be_disabled_explicitly() {
+    for (settings, tags_expected, values_expected) in [
+        (json!({ "tagNames": { "enabled": false } }), false, true),
+        (json!({ "enumValues": { "enabled": false } }), true, false),
+        (
+            json!({
+                "tagNames": { "enabled": false },
+                "enumValues": { "enabled": false },
+            }),
+            false,
+            false,
+        ),
+    ] {
+        let mut client = open_with(json!({ "inlayHints": settings }), plain_caps(), HEARTBEAT);
+        let hints = over(&mut client, (0, 0), (0, 400));
+        assert_eq!(
+            hints.iter().any(|hint| hint["data"]["kind"] == "tag"),
+            tags_expected
+        );
+        assert_eq!(
+            hints.iter().any(|hint| hint["data"]["kind"] == "value"),
+            values_expected
+        );
+        if !tags_expected && !values_expected {
+            assert!(hints.is_empty(), "{hints:?}");
+        }
+        client.shutdown();
+    }
 }
 
 /// The range's end is exclusive, and clipping is per character because a hint
@@ -436,7 +468,7 @@ fn malformed_params_are_an_error() {
 fn a_change_that_alters_the_channels_asks_for_a_refresh() {
     let cases = [
         (
-            json!({ "inlayHints": { "tagNames": { "enabled": true } } }),
+            json!({ "inlayHints": { "tagNames": { "enabled": false } } }),
             "what the channel draws",
         ),
         (
@@ -824,7 +856,10 @@ fn unresolved_application_does_not_inherit_a_transport_msg_type_enum() {
     const LINE: &str = "8=FIXT.1.1|35=D|54=1|";
     let mut client = open_with(
         json!({
-            "inlayHints": { "enumValues": { "enabled": true } },
+            "inlayHints": {
+                "tagNames": { "enabled": false },
+                "enumValues": { "enabled": true },
+            },
             "messageSummary": {"channels": {"inlayHints": true}, "template": "{35:name|unresolved}"},
         }),
         plain_caps(),
