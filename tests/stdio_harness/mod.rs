@@ -44,7 +44,7 @@ impl StdioClient {
         Self::spawn(label, personal_config, true, configuration_reply)
     }
 
-    /// `XDG_CONFIG_HOME` unset, so the personal file goes to `$HOME/.config/fix-lsp`
+    /// `XDG_CONFIG_HOME` unset, so the personal file goes to `$HOME/.config/venue-reader`
     /// default the server must fall back to. Only `process_location` resolves
     /// that; `location`'s own unit tests cannot reach it.
     pub fn start_without_config_home(
@@ -63,7 +63,7 @@ impl StdioClient {
     ) -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
-            "fix-lsp-stdio-{label}-{}-{}",
+            "venue-reader-stdio-{label}-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
@@ -73,7 +73,7 @@ impl StdioClient {
         let config_home = directory.join("xdg-config");
         std::fs::create_dir_all(&workspace).expect("create test workspace");
 
-        let mut command = Command::new(env!("CARGO_BIN_EXE_fix-lsp"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_venue-reader"));
         command
             .arg("--stdio")
             .env("HOME", &home)
@@ -88,7 +88,7 @@ impl StdioClient {
             command.env_remove("XDG_CONFIG_HOME");
             home.join(".config")
         }
-        .join("fix-lsp");
+        .join("venue-reader");
         std::fs::create_dir_all(&personal_directory).expect("create personal configuration dir");
         let personal_file = personal_directory.join("config.toml");
         if let Some(contents) = personal_config {
@@ -100,7 +100,7 @@ impl StdioClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("start fix-lsp");
+            .expect("start venue-reader");
         let input = Arc::new(Mutex::new(child.stdin.take().expect("piped stdin")));
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr_pipe = child.stderr.take().expect("piped stderr");
@@ -297,7 +297,7 @@ impl StdioClient {
                 let _ = self.child.kill();
                 let _ = self.child.wait();
                 self.join_readers();
-                panic!("fix-lsp did not exit within {timeout:?}; {context}");
+                panic!("venue-reader did not exit within {timeout:?}; {context}");
             }
             std::thread::sleep(Duration::from_millis(10));
         }

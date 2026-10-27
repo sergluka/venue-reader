@@ -67,7 +67,7 @@ fn changed_modeline_never_republishes_diagnostics_from_removed_lines() {
 #[test]
 fn configuration_warnings_never_republish_the_previous_rule_severity() {
     let fixture = Workspace::new("review-diagnostics");
-    let config = fixture.write(".fix-lsp.toml", "");
+    let config = fixture.write(".venue-reader.toml", "");
     let document = fixture.uri("orders.fix");
     let mut client = TestClient::start();
     client.initialize_with(json!({"rootUri":file_uri(&fixture.0),"capabilities":{}}));

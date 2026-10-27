@@ -17,7 +17,7 @@ pub(crate) const HEARTBEAT: &str =
 
 pub(crate) fn file_uri(name: &str) -> Uri {
     let path = std::env::temp_dir()
-        .join(format!("fix-lsp-server-tests-{}", std::process::id()))
+        .join(format!("venue-reader-server-tests-{}", std::process::id()))
         .join(name);
     Uri::from_file_path(path).unwrap()
 }

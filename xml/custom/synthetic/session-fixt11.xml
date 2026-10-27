@@ -1,4 +1,4 @@
-<!-- Synthetic QuickFIX dictionary written for fix-lsp's tests (Apache-2.0).
+<!-- Synthetic QuickFIX dictionary written for Venue Reader tests (Apache-2.0).
      A FIXT.1.1 session-layer dictionary: `type='FIXT'` in the header. -->
 <fix type='FIXT' major='1' minor='1' servicepack='0'>
  <header>

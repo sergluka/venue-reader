@@ -178,8 +178,8 @@ impl ServerState {
 
     /// Record a configuration failure that makes the main loop terminate.
     pub(super) fn fail_configuration(&mut self, message: String) {
-        log::error!("fix-lsp: {message}");
-        eprintln!("fix-lsp: {message}");
+        log::error!("venue-reader: {message}");
+        eprintln!("venue-reader: {message}");
         self.fatal = Some(message);
     }
 

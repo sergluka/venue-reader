@@ -9,7 +9,7 @@ fn rejected_project_dictionary_name_is_not_opened_as_a_path() {
     let fixture = Workspace::new("review-dictionary");
     fixture.write("invalid.xml", "<fix>");
     fixture.write(
-        ".fix-lsp.toml",
+        ".venue-reader.toml",
         "dictionary = 'venue'\n[[dictionaries]]\nname = 'venue'\npath = 'invalid.xml'\n",
     );
     let mut client = fixture.client(json!({
@@ -39,7 +39,7 @@ fn session_dictionary_commands_preserve_project_load_warnings_until_refresh() {
     let fixture = Workspace::new("review-dictionary");
     fixture.write("bad.xml", "<fix>");
     fixture.write(
-        ".fix-lsp.toml",
+        ".venue-reader.toml",
         "[[dictionaries]]\nname = 'venue'\npath = 'bad.xml'\n",
     );
     let settings = json!({"allowDictionaryPath":true,"diagnostics":{"enabled":false}});

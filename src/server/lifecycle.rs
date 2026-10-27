@@ -99,7 +99,7 @@ impl ServerState {
         {
             self.log_message(
                 lsp_types::MessageType::Info,
-                "fix-lsp: this client resolves no code lens `command`, so the summary's \
+                "venue-reader: this client resolves no code lens `command`, so the summary's \
                  code-lens channel is not offered; set \
                  `fix.messageSummary.channels.inlayHints` to true to take the summary \
                  through inlay hints instead",
@@ -115,7 +115,7 @@ impl ServerState {
         {
             self.log_message(
                 lsp_types::MessageType::Info,
-                "fix-lsp: this client advertises no \
+                "venue-reader: this client advertises no \
                  `textDocument.documentSymbol.hierarchicalDocumentSymbolSupport`, so no \
                  document-symbol provider is offered; the outline is only produced nested",
             );
@@ -238,8 +238,8 @@ mod tests {
 
     #[test]
     fn workspace_folders_take_precedence_over_root_uri() {
-        let folder = std::env::temp_dir().join("fix-lsp-folder");
-        let root = std::env::temp_dir().join("fix-lsp-root");
+        let folder = std::env::temp_dir().join("venue-reader-folder");
+        let root = std::env::temp_dir().join("venue-reader-root");
 
         let both = json!({
             "rootUri": file_uri(&root),

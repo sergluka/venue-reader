@@ -74,7 +74,7 @@ fn main() {
 fn measure(label: &str, summary: Value, expected: usize) {
     let text = String::from_utf8(generate_lines(AT_CAP)).expect("the corpus is ASCII");
     let (server_conn, client) = Connection::memory();
-    let server = std::thread::spawn(move || fix_lsp::server::main_loop(server_conn));
+    let server = std::thread::spawn(move || venue_reader::server::main_loop(server_conn));
 
     request(
         &client,
@@ -108,7 +108,9 @@ fn measure(label: &str, summary: Value, expected: usize) {
     let classified = Instant::now();
     let mut messages = 0usize;
     for line in text.split('\n') {
-        if fix_lsp::codec::tokenize(line.as_bytes()).kind == fix_lsp::codec::LineKind::Message {
+        if venue_reader::codec::tokenize(line.as_bytes()).kind
+            == venue_reader::codec::LineKind::Message
+        {
             messages += 1;
         }
     }

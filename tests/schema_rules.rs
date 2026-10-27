@@ -1,11 +1,11 @@
 //! The JSON schemas are written by hand and refuse unknown rule ids, so a rule
 //! missing from one of them is a setting an editor would flag as an error.
 
-use fix_lsp::config::{user_file, Severity};
-use fix_lsp::overrides::{merge, modeline, parse_client, project, SourceKind};
-use fix_lsp::rules::Registry;
 use serde_json::{json, Value};
 use std::path::Path;
+use venue_reader::config::{user_file, Severity};
+use venue_reader::overrides::{merge, modeline, parse_client, project, SourceKind};
+use venue_reader::rules::Registry;
 
 /// The `diagnostics.rules` object, wherever a schema nests it.
 fn rules_of(schema: &Value) -> Option<&Value> {
@@ -24,9 +24,9 @@ fn every_schema_lists_exactly_the_registered_rules() {
     let mut known: Vec<&str> = Registry::known_ids().to_vec();
     known.sort_unstable();
     for file in [
-        "schema/fix-lsp.schema.json",
-        "schema/fix-lsp-user.schema.json",
-        "schema/fix-lsp-project.schema.json",
+        "schema/venue-reader.schema.json",
+        "schema/venue-reader-user.schema.json",
+        "schema/venue-reader-project.schema.json",
     ] {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
         let schema: Value =
@@ -52,7 +52,7 @@ fn begin_string_is_an_unknown_rule_in_every_configuration_source() {
     let layers = [
         (SourceKind::UserFile, user_file::parse(toml, Path::new("config.toml")).unwrap().layer),
         (SourceKind::Client, parse_client(json!({"diagnostics":{"rules":{"beginString":false,"integrity":{"enabled":true,"severity":"hint"}}}})).unwrap()),
-        (SourceKind::Project, project::parse(toml, Path::new(".fix-lsp.toml")).unwrap().layer),
+        (SourceKind::Project, project::parse(toml, Path::new(".venue-reader.toml")).unwrap().layer),
         (SourceKind::Modeline, modeline::parse(&[modeline], "file:///test.fix")),
     ];
     for (source, layer) in layers {

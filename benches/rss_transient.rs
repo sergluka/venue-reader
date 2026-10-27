@@ -11,8 +11,8 @@
 mod common;
 
 use common::{context, corpus, report, rss};
-use fix_lsp::ctx::analyze;
-use fix_lsp::document::Document;
+use venue_reader::ctx::analyze;
+use venue_reader::document::Document;
 
 /// The walk may keep nothing, so anything above noise is a regression.
 const GATE: f64 = 0.05;

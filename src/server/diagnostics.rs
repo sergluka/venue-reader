@@ -185,7 +185,7 @@ impl Worker {
         let (jobs_tx, jobs_rx) = unbounded::<Job>();
         let (reports_tx, reports_rx) = unbounded::<Report>();
         let thread = std::thread::Builder::new()
-            .name("fix-lsp-diagnostics".into())
+            .name("venue-reader-diagnostics".into())
             .spawn(move || run(&jobs_rx, &reports_tx))
             .expect("spawning the diagnostics worker");
         Worker {
@@ -802,7 +802,7 @@ impl ServerState {
             self.log_message(
                 lsp_types::MessageType::Info,
                 &format!(
-                    "fix-lsp: {} — showing {shown} problems of {}; \
+                    "venue-reader: {} — showing {shown} problems of {}; \
                      raise fix.limits.diagnosticsPerDocument to see the rest",
                     uri.as_str(),
                     shown + left_out

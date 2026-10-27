@@ -484,7 +484,7 @@ mod tests {
     fn explicit_default_value_above_a_project_override_still_wins() {
         let project = parse_structured(
             json!({"hover":{"enabled":false}}),
-            Origin::new(SourceKind::Project, "file:///project/.fix-lsp.toml"),
+            Origin::new(SourceKind::Project, "file:///project/.venue-reader.toml"),
             true,
         )
         .unwrap();

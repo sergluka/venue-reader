@@ -10,7 +10,7 @@ fn initialize_negotiates_utf8_when_offered() {
     assert_eq!(res["capabilities"]["positionEncoding"], "utf-8");
     assert_eq!(res["capabilities"]["hoverProvider"], true);
     assert_eq!(res["capabilities"]["textDocumentSync"], 2);
-    assert_eq!(res["serverInfo"]["name"], "fix-lsp");
+    assert_eq!(res["serverInfo"]["name"], "venue-reader");
     client.shutdown();
 }
 

@@ -7,9 +7,9 @@ mod common;
 use common::{context, corpus};
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
-use fix_lsp::codec::LineAnalysis;
-use fix_lsp::ctx::analyze;
-use fix_lsp::render::{hover, summary, Options};
+use venue_reader::codec::LineAnalysis;
+use venue_reader::ctx::analyze;
+use venue_reader::render::{hover, summary, Options};
 
 fn throughput(c: &mut Criterion) {
     let ctx = context();

@@ -8,8 +8,8 @@
 mod common;
 
 use common::{context, corpus, BUDGET};
-use fix_lsp::codec::LineAnalysis;
-use fix_lsp::document::{Document, Line};
+use venue_reader::codec::LineAnalysis;
+use venue_reader::document::{Document, Line};
 
 /// The marginal cost of caching a line, which is what Stage 4 needs: it will
 /// cache *some* lines, and the question is how many fit. Modelled from

@@ -1,4 +1,4 @@
-# fix-lsp
+# Venue Reader
 
 An editor-independent language server for inspecting FIX protocol logs.
 It explains fields and values, reconstructs repeating groups, and provides
@@ -33,7 +33,7 @@ All analysis runs locally. FIX logs are not uploaded to a decoding service.
 
 ## Supported logs and FIX versions
 
-fix-lsp reads one FIX message per line. It accepts SOH, pipe (`|`), and caret
+Venue Reader reads one FIX message per line. It accepts SOH, pipe (`|`), and caret
 (`^`) separators, can skip a log prefix before `BeginString(8)`, and ignores
 blank lines and `#` comments. The parser selects one separator per line.
 
@@ -48,8 +48,8 @@ FIX5 application messages use `BeginString(8) = FIXT.1.1`, with
 a complete dictionary pair or configure `defaultApplVerID`. There is no built-in
 application default, and the server does not infer one from another log line.
 
-See [FIX versions](../fix-lsp.wiki/FIX-Versions.md) for identity resolution and
-[Inspecting logs](../fix-lsp.wiki/Inspecting-Logs.md) for input-format limits.
+See [FIX versions](../venue-reader.wiki/FIX-Versions.md) for identity resolution and
+[Inspecting logs](../venue-reader.wiki/Inspecting-Logs.md) for input-format limits.
 
 ## Build and launch
 
@@ -64,7 +64,7 @@ cargo install --path . --locked
 Or install directly from GitHub:
 
 ```sh
-cargo install --git ssh://git@github.com/sergluka/fix-lsp.git --locked
+cargo install --git ssh://git@github.com/sergluka/venue-reader.git --locked
 ```
 
 Both commands build from source and do not require a crates.io release.
@@ -74,20 +74,20 @@ to `PATH` if needed. `--locked` uses the dependency versions in `Cargo.lock`.
 Check the installation:
 
 ```sh
-fix-lsp --version
+venue-reader --version
 ```
 
 To build and run without installation:
 
 ```sh
 cargo build --release
-./target/release/fix-lsp --stdio
+./target/release/venue-reader --stdio
 ```
 
 Once the binary is on `PATH`, the launch command is:
 
 ```sh
-fix-lsp --stdio
+venue-reader --stdio
 ```
 
 | Option | Purpose / default |
@@ -103,7 +103,7 @@ There is no `--config` option; use the configuration sources below.
 
 Editor setup depends on the client. This repository does not yet provide
 editor-specific installation recipes or an extension. See
-[Running the server](../fix-lsp.wiki/Running-the-Server.md) for more detail.
+[Running the server](../venue-reader.wiki/Running-the-Server.md) for more detail.
 
 ## Inspecting messages
 
@@ -170,9 +170,9 @@ Basic types use standard LSP token names. Types such as `price`, `quantity`,
 
 TODO: Add a screenshot of field highlighting and nested repeating groups.
 
-See [Inspecting logs](../fix-lsp.wiki/Inspecting-Logs.md) for hover and outline
+See [Inspecting logs](../venue-reader.wiki/Inspecting-Logs.md) for hover and outline
 examples, label formats, and summary templates. See
-[Semantic tokens](../fix-lsp.wiki/Semantic-Tokens.md) for the token legend and
+[Semantic tokens](../venue-reader.wiki/Semantic-Tokens.md) for the token legend and
 coloring requirements.
 
 ## Basic configuration
@@ -180,23 +180,23 @@ coloring requirements.
 Settings apply from lowest to highest priority:
 
 1. Built-in defaults.
-2. Personal `config.toml`: `$XDG_CONFIG_HOME/fix-lsp/config.toml`, or
-   `~/.config/fix-lsp/config.toml` if that variable is unset, empty, or relative.
+2. Personal `config.toml`: `$XDG_CONFIG_HOME/venue-reader/config.toml`, or
+   `~/.config/venue-reader/config.toml` if that variable is unset, empty, or relative.
 3. Global LSP `fix` settings supplied by the editor.
-4. Matching project `.fix-lsp.toml` files, from workspace root to the document.
+4. Matching project `.venue-reader.toml` files, from workspace root to the document.
 5. Document modelines: `# fix:` comments in the first or last five content lines.
 
 Higher layers override only the settings they supply. Project files can be
 nested; a nearer file can override an ancestor. Keep configuration files sparse.
 
 The wiki has the complete default configuration in
-[TOML for a personal file](../fix-lsp.wiki/Configuration-Reference.md#toml-file)
-and [JSON for an LSP client](../fix-lsp.wiki/Configuration-Reference.md#json-for-lsp-clients).
+[TOML for a personal file](../venue-reader.wiki/Configuration-Reference.md#toml-file)
+and [JSON for an LSP client](../venue-reader.wiki/Configuration-Reference.md#json-for-lsp-clients).
 Tag-name and enum hints are **on by default**. For example, this small personal
 configuration turns them off:
 
 ```toml
-# ~/.config/fix-lsp/config.toml
+# ~/.config/venue-reader/config.toml
 [inlayHints.tagNames]
 enabled = false
 
@@ -215,9 +215,9 @@ personal/global settings. Project files and modelines cannot change them.
 There is no filesystem watcher for TOML or dictionary files: send a
 configuration-change notification or restart after changing those files.
 
-See [Configuration](../fix-lsp.wiki/Configuration.md) for source scopes,
+See [Configuration](../venue-reader.wiki/Configuration.md) for source scopes,
 project filters, modelines, and reload behavior. The
-[Settings reference](../fix-lsp.wiki/Configuration-Reference.md) lists all
+[Settings reference](../venue-reader.wiki/Configuration-Reference.md) lists all
 defaults and resource limits.
 
 ## Custom dictionaries
@@ -233,7 +233,7 @@ false by default and cannot be enabled by a project or document.
 For a conventional FIX 4.4 dictionary, register and select it in a project file:
 
 ```toml
-# .fix-lsp.toml
+# .venue-reader.toml
 dictionary = "custom44"
 
 [[dictionaries]]
@@ -249,8 +249,8 @@ FIX5 dictionaries may need separate transport and application files. A combined
 FIXT-rooted file needs an explicit application release. Use the form that
 matches the actual XML, not its filename or venue name.
 
-See [Dictionaries](../fix-lsp.wiki/Dictionaries.md) for binding forms, accepted
-XML, path rules, and loader limits. [Venue examples](../fix-lsp.wiki/Venue-Dictionaries.md)
+See [Dictionaries](../venue-reader.wiki/Dictionaries.md) for binding forms, accepted
+XML, path rules, and loader limits. [Venue examples](../venue-reader.wiki/Venue-Dictionaries.md)
 show publisher-backed recipes for specific interfaces; they are not venue
 compatibility certifications.
 
@@ -280,7 +280,7 @@ Configuration errors remain visible when FIX diagnostics are disabled.
 
 **Limit:** This is not full FIX schema validation. Other required fields, field
 membership, enum values, group-count consistency, and sequence gaps are not
-checked. See [Diagnostics](../fix-lsp.wiki/Diagnostics.md) for rule conditions,
+checked. See [Diagnostics](../venue-reader.wiki/Diagnostics.md) for rule conditions,
 codes, and repair behavior.
 
 ## Client support and large logs
@@ -296,9 +296,9 @@ stop above 20,000 document lines, and full semantic tokens cover the first
 The outline reduces detail when its budget is exhausted; diagnostics are capped.
 For summaries on larger logs, use inlay hints instead of code lens.
 
-See [LSP reference](../fix-lsp.wiki/LSP-Reference.md) for capabilities and request
-requirements, [Settings reference](../fix-lsp.wiki/Configuration-Reference.md)
-for limits, and [Troubleshooting](../fix-lsp.wiki/Troubleshooting.md) for editor
+See [LSP reference](../venue-reader.wiki/LSP-Reference.md) for capabilities and request
+requirements, [Settings reference](../venue-reader.wiki/Configuration-Reference.md)
+for limits, and [Troubleshooting](../venue-reader.wiki/Troubleshooting.md) for editor
 limitations and missing annotations.
 
 ## Commands
@@ -313,7 +313,7 @@ Clients invoke these commands through `workspace/executeCommand`:
 | `fix.describeOverrides` | Show a document's effective settings, their sources, warnings, and dictionary bindings. |
 
 These commands do not reload configuration files. See
-[LSP methods and commands](../fix-lsp.wiki/LSP-Reference.md#custom-commands)
+[LSP methods and commands](../venue-reader.wiki/LSP-Reference.md#custom-commands)
 for arguments, result formats, and errors.
 
 ## Security and dictionary sources
@@ -332,14 +332,14 @@ Orchestra metadata. QuickFIX/J supplies per-version structure; FIX Latest suppli
 descriptions, lifecycle metadata, and selected enum values. Dictionaries are
 compiled into the binary and are not downloaded at runtime.
 
-See [Security](../fix-lsp.wiki/Security.md) for trust controls and reference links,
-[Dictionary sources](../fix-lsp.wiki/Dictionary-Sources.md) for the data model,
+See [Security](../venue-reader.wiki/Security.md) for trust controls and reference links,
+[Dictionary sources](../venue-reader.wiki/Dictionary-Sources.md) for the data model,
 and [xml/README.md](xml/README.md) for pinned sources and regeneration.
 
 ## Documentation
 
 The wiki contains the full reference, examples, and troubleshooting guides.
-Start at [Wiki home](../fix-lsp.wiki/Home.md); its navigation groups pages by
+Start at [Wiki home](../venue-reader.wiki/Home.md); its navigation groups pages by
 getting started, configuration, dictionaries, technical reference, and help.
 
 ## Contributing
@@ -350,7 +350,7 @@ Discuss substantial changes before implementation.
 
 Protocol behavior and tests must come from public specifications or independently
 created synthetic data. Include source links; do not submit private logs or
-dictionaries. See [Contributing](../fix-lsp.wiki/Contributing.md) for repository
+dictionaries. See [Contributing](../venue-reader.wiki/Contributing.md) for repository
 checks and documentation tests.
 
 ## License

@@ -76,7 +76,7 @@ pub enum TemplateError {
     UnknownFmt { fmt: String, at: usize },
 }
 
-/// The schema default (`schema/fix-lsp.schema.json`).
+/// The schema default (`schema/venue-reader.schema.json`).
 pub const DEFAULT_TEMPLATE: &str =
     "{52|???}: {34|???}: {49|???}=>{56|???} | {35:name|???}{possDup}";
 

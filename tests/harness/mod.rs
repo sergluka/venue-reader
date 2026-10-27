@@ -66,7 +66,7 @@ impl Workspace {
     pub fn new(label: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
-            "fix-lsp-{label}-{}-{}",
+            "venue-reader-{label}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -126,7 +126,7 @@ impl Drop for Workspace {
 
 pub struct TestClient {
     conn: Connection,
-    server: Option<JoinHandle<fix_lsp::server::ServerExit>>,
+    server: Option<JoinHandle<venue_reader::server::ServerExit>>,
     completed: crossbeam_channel::Receiver<()>,
     next_id: i32,
     /// Notifications seen while waiting for something else; handed out by
@@ -144,10 +144,10 @@ impl TestClient {
         let (server_conn, client_conn) = Connection::memory();
         let (completion, completed) = crossbeam_channel::bounded(1);
         let server = std::thread::spawn(move || {
-            let outcome = fix_lsp::server::serve_with_user_file(
-                fix_lsp::transport::Link {
+            let outcome = venue_reader::server::serve_with_user_file(
+                venue_reader::transport::Link {
                     receiver: server_conn.receiver,
-                    sender: fix_lsp::transport::Sink::Memory(server_conn.sender),
+                    sender: venue_reader::transport::Sink::Memory(server_conn.sender),
                 },
                 path,
             );
@@ -385,7 +385,7 @@ impl TestClient {
         }
     }
 
-    pub fn wait_for_exit(&mut self) -> fix_lsp::server::ServerExit {
+    pub fn wait_for_exit(&mut self) -> venue_reader::server::ServerExit {
         self.completed
             .recv_timeout(Duration::from_secs(5))
             .expect("server exits within 5s");
@@ -569,12 +569,12 @@ impl Drop for TestClient {
 
 pub const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
-/// Bundled dictionaries, `FIX.4.4` as the fallback — what a plain `fix-lsp`
+/// Bundled dictionaries, `FIX.4.4` as the fallback — what a plain `venue-reader`
 /// reading a log with no configuration uses.
-pub fn test_ctx() -> std::sync::Arc<fix_lsp::ctx::Ctx> {
-    fix_lsp::ctx::Ctx::new(
-        &fix_lsp::config::Config::default(),
-        std::sync::Arc::new(fix_lsp::dictionary::Registry::bundled_only()),
+pub fn test_ctx() -> std::sync::Arc<venue_reader::ctx::Ctx> {
+    venue_reader::ctx::Ctx::new(
+        &venue_reader::config::Config::default(),
+        std::sync::Arc::new(venue_reader::dictionary::Registry::bundled_only()),
         None,
     )
 }
@@ -620,7 +620,7 @@ pub fn fixture_lines() -> Vec<(String, Vec<u8>)> {
 
 /// Applies edits to the bytes they were computed against. Back to front: an
 /// earlier edit would move the spans of the later ones.
-pub fn apply_edits(bytes: &[u8], edits: &[fix_lsp::rules::Edit]) -> Vec<u8> {
+pub fn apply_edits(bytes: &[u8], edits: &[venue_reader::rules::Edit]) -> Vec<u8> {
     let mut out = bytes.to_vec();
     for edit in edits.iter().rev() {
         out.splice(edit.start.index()..edit.end.index(), edit.text.bytes());

@@ -1,9 +1,9 @@
 use std::process::ExitCode;
 
-use fix_lsp::{Args, SERVER_NAME, SERVER_VERSION};
+use venue_reader::{Args, SERVER_NAME, SERVER_VERSION};
 
 const USAGE: &str = "\
-Usage: fix-lsp --stdio [options]
+Usage: venue-reader --stdio [options]
 
 Options:
   --stdio                 Communicate over stdin/stdout (required)
@@ -15,7 +15,7 @@ Options:
 
 fn main() -> ExitCode {
     match parse(std::env::args().skip(1)) {
-        Ok(Some(args)) => fix_lsp::run(args),
+        Ok(Some(args)) => venue_reader::run(args),
         Ok(None) => ExitCode::SUCCESS, // --version / --help already printed
         Err(msg) => {
             eprintln!("{SERVER_NAME}: {msg}\n\n{USAGE}");

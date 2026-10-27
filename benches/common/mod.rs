@@ -11,9 +11,9 @@
 
 use std::sync::Arc;
 
-use fix_lsp::config::Config;
-use fix_lsp::ctx::Ctx;
-use fix_lsp::dictionary::Registry;
+use venue_reader::config::Config;
+use venue_reader::ctx::Ctx;
+use venue_reader::dictionary::Registry;
 use xxhash_rust::xxh3::xxh3_64;
 
 const DEFAULT_LINES: usize = 100_000;
@@ -98,7 +98,7 @@ fn generate(lines: usize) -> Vec<u8> {
 }
 
 pub fn corpus() -> Vec<u8> {
-    let lines = std::env::var("FIX_LSP_BENCH_LINES")
+    let lines = std::env::var("VENUE_READER_BENCH_LINES")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_LINES);

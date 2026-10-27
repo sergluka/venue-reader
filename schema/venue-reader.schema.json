@@ -1,10 +1,10 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/sergluka/fix-lsp/schema/fix-lsp-user.schema.json",
-  "title": "fix-lsp user-wide TOML configuration",
-  "description": "Schema after removing known foreign editor settings. The user-wide fix-lsp/config.toml provides personal defaults below global LSP settings; the README states where it lives. Unknown server keys reject the file. No file or dictionary version field exists.",
+  "$id": "https://github.com/sergluka/venue-reader/schema/venue-reader.schema.json",
+  "title": "Venue Reader configuration",
+  "description": "Configuration for the Venue Reader server, sent under the `fix` section. Reusable by editor extensions (e.g. a VS Code `contributes.configuration`).",
   "type": "object",
-  "additionalProperties": false,
+  "additionalProperties": true,
   "properties": {
     "dictionaries": {
       "type": "array",
@@ -186,8 +186,7 @@
           }
         }
       },
-      "x-fix-lsp-scope": "user-document",
-      "additionalProperties": false
+      "x-venue-reader-scope": "user-document"
     },
     "messageSummary": {
       "type": "object",
@@ -210,8 +209,7 @@
               "type": "boolean",
               "default": false
             }
-          },
-          "additionalProperties": false
+          }
         },
         "template": {
           "type": "string",
@@ -222,8 +220,7 @@
           "default": true
         }
       },
-      "x-fix-lsp-scope": "user-document",
-      "additionalProperties": false
+      "x-venue-reader-scope": "user-document"
     },
     "diagnostics": {
       "type": "object",
@@ -296,8 +293,7 @@
           "additionalProperties": false
         }
       },
-      "x-fix-lsp-scope": "user-document",
-      "additionalProperties": false
+      "x-venue-reader-scope": "user-document"
     },
     "hover": {
       "allOf": [
@@ -308,7 +304,7 @@
       "default": {
         "enabled": true
       },
-      "x-fix-lsp-scope": "user-document"
+      "x-venue-reader-scope": "user-document"
     },
     "semanticTokens": {
       "allOf": [
@@ -319,7 +315,7 @@
       "default": {
         "enabled": true
       },
-      "x-fix-lsp-scope": "user-document"
+      "x-venue-reader-scope": "user-document"
     },
     "documentSymbol": {
       "type": "object",
@@ -342,8 +338,7 @@
           "description": "The message symbol's name. Same slots as messageSummary.template; fields, groups and instances are not templated."
         }
       },
-      "x-fix-lsp-scope": "user-document",
-      "additionalProperties": false
+      "x-venue-reader-scope": "user-document"
     },
     "documentLink": {
       "type": "object",
@@ -354,8 +349,7 @@
           "description": "Where a tag's reference page lives. `{tag}` is the tag number; `{version}` is the version as the default site spells it (`4.4`, `5.0`, `5.0.SP1`, `5.0.SP2`; FIXT.1.1 reads its `5.0.SP2` tables); `{fixVersion}` is the line's own version string (`FIX.5.0SP2`, `FIXT.1.1`). A template with `{version}` is linked only for a tag the bundled dictionary of that version defines; any other template links every tag, including a custom dictionary's own. A template that avoids `{version}` also works for versions the default site does not publish. Empty removes the link without disabling hover. Global-only; non-empty URLs must use http or https. Substituted values are percent-encoded."
         }
       },
-      "x-fix-lsp-scope": "user-global",
-      "additionalProperties": false
+      "x-venue-reader-scope": "user-global"
     },
     "overrides": {
       "type": "object",
@@ -370,8 +364,7 @@
         }
       },
       "description": "Global-only source controls; a source cannot disable or enable itself.",
-      "x-fix-lsp-scope": "user-global",
-      "additionalProperties": false
+      "x-venue-reader-scope": "user-global"
     },
     "limits": {
       "type": "object",
@@ -416,14 +409,13 @@
           "minimum": 0
         }
       },
-      "x-fix-lsp-scope": "user-global",
-      "additionalProperties": false
+      "x-venue-reader-scope": "user-global"
     },
     "allowDictionaryPath": {
       "type": "boolean",
       "default": false,
       "description": "Global-only filesystem permission for every external dictionary. Project TOML and modelines cannot enable it.",
-      "x-fix-lsp-scope": "user-global"
+      "x-venue-reader-scope": "user-global"
     },
     "defaultApplVerID": {
       "type": [
@@ -446,7 +438,7 @@
       ],
       "default": null,
       "description": "Canonical application release used when ApplVerID(1128) is absent. A selected complete pair supplies its identity first. No application default is built in.",
-      "x-fix-lsp-scope": "user-document"
+      "x-venue-reader-scope": "user-document"
     }
   },
   "$defs": {
@@ -456,8 +448,7 @@
         "enabled": {
           "type": "boolean"
         }
-      },
-      "additionalProperties": false
+      }
     },
     "label": {
       "type": "object",
@@ -469,8 +460,7 @@
           "type": "string",
           "description": "How the label is written: literal text plus a nameless hole, {}. Each setting draws one thing, so the hole needs no name: for tagNames it is what the tag is called (its group path inside a group, unless groupPaths is off), for enumValues it is what the value means. An empty hole suppresses the whole label including its literals, which is why a tag the dictionary does not define is passed over; a format with no hole is therefore drawn on every field. Write a literal brace by doubling it; the hole may appear more than once and each repeats the same value. The label reaches the client verbatim, newlines included, and what it does with them is the client's."
         }
-      },
-      "additionalProperties": false
+      }
     },
     "rule": {
       "oneOf": [

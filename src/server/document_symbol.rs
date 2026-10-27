@@ -257,7 +257,7 @@ fn answer(wanted: &Wanted, snapshot: &Snapshot, notices: &mut Notices) -> Handle
         notices.log(
             MessageType::Info,
             &format!(
-                "fix-lsp: the outline is truncated at {} symbols; raise \
+                "venue-reader: the outline is truncated at {} symbols; raise \
                  fix.limits.documentSymbolItems or lower fix.documentSymbol.depth",
                 wanted.max_symbols.max(1),
             ),

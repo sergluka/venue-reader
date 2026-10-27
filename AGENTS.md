@@ -1,4 +1,4 @@
-# fix-lsp
+# Venue Reader
 
 An LSP server for FIX protocol logs: one binary, no editor-specific code. What
 follows is what is easy to get wrong here and not visible from any one file.
@@ -102,10 +102,19 @@ follows is what is easy to get wrong here and not visible from any one file.
   is in flight is held and walked once at the commit, so no walk runs under
   rules the batch is about to replace.
 
+## Release status
+
+- The project has not been released to users. Backward compatibility is not
+  required until the first user release.
+- Prefer a clean current design over compatibility aliases, shims, deprecation
+  periods, or automatic migrations.
+- Document current behavior. Do not add migration or retirement guidance for
+  unpublished features.
+
 ## Documentation
 
 - README must describe current behavior, not introduced changes or fixes.
-- After every task, review the sibling `../fix-lsp.wiki` repository and
+- After every task, review the sibling `../venue-reader.wiki` repository and
   update documentation affected by the task before marking it complete.
   Run the wiki documentation tests and link checker after documentation changes.
 

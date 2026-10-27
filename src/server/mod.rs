@@ -103,7 +103,10 @@ impl Startup {
         let loader = external::Loader::start();
         let user = loader.startup(path.clone())?;
         for warning in &user.warnings {
-            eprintln!("fix-lsp: {}: {}", warning.origin.source, warning.message);
+            eprintln!(
+                "venue-reader: {}: {}",
+                warning.origin.source, warning.message
+            );
         }
         Ok(Self { loader, user, path })
     }

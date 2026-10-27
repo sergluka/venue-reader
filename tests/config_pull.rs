@@ -143,7 +143,7 @@ fn a_required_client_configuration_error_is_fatal() {
     client.refuse("workspace/configuration");
     let outcome = client.wait_for_exit();
     assert!(
-        matches!(outcome, fix_lsp::server::ServerExit::Fatal(message) if message.contains("workspace/configuration"))
+        matches!(outcome, venue_reader::server::ServerExit::Fatal(message) if message.contains("workspace/configuration"))
     );
 }
 
@@ -202,7 +202,7 @@ fn application_default_can_be_cleared_and_removed_version_key_stays_unknown() {
 fn project_and_user_application_defaults_change_decoding_and_reject_invalid_files() {
     let fixture = Workspace::new("application-file-defaults");
     let user_file = fixture.write(
-        "personal/fix-lsp/config.toml",
+        "personal/venue-reader/config.toml",
         "defaultApplVerID = 'FIX.5.0'\n",
     );
     let mut client = TestClient::start_with_user_file(Some(user_file.clone()));
@@ -218,7 +218,7 @@ fn project_and_user_application_defaults_change_decoding_and_reject_invalid_file
     );
     assert_application_hover(&mut client, &document, &message, 0, Some("5.0"));
 
-    let project_file = fixture.write(".fix-lsp.toml", "defaultApplVerID = 'FIX.5.0SP1'\n");
+    let project_file = fixture.write(".venue-reader.toml", "defaultApplVerID = 'FIX.5.0SP1'\n");
     client.notify(
         "workspace/didChangeConfiguration",
         json!({"settings":{"fix":{}}}),

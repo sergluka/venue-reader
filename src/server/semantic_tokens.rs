@@ -163,7 +163,7 @@ impl ServerState {
             self.log_message(
                 MessageType::Info,
                 &format!(
-                    "fix-lsp: {} — a viewport over {cap} lines is not coloured; \
+                    "venue-reader: {} — a viewport over {cap} lines is not coloured; \
                      ask for a smaller range, or raise fix.limits.rangeLines",
                     uri.as_str(),
                 ),
@@ -293,7 +293,7 @@ impl ServerState {
             self.log_message(
                 MessageType::Info,
                 &format!(
-                    "fix-lsp: {} — colouring the first {cap} of {lines} lines; \
+                    "venue-reader: {} — colouring the first {cap} of {lines} lines; \
                      raise fix.limits.semanticTokensFullLines to colour more",
                     uri.as_str(),
                 ),

@@ -56,7 +56,7 @@ pub fn init(level: LevelFilter, file: Option<&Path>) {
         Some(p) => match open_log_file(p) {
             Ok(f) => Sink::File(Mutex::new(f)),
             Err(e) => {
-                eprintln!("fix-lsp: cannot open log file {}: {e}", p.display());
+                eprintln!("venue-reader: cannot open log file {}: {e}", p.display());
                 Sink::Stderr
             }
         },
@@ -116,7 +116,8 @@ mod tests {
     #[test]
     fn log_file_is_created_0600() {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join(format!("fix-lsp-log-{}.log", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("venue-reader-log-{}.log", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let f = open_log_file(&path).unwrap();
         let mode = f.metadata().unwrap().permissions().mode() & 0o777;

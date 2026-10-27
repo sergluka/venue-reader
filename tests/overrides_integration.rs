@@ -31,11 +31,11 @@ fn conflicting_child_dictionary_name_is_an_error_before_the_child_path_is_read()
     let fixture = Workspace::new("overrides");
     fixture.write("parent.xml", &dictionary_xml("ParentField"));
     fixture.write(
-        ".fix-lsp.toml",
+        ".venue-reader.toml",
         "dictionary = 'venue'\n[[dictionaries]]\nname = 'venue'\npath = 'parent.xml'\n",
     );
     fixture.write(
-        "logs/.fix-lsp.toml",
+        "logs/.venue-reader.toml",
         "[[dictionaries]]\nname = 'venue'\npath = 'does-not-exist.xml'\ndefault = true\n",
     );
     let mut client = TestClient::start();
@@ -63,7 +63,7 @@ fn independent_project_subtrees_may_define_the_same_dictionary_name() {
     for (directory, name) in [("left", "LeftField"), ("right", "RightField")] {
         fixture.write(&format!("{directory}/dict.xml"), &dictionary_xml(name));
         fixture.write(
-            &format!("{directory}/.fix-lsp.toml"),
+            &format!("{directory}/.venue-reader.toml"),
             "dictionary = 'venue'\n[[dictionaries]]\nname = 'venue'\npath = 'dict.xml'\n",
         );
     }
@@ -98,7 +98,7 @@ fn independent_project_subtrees_may_define_the_same_dictionary_name() {
 fn a_project_direct_path_is_resolved_beside_the_supplying_file() {
     let fixture = Workspace::new("overrides");
     fixture.write("logs/dict.xml", &dictionary_xml("ProjectPathField"));
-    fixture.write("logs/.fix-lsp.toml", "dictionary = './dict.xml'\n");
+    fixture.write("logs/.venue-reader.toml", "dictionary = './dict.xml'\n");
     let mut client = TestClient::start();
     fixture.initialize(
         &mut client,
@@ -130,7 +130,7 @@ fn a_dictionary_selected_by_path_reports_a_refusal_and_a_fault_as_errors() {
             r#"<component name="Instrumnt" required="N"/>"#,
         ),
     );
-    fixture.write("logs/.fix-lsp.toml", "dictionary = './broken.xml'\n");
+    fixture.write("logs/.venue-reader.toml", "dictionary = './broken.xml'\n");
     fixture.write(
         "logs/doubled.xml",
         &dictionary_xml("DoubledField").replace(
@@ -215,7 +215,7 @@ fn a_dictionary_selected_by_path_reports_a_refusal_and_a_fault_as_errors() {
 fn project_dictionary_definitions_are_refused_without_filesystem_permission() {
     let fixture = Workspace::new("overrides");
     fixture.write(
-        ".fix-lsp.toml",
+        ".venue-reader.toml",
         "[[dictionaries]]\nname = 'blocked-venue'\npath = 'does-not-exist.xml'\n",
     );
     let mut client = TestClient::start();
@@ -299,7 +299,7 @@ fn twenty_documents_share_one_project_dictionary_within_the_batch_deadline() {
     let fixture = Workspace::new("shared-project-dictionary");
     fixture.write("dict.xml", &dictionary_xml("SharedField"));
     fixture.write(
-        ".fix-lsp.toml",
+        ".venue-reader.toml",
         "[[dictionaries]]\nname = 'shared'\npath = 'dict.xml'\ndefault = true\n",
     );
     let mut client = fixture.client(json!({
@@ -402,7 +402,7 @@ fn the_uri_less_command_cannot_select_a_project_only_name() {
     let fixture = Workspace::new("overrides");
     fixture.write("dict.xml", &dictionary_xml("ProjectOnly"));
     fixture.write(
-        ".fix-lsp.toml",
+        ".venue-reader.toml",
         "[[dictionaries]]\nname = 'project-only'\npath = 'dict.xml'\n",
     );
     let mut client = TestClient::start();
@@ -473,15 +473,15 @@ fn dictionary_version_mismatch_uses_normal_rule_gates_and_one_finding_per_versio
 fn all_layers_merge_sparsely_and_describe_reports_effective_values() {
     let fixture = Workspace::new("overrides");
     let user_file = fixture.write(
-        "personal/fix-lsp/config.toml",
+        "personal/venue-reader/config.toml",
         "hover.enabled = false\ninlayHints.tagNames.enabled = true\ndiagnostics.enabled = false\n",
     );
     fixture.write(
-        ".fix-lsp.toml",
+        ".venue-reader.toml",
         "hover.enabled = false\ninlayHints.enumValues.enabled = true\nformatter.width = 80\n",
     );
     fixture.write(
-        "logs/.fix-lsp.toml",
+        "logs/.venue-reader.toml",
         "inlayHints.tagNames.enabled = false\n",
     );
     let first = fixture.uri("logs/one.fix");
@@ -533,7 +533,7 @@ fn all_layers_merge_sparsely_and_describe_reports_effective_values() {
 fn removing_a_client_leaf_reveals_personal_defaults_without_erasing_other_values() {
     let fixture = Workspace::new("overrides");
     let user_file = fixture.write(
-        "personal/fix-lsp/config.toml",
+        "personal/venue-reader/config.toml",
         "hover.enabled = false\ninlayHints.tagNames.enabled = true\ndiagnostics.enabled = false\n",
     );
     let mut client = TestClient::start_with_user_file(Some(user_file));
@@ -561,10 +561,10 @@ fn removing_a_client_leaf_reveals_personal_defaults_without_erasing_other_values
 fn describe_does_not_reload_edited_user_or_project_toml() {
     let fixture = Workspace::new("overrides");
     let user_file = fixture.write(
-        "personal/fix-lsp/config.toml",
+        "personal/venue-reader/config.toml",
         "inlayHints.tagNames.enabled = true\ndiagnostics.enabled = false\n",
     );
-    let project_file = fixture.write(".fix-lsp.toml", "hover.enabled = false\n");
+    let project_file = fixture.write(".venue-reader.toml", "hover.enabled = false\n");
     let mut client = TestClient::start_with_user_file(Some(user_file.clone()));
     fixture.initialize(&mut client, json!({}));
     let document = fixture.uri("orders.fix");
@@ -588,7 +588,7 @@ fn describe_does_not_reload_edited_user_or_project_toml() {
 #[test]
 fn modeline_only_refresh_reuses_the_committed_project_snapshot() {
     let fixture = Workspace::new("modeline-project-snapshot");
-    let project_file = fixture.write(".fix-lsp.toml", "hover.enabled = false\n");
+    let project_file = fixture.write(".venue-reader.toml", "hover.enabled = false\n");
     let mut client = fixture.client(json!({"diagnostics":{"enabled":false}}));
     let document = fixture.uri("orders.fix");
     client.did_open(&document, MESSAGE, 1);
@@ -610,13 +610,13 @@ fn modeline_only_refresh_reuses_the_committed_project_snapshot() {
 #[test]
 fn project_filters_do_not_stop_ancestor_or_child_merging() {
     let fixture = Workspace::new("overrides");
-    fixture.write(".fix-lsp.toml", "inlayHints.tagNames.enabled = true\n");
+    fixture.write(".venue-reader.toml", "inlayHints.tagNames.enabled = true\n");
     fixture.write(
-        "logs/.fix-lsp.toml",
+        "logs/.venue-reader.toml",
         "files = ['other/*.fix']\nhover.enabled = false\n",
     );
     fixture.write(
-        "logs/venue/.fix-lsp.toml",
+        "logs/venue/.venue-reader.toml",
         "inlayHints.enumValues.enabled = true\n",
     );
     let mut client = TestClient::start();
@@ -676,9 +676,9 @@ fn duplicate_modeline_settings_fall_through_and_repair_clears_errors_with_rules_
 #[test]
 fn duplicate_toml_keys_reject_one_file_and_keep_valid_parent_values() {
     let fixture = Workspace::new("overrides");
-    fixture.write(".fix-lsp.toml", "hover.enabled = false\n");
+    fixture.write(".venue-reader.toml", "hover.enabled = false\n");
     fixture.write(
-        "logs/.fix-lsp.toml",
+        "logs/.venue-reader.toml",
         "hover.enabled = true\nhover.enabled = true\n",
     );
     let mut client = TestClient::start();
@@ -698,7 +698,7 @@ fn duplicate_toml_keys_reject_one_file_and_keep_valid_parent_values() {
 fn document_sources_cannot_enable_filesystem_dictionaries_or_change_global_url() {
     let fixture = Workspace::new("overrides");
     fixture.write(
-        ".fix-lsp.toml",
+        ".venue-reader.toml",
         "allowDictionaryPath = true\ndocumentLink.url = 'https://project.invalid/{tag}'\n",
     );
     let mut client = TestClient::start();
@@ -726,7 +726,7 @@ fn document_sources_cannot_enable_filesystem_dictionaries_or_change_global_url()
 #[test]
 fn disabling_file_sources_removes_their_values_and_configuration_warnings() {
     let fixture = Workspace::new("overrides");
-    fixture.write(".fix-lsp.toml", "hover.enabled = false\n");
+    fixture.write(".venue-reader.toml", "hover.enabled = false\n");
     let mut client = TestClient::start();
     fixture.initialize(&mut client, json!({"diagnostics":{"enabled":false}}));
     let document = fixture.uri("orders.fix");

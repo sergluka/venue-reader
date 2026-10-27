@@ -1,4 +1,4 @@
-<!-- Synthetic QuickFIX dictionary written for fix-lsp's tests (Apache-2.0, like
+<!-- Synthetic QuickFIX dictionary written for Venue Reader tests (Apache-2.0, like
      the rest of the repository). Shapes exercised: header/trailer sections,
      a non-repeating component referenced from messages, a group declared
      directly in a message with a nested group, custom high-numbered tags. -->

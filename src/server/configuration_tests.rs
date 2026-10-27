@@ -72,12 +72,12 @@ fn global_updates_during_loading_coalesce_to_the_latest_value() {
 #[test]
 fn workspace_changes_during_loading_rediscover_with_the_committed_global_settings() {
     let directory = std::env::temp_dir().join(format!(
-        "fix-lsp-workspace-during-load-{}",
+        "venue-reader-workspace-during-load-{}",
         std::process::id()
     ));
     std::fs::create_dir_all(directory.join("logs")).unwrap();
     std::fs::write(
-        directory.join(".fix-lsp.toml"),
+        directory.join(".venue-reader.toml"),
         "semanticTokens.enabled = false",
     )
     .unwrap();
@@ -352,8 +352,10 @@ fn a_client_configuration_error_is_fatal_without_committing() {
 
 #[test]
 fn describe_does_not_observe_unrefreshed_user_file_changes() {
-    let directory =
-        std::env::temp_dir().join(format!("fix-lsp-describe-readonly-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!(
+        "venue-reader-describe-readonly-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("config.toml");
     std::fs::write(&path, "[hover]\nenabled = false\n").unwrap();

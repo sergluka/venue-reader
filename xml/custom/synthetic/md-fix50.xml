@@ -1,4 +1,4 @@
-<!-- Synthetic QuickFIX dictionary written for fix-lsp's tests (Apache-2.0).
+<!-- Synthetic QuickFIX dictionary written for Venue Reader tests (Apache-2.0).
      Shapes exercised: an empty header, a group declared directly in one message
      and reachable only through a component in another, a component referenced
      from inside a group, and a component that is defined but never referenced

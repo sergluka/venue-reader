@@ -8,14 +8,14 @@
 
 mod harness;
 
-use fix_lsp::codec::LineAnalysis;
-use fix_lsp::config::Diagnostics;
-use fix_lsp::ctx::analyze;
-use fix_lsp::rules::{integrity, LineCtx, Registry, Scope};
+use venue_reader::codec::LineAnalysis;
+use venue_reader::config::Diagnostics;
+use venue_reader::ctx::analyze;
+use venue_reader::rules::{integrity, LineCtx, Registry, Scope};
 
 /// The one rule a repair answers to.
 const INTEGRITY: Scope = Scope {
-    labels: fix_lsp::ctx::Labels {
+    labels: venue_reader::ctx::Labels {
         transport: None,
         application: None,
     },

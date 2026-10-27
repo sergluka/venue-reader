@@ -28,7 +28,7 @@ settings, the bundled dictionaries suffice; no external files or modelines
 are required.
 
 BodyLength(9) and CheckSum(10) are calculated from wire bytes with SOH separators.
-The pipe files replace SOH with `|` for readability; fix-lsp normalizes those
+The pipe files replace SOH with `|` for readability; Venue Reader normalizes those
 separators for integrity checks. The SOH file contains actual control bytes.
 Comments and line-ending bytes are outside each framed message.
 

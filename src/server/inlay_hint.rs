@@ -72,7 +72,7 @@ impl ServerState {
             self.log_message(
                 lsp_types::MessageType::Info,
                 &format!(
-                    "fix-lsp: {} — inlay hints over {} lines are not answered; \
+                    "venue-reader: {} — inlay hints over {} lines are not answered; \
                      ask for a smaller range",
                     uri.as_str(),
                     wanted.cap

@@ -874,7 +874,7 @@ fn mismatching_modern_fix4_pair_does_not_activate_another_modern_default() {
 #[test]
 fn project_and_modeline_selection_override_the_session_command() {
     let workspace = Workspace::new("version-selection");
-    workspace.write(".fix-lsp.toml", "dictionary = \"FIX.5.0SP1\"\n");
+    workspace.write(".venue-reader.toml", "dictionary = \"FIX.5.0SP1\"\n");
     let uri = workspace.uri("selected.fix");
     let body = frame("FIXT.1.1", "35=D|54=1|");
     let mut client = workspace.client(json!({}));

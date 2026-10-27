@@ -11,7 +11,7 @@ use super::{parse_structured, Origin, SettingsLayer, SourceKind, Warning};
 use crate::config::Severity;
 
 pub const MAX_TOML_BYTES: u64 = 1_048_576;
-pub const FILE_NAME: &str = ".fix-lsp.toml";
+pub const FILE_NAME: &str = ".venue-reader.toml";
 
 #[derive(Debug, Clone)]
 pub struct ProjectFile {
@@ -309,7 +309,7 @@ mod tests {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let directory = std::env::temp_dir().join(format!(
-                "fix-lsp-config-{}-{}",
+                "venue-reader-config-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
@@ -483,7 +483,7 @@ mod tests {
     fn toml_merges_native_tables_with_file_origins() {
         let file = parse(
             "dictionary = 'venue'\n[hover]\nenabled = false\n",
-            Path::new("/work/.fix-lsp.toml"),
+            Path::new("/work/.venue-reader.toml"),
         )
         .unwrap();
         assert_eq!(file.layer.get("hover.enabled"), Some(&json!(false)));
@@ -498,7 +498,7 @@ mod tests {
     fn multiline_templates_keep_the_file_as_their_source() {
         let text =
             "hover.enabled = false\nmessageSummary.template = '''\nhover.enabled = true\n'''\n";
-        let file = parse(text, Path::new("/work/.fix-lsp.toml")).unwrap();
+        let file = parse(text, Path::new("/work/.venue-reader.toml")).unwrap();
         assert_eq!(
             file.layer.candidate("hover.enabled").unwrap().origin.line,
             0
@@ -523,13 +523,13 @@ mod tests {
             "dictionary = unset",
         ] {
             assert!(
-                parse(text, Path::new("/work/.fix-lsp.toml")).is_err(),
+                parse(text, Path::new("/work/.venue-reader.toml")).is_err(),
                 "{text}"
             );
         }
         let file = parse(
             "formatter.width = 80\nrender.summary.position = 'above'\nhover.enabled = false",
-            Path::new("/work/.fix-lsp.toml"),
+            Path::new("/work/.venue-reader.toml"),
         )
         .unwrap();
         assert_eq!(file.layer.candidates.len(), 1);
@@ -540,7 +540,7 @@ mod tests {
     fn global_only_candidates_warn_without_rejecting_local_settings() {
         let file = parse(
             "allowDictionaryPath = true\nhover.enabled = false",
-            Path::new("/work/.fix-lsp.toml"),
+            Path::new("/work/.venue-reader.toml"),
         )
         .unwrap();
         assert_eq!(file.layer.candidates.len(), 1);
@@ -549,14 +549,18 @@ mod tests {
 
     #[test]
     fn glob_matching_is_anchored_case_sensitive_and_separator_aware() {
-        let file = parse("files = ['logs/*.fix']", Path::new("/work/.fix-lsp.toml")).unwrap();
+        let file = parse(
+            "files = ['logs/*.fix']",
+            Path::new("/work/.venue-reader.toml"),
+        )
+        .unwrap();
         assert!(file.matches(Path::new("/work/logs/a.fix")));
         assert!(!file.matches(Path::new("/work/logs/nested/a.fix")));
         assert!(!file.matches(Path::new("/work/logs/A.FIX")));
         assert!(!file.matches(Path::new("/work/else/logs/a.fix")));
         let deep = parse(
             "files = ['logs/**/*.fix']",
-            Path::new("/work/.fix-lsp.toml"),
+            Path::new("/work/.venue-reader.toml"),
         )
         .unwrap();
         assert!(deep.matches(Path::new("/work/logs/a.fix")));
@@ -567,7 +571,7 @@ mod tests {
             "files = ['/a']",
             "files = ['[']",
         ] {
-            assert!(parse(text, Path::new("/work/.fix-lsp.toml")).is_err());
+            assert!(parse(text, Path::new("/work/.venue-reader.toml")).is_err());
         }
     }
 }

@@ -58,7 +58,7 @@ pub type Config = UserConfig;
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ConfigOverrides {
-    /// Whether discovered `.fix-lsp.toml` files contribute project layers.
+    /// Whether discovered `.venue-reader.toml` files contribute project layers.
     pub project_config: bool,
     /// Whether edge modelines contribute a document-local layer.
     pub modeline: bool,

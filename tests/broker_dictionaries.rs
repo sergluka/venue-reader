@@ -1,10 +1,10 @@
 //! Opt-in check against real broker dictionaries that are not vendored (their
-//! publishers grant no redistribution right). Point `FIX_LSP_BROKER_DICTS` at a
+//! publishers grant no redistribution right). Point `VENUE_READER_BROKER_DICTS` at a
 //! directory of downloaded QuickFIX XML files and run with `-- --ignored`.
 
 use std::path::{Path, PathBuf};
 
-use fix_lsp::dictionary::parse_quickfix;
+use venue_reader::dictionary::parse_quickfix;
 
 fn xml_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
@@ -18,9 +18,9 @@ fn xml_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-#[ignore = "needs FIX_LSP_BROKER_DICTS pointing at locally downloaded dictionaries"]
+#[ignore = "needs VENUE_READER_BROKER_DICTS pointing at locally downloaded dictionaries"]
 fn every_downloaded_broker_dictionary_parses_with_a_version() {
-    let dir = std::env::var_os("FIX_LSP_BROKER_DICTS").expect("set FIX_LSP_BROKER_DICTS");
+    let dir = std::env::var_os("VENUE_READER_BROKER_DICTS").expect("set VENUE_READER_BROKER_DICTS");
     let mut files = Vec::new();
     xml_files(Path::new(&dir), &mut files);
     assert!(

@@ -835,11 +835,13 @@ fn the_diagnostic_and_hover_agree_on_a_tag() {
 /// repair, as `tests/fixtures.rs` frames its lines.
 fn repaired(line: &str) -> String {
     let ctx = harness::test_ctx();
-    let analysis = fix_lsp::ctx::analyze(line.as_bytes(), &ctx);
+    let analysis = venue_reader::ctx::analyze(line.as_bytes(), &ctx);
     let message = analysis.message().expect("a message");
-    let repair =
-        fix_lsp::rules::integrity::repair(&fix_lsp::rules::LineCtx::new(line.as_bytes(), message))
-            .expect("a repair");
+    let repair = venue_reader::rules::integrity::repair(&venue_reader::rules::LineCtx::new(
+        line.as_bytes(),
+        message,
+    ))
+    .expect("a repair");
     String::from_utf8(harness::apply_edits(line.as_bytes(), &repair.edits)).unwrap()
 }
 

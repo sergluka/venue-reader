@@ -7,7 +7,7 @@
 mod common;
 
 use common::{context, corpus, report, rss, BUDGET};
-use fix_lsp::document::Document;
+use venue_reader::document::Document;
 
 fn main() {
     let ctx = context();

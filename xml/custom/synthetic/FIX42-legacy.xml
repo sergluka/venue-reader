@@ -1,4 +1,4 @@
-<!-- Synthetic QuickFIX dictionary written for fix-lsp's tests (Apache-2.0).
+<!-- Synthetic QuickFIX dictionary written for Venue Reader tests (Apache-2.0).
      Older generator conventions: capitalised section names, `tag=` instead of
      `number=`, `value=`/`name=` on enum values, no servicepack attribute. -->
 <FIX major='4' minor='2'>

@@ -56,7 +56,7 @@ fn configured_missing_dictionary_is_fatal() {
 
     client.did_open_unready("untitled:configured", "8=FIX.4.4|35=0|", 1);
     assert!(
-        matches!(client.wait_for_exit(), fix_lsp::server::ServerExit::Fatal(message) if message.contains("x.xml"))
+        matches!(client.wait_for_exit(), venue_reader::server::ServerExit::Fatal(message) if message.contains("x.xml"))
     );
 }
 
@@ -216,8 +216,10 @@ fn a_blank_name_rejects_initial_configuration_until_a_valid_update() {
 
 #[test]
 fn removing_a_previously_loaded_dictionary_is_fatal_on_refresh() {
-    let directory =
-        std::env::temp_dir().join(format!("fix-lsp-dictionary-refresh-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!(
+        "venue-reader-dictionary-refresh-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("dictionary.xml");
     std::fs::write(&path, "<fix major='4' minor='4'><messages><message name='NewOrderSingle' msgtype='D' msgcat='app'/></messages><fields/></fix>").unwrap();
@@ -233,7 +235,7 @@ fn removing_a_previously_loaded_dictionary_is_fatal_on_refresh() {
     );
     client.answer("workspace/configuration", json!([settings]));
     assert!(
-        matches!(client.wait_for_exit(), fix_lsp::server::ServerExit::Fatal(message) if message.contains("dictionary.xml"))
+        matches!(client.wait_for_exit(), venue_reader::server::ServerExit::Fatal(message) if message.contains("dictionary.xml"))
     );
     std::fs::remove_dir(directory).unwrap();
 }

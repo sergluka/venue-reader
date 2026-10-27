@@ -21,8 +21,8 @@
 mod common;
 
 use common::{context, corpus, report, rss};
-use fix_lsp::config::Config;
-use fix_lsp::document::Document;
+use venue_reader::config::Config;
+use venue_reader::document::Document;
 
 /// What a screen is to the loop: one request, then one sweep.
 const VIEWPORT: usize = 50;

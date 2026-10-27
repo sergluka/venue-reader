@@ -14,7 +14,7 @@ fn location(config_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> 
         .filter(|directory| directory.is_absolute())
         .map(Path::to_path_buf)
         .or_else(|| home.map(|directory| directory.join(".config")))?;
-    Some(directory.join("fix-lsp").join(FILE_NAME))
+    Some(directory.join("venue-reader").join(FILE_NAME))
 }
 
 /// The location for this process. The only place the configuration directory is
@@ -48,18 +48,18 @@ mod tests {
         });
         assert_eq!(
             location(Some(config_home), Some(home_directory)),
-            Some(config_home.join("fix-lsp").join("config.toml"))
+            Some(config_home.join("venue-reader").join("config.toml"))
         );
         assert_eq!(
             location(Some(config_home), None),
-            Some(config_home.join("fix-lsp").join("config.toml"))
+            Some(config_home.join("venue-reader").join("config.toml"))
         );
         assert_eq!(
             location(None, Some(home_directory)),
             Some(
                 home_directory
                     .join(".config")
-                    .join("fix-lsp")
+                    .join("venue-reader")
                     .join("config.toml")
             )
         );
@@ -79,7 +79,7 @@ mod tests {
                 Some(
                     home_directory
                         .join(".config")
-                        .join("fix-lsp")
+                        .join("venue-reader")
                         .join("config.toml")
                 ),
                 "{value:?}"
@@ -91,7 +91,7 @@ mod tests {
                 Some(
                     home_directory
                         .join(".config")
-                        .join("fix-lsp")
+                        .join("venue-reader")
                         .join("config.toml")
                 )
             );
@@ -103,7 +103,7 @@ mod tests {
     fn sparse_client_leaves_do_not_erase_user_defaults() {
         let user = parse(
             "hover.enabled = false\ninlayHints.tagNames.enabled = true\nallowDictionaryPath = true",
-            Path::new("/home/test/.config/fix-lsp/config.toml"),
+            Path::new("/home/test/.config/venue-reader/config.toml"),
         )
         .unwrap();
         let client = parse_client(json!({"hover": {"enabled": true}})).unwrap();
@@ -124,7 +124,11 @@ mod tests {
             "defaultVersion = 'FIX.4.4'",
         ] {
             assert!(
-                parse(text, Path::new("/home/test/.config/fix-lsp/config.toml")).is_err(),
+                parse(
+                    text,
+                    Path::new("/home/test/.config/venue-reader/config.toml")
+                )
+                .is_err(),
                 "{text}"
             );
         }
@@ -138,7 +142,7 @@ mod tests {
     fn dictionary_versions_are_not_a_config_setting() {
         assert!(parse(
             "[[dictionaries]]\nname='venue'\npath='dict.xml'\nversion='FIX.4.4'",
-            Path::new("/home/test/.config/fix-lsp/config.toml")
+            Path::new("/home/test/.config/venue-reader/config.toml")
         )
         .is_err());
     }

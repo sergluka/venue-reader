@@ -75,7 +75,7 @@ impl ServerState {
             self.log_message(
                 MessageType::Info,
                 &format!(
-                    "fix-lsp: {} — selectionRange over {cap} lines is answered with whole \
+                    "venue-reader: {} — selectionRange over {cap} lines is answered with whole \
                      lines only; raise fix.limits.rangeLines to change that",
                     uri.as_str(),
                 ),

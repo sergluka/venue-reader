@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use fix_lsp::dictionary::bundle::{enrich, parse_metadata};
-use fix_lsp::dictionary::parse::Source;
-use fix_lsp::dictionary::schema::{Schema, Scope};
-use fix_lsp::dictionary::statics::TAGS;
-use fix_lsp::dictionary::{bundled, parse_quickfix, Dict, ParsedDict, Version};
+use venue_reader::dictionary::bundle::{enrich, parse_metadata};
+use venue_reader::dictionary::parse::Source;
+use venue_reader::dictionary::schema::{Schema, Scope};
+use venue_reader::dictionary::statics::TAGS;
+use venue_reader::dictionary::{bundled, parse_quickfix, Dict, ParsedDict, Version};
 
 const XML: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/xml");
 

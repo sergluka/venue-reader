@@ -29,9 +29,9 @@ mod common;
 mod config_ready;
 
 use common::generate_lines;
-use fix_lsp::document::stats;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{json, Value};
+use venue_reader::document::stats;
 
 /// Big enough that a scroll leaves most of it untouched, small enough that the
 /// lens phase can see a list. Not the 100k corpus: the point of the lens phase
@@ -145,7 +145,7 @@ fn check(phases: &[Phase]) {
 fn run(resolve_everything: bool) -> Vec<Phase> {
     let text = String::from_utf8(generate_lines(LINES as usize)).expect("the corpus is ASCII");
     let (server_conn, client) = Connection::memory();
-    let server = std::thread::spawn(move || fix_lsp::server::main_loop(server_conn));
+    let server = std::thread::spawn(move || venue_reader::server::main_loop(server_conn));
     let mut id = 0;
     let mut next = || {
         id += 1;

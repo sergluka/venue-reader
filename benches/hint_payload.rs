@@ -94,7 +94,7 @@ struct Measured {
 fn measure(defers_tooltips: bool) -> Measured {
     let text = String::from_utf8(generate_lines(AT_CAP as usize)).expect("the corpus is ASCII");
     let (server_conn, client) = Connection::memory();
-    let server = std::thread::spawn(move || fix_lsp::server::main_loop(server_conn));
+    let server = std::thread::spawn(move || venue_reader::server::main_loop(server_conn));
 
     request(
         &client,

@@ -1,4 +1,4 @@
-//! `fix-lsp` — editor-independent LSP server for FIX protocol logs.
+//! Venue Reader — editor-independent LSP server for FIX protocol logs.
 //!
 //! Stage 1 is the server skeleton: byte-safe transport, a resilient main loop,
 //! an incremental document model, the configuration pull flow, and a hover stub.
@@ -20,7 +20,7 @@ pub mod transport;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-pub const SERVER_NAME: &str = "fix-lsp";
+pub const SERVER_NAME: &str = "venue-reader";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Parsed command-line arguments.
@@ -41,7 +41,7 @@ pub fn run(args: Args) -> ExitCode {
     let startup = match server::Startup::load(path) {
         Ok(startup) => startup,
         Err(error) => {
-            eprintln!("fix-lsp: {error}");
+            eprintln!("venue-reader: {error}");
             return ExitCode::FAILURE;
         }
     };

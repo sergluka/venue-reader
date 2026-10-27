@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/sergluka/fix-lsp/schema/fix-lsp-project.schema.json",
-  "title": "fix-lsp project TOML configuration",
-  "description": "Schema after removing known foreign editor settings and rejecting global-only candidates with a warning. Each matching .fix-lsp.toml is a layer, merged root-to-leaf. No format version or dictionary version field exists.",
+  "$id": "https://github.com/sergluka/venue-reader/schema/venue-reader-user.schema.json",
+  "title": "Venue Reader user-wide TOML configuration",
+  "description": "Schema after removing known foreign editor settings. The user-wide venue-reader/config.toml provides personal defaults below global LSP settings; the README states where it lives. Unknown server keys reject the file. No file or dictionary version field exists.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -186,7 +186,7 @@
           }
         }
       },
-      "x-fix-lsp-scope": "user-document",
+      "x-venue-reader-scope": "user-document",
       "additionalProperties": false
     },
     "messageSummary": {
@@ -222,7 +222,7 @@
           "default": true
         }
       },
-      "x-fix-lsp-scope": "user-document",
+      "x-venue-reader-scope": "user-document",
       "additionalProperties": false
     },
     "diagnostics": {
@@ -296,7 +296,7 @@
           "additionalProperties": false
         }
       },
-      "x-fix-lsp-scope": "user-document",
+      "x-venue-reader-scope": "user-document",
       "additionalProperties": false
     },
     "hover": {
@@ -308,7 +308,7 @@
       "default": {
         "enabled": true
       },
-      "x-fix-lsp-scope": "user-document"
+      "x-venue-reader-scope": "user-document"
     },
     "semanticTokens": {
       "allOf": [
@@ -319,7 +319,7 @@
       "default": {
         "enabled": true
       },
-      "x-fix-lsp-scope": "user-document"
+      "x-venue-reader-scope": "user-document"
     },
     "documentSymbol": {
       "type": "object",
@@ -342,22 +342,88 @@
           "description": "The message symbol's name. Same slots as messageSummary.template; fields, groups and instances are not templated."
         }
       },
-      "x-fix-lsp-scope": "user-document",
+      "x-venue-reader-scope": "user-document",
       "additionalProperties": false
     },
-    "dictionary": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Select a bundled/global/project dictionary name, or an allowed path. Relative selector paths must start with ./, ../, or ~/; other relative strings are names. This does not restrict dictionaries[].path."
-    },
-    "files": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "string",
-        "minLength": 1
+    "documentLink": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "default": "https://www.onixs.biz/fix-dictionary/{version}/tagNum_{tag}.html",
+          "description": "Where a tag's reference page lives. `{tag}` is the tag number; `{version}` is the version as the default site spells it (`4.4`, `5.0`, `5.0.SP1`, `5.0.SP2`; FIXT.1.1 reads its `5.0.SP2` tables); `{fixVersion}` is the line's own version string (`FIX.5.0SP2`, `FIXT.1.1`). A template with `{version}` is linked only for a tag the bundled dictionary of that version defines; any other template links every tag, including a custom dictionary's own. A template that avoids `{version}` also works for versions the default site does not publish. Empty removes the link without disabling hover. Global-only; non-empty URLs must use http or https. Substituted values are percent-encoded."
+        }
       },
-      "description": "Optional anchored case-sensitive glob filters relative to this directory; * and ? do not cross /, ** does. Absolute and escaping patterns are errors."
+      "x-venue-reader-scope": "user-global",
+      "additionalProperties": false
+    },
+    "overrides": {
+      "type": "object",
+      "properties": {
+        "modeline": {
+          "type": "boolean",
+          "default": true
+        },
+        "projectConfig": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "description": "Global-only source controls; a source cannot disable or enable itself.",
+      "x-venue-reader-scope": "user-global",
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "rangeLines": {
+          "type": "integer",
+          "default": 2000,
+          "description": "Largest span of lines any ranged request will answer about: a code action, an inlay hint, an expanded selection, a coloured viewport. Each request decides for itself what happens past it.",
+          "minimum": 0
+        },
+        "semanticTokensFullLines": {
+          "type": "integer",
+          "default": 2000,
+          "description": "How many lines from the top a whole-document colouring answers about; past it the tail is uncoloured and one log line says so. 2000 is about 255000 tokens on a dense log, which is what a client can rebuild per response without a heap it cannot afford — the server itself colours the whole file in half a second.",
+          "minimum": 0
+        },
+        "codeLensLines": {
+          "type": "integer",
+          "default": 20000,
+          "minimum": 0
+        },
+        "documentSymbolItems": {
+          "type": "integer",
+          "default": 50000,
+          "minimum": 1,
+          "description": "Largest number of symbols one outline may hold, the truncation marker included. A cap of zero cannot hold the marker it would need."
+        },
+        "diagnosticsPerDocument": {
+          "type": "integer",
+          "default": 10000,
+          "minimum": 0
+        },
+        "dictionaryBytes": {
+          "type": "integer",
+          "default": 16777216,
+          "minimum": 0
+        },
+        "cachedLines": {
+          "type": "integer",
+          "default": 4000,
+          "description": "How many lines of one document may keep their analysis cached before the least recently read are dropped; never applied below rangeLines. About 440 bytes a line.",
+          "minimum": 0
+        }
+      },
+      "x-venue-reader-scope": "user-global",
+      "additionalProperties": false
+    },
+    "allowDictionaryPath": {
+      "type": "boolean",
+      "default": false,
+      "description": "Global-only filesystem permission for every external dictionary. Project TOML and modelines cannot enable it.",
+      "x-venue-reader-scope": "user-global"
     },
     "defaultApplVerID": {
       "type": [
@@ -380,7 +446,7 @@
       ],
       "default": null,
       "description": "Canonical application release used when ApplVerID(1128) is absent. A selected complete pair supplies its identity first. No application default is built in.",
-      "x-fix-lsp-scope": "user-document"
+      "x-venue-reader-scope": "user-document"
     }
   },
   "$defs": {

@@ -8,16 +8,29 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use stdio_harness::StdioClient;
 
-const RAW_BYTE_MARKER: &str = "FIX_LSP_RAW_BYTE";
+const RAW_BYTE_MARKER: &str = "VENUE_READER_RAW_BYTE";
 
 #[test]
 fn version_flag_prints_and_exits() {
-    let output = Command::new(env!("CARGO_BIN_EXE_fix-lsp"))
+    let output = Command::new(env!("CARGO_BIN_EXE_venue-reader"))
         .arg("--version")
         .output()
         .expect("run --version");
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("fix-lsp"));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "venue-reader 0.1.0\n"
+    );
+}
+
+#[test]
+fn help_flag_names_the_executable() {
+    let output = Command::new(env!("CARGO_BIN_EXE_venue-reader"))
+        .arg("--help")
+        .output()
+        .expect("run --help");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("Usage: venue-reader --stdio"));
 }
 
 #[test]
@@ -57,7 +70,7 @@ fn a_real_client_round_trips_the_full_stdio_lifecycle() {
             }
         }),
     );
-    assert_eq!(initialize["serverInfo"]["name"], "fix-lsp");
+    assert_eq!(initialize["serverInfo"]["name"], "venue-reader");
     assert_eq!(initialize["capabilities"]["positionEncoding"], "utf-8");
     assert_eq!(initialize["capabilities"]["hoverProvider"], true);
     assert!(initialize["capabilities"]["inlayHintProvider"].is_object());
@@ -98,6 +111,11 @@ fn a_real_client_round_trips_the_full_stdio_lifecycle() {
             && diagnostic_codes(params).contains(&"checkSum")
     });
     assert_eq!(diagnostics["version"], 1);
+    assert!(diagnostics["diagnostics"]
+        .as_array()
+        .expect("diagnostic array")
+        .iter()
+        .all(|diagnostic| diagnostic["source"] == "fix"));
 
     let raw_line_number = bad_both.lines().count() as u32;
     let raw_line_bytes = raw_line.replace(RAW_BYTE_MARKER, "x");
@@ -178,7 +196,7 @@ fn unanswered_configuration_exits_nonzero_without_waiting_for_stdin_to_close() {
         "initialize",
         json!({ "capabilities": { "workspace": { "configuration": true } } }),
     );
-    assert_eq!(initialize["serverInfo"]["name"], "fix-lsp");
+    assert_eq!(initialize["serverInfo"]["name"], "venue-reader");
     client.notify("initialized", json!({}));
 
     let status = client.wait_for_exit(Duration::from_secs(5));
@@ -223,50 +241,95 @@ fn without_xdg_config_home_the_personal_file_comes_from_the_home_default() {
 }
 
 #[test]
-fn old_personal_config_paths_are_ignored() {
+fn personal_configuration_and_fix_initialization_options_reach_fix_commands() {
     for in_config_home in [true, false] {
+        let personal_config = Some("inlayHints.tagNames.format = '<{}>'\n");
         let mut client = if in_config_home {
-            StdioClient::start("old-xdg-config", None, None)
+            StdioClient::start("xdg-personal-config", personal_config, None)
         } else {
-            StdioClient::start_without_config_home("old-home-config", None, None)
+            StdioClient::start_without_config_home("home-personal-config", personal_config, None)
         };
-        assert!(!client.personal_file().exists());
-        let old_file = client
-            .personal_file()
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("configuration base directory")
-            .join("fix-lsp.toml");
-        std::fs::write(&old_file, "hover.enabled = false\n").expect("write old configuration");
-
-        let message = include_str!("fixtures/validation/valid.fix");
+        let message = "8=FIX.4.4|35=0|";
         let uri = client.write_workspace("heartbeat.fix", message.as_bytes());
-        client.request("initialize", json!({ "capabilities": {} }));
+        let initialized = client.request(
+            "initialize",
+            json!({
+                "capabilities": {},
+                "initializationOptions": { "fix": {
+                    "inlayHints": { "enumValues": { "format": "[{}]" } }
+                } }
+            }),
+        );
+        assert_eq!(
+            initialized["capabilities"]["executeCommandProvider"]["commands"],
+            json!([
+                "fix.decode",
+                "fix.useDictionary",
+                "fix.describeOverrides",
+                "fix.describeTag"
+            ]),
+        );
         client.notify("initialized", json!({}));
         client.notify(
             "textDocument/didOpen",
             json!({
                 "textDocument": {
-                    "uri": uri,
-                    "languageId": "fix",
-                    "version": 1,
-                    "text": message
+                    "uri": uri, "languageId": "fix", "version": 1, "text": message
                 }
             }),
         );
         client.wait_for_notification("textDocument/publishDiagnostics", |params| {
             params["uri"] == uri && params["version"] == 1
         });
-        let hover = client.request(
-            "textDocument/hover",
+        let decoded = client.request(
+            "workspace/executeCommand",
             json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": 0, "character": 0 }
+                "command": "fix.decode",
+                "arguments": [uri, [{
+                    "start": { "line": 0, "character": 10 },
+                    "end": { "line": 0, "character": 14 }
+                }]]
             }),
         );
-        assert!(hover["contents"].is_object(), "{hover}");
+        assert_eq!(decoded, "35<MsgType>=0[Heartbeat]");
         assert!(client.shutdown_and_exit().success(), "{}", client.stderr());
     }
+}
+
+#[test]
+fn project_configuration_is_discovered() {
+    let mut client = StdioClient::start("project-configuration", None, None);
+    client.write_workspace(".venue-reader.toml", b"hover.enabled = false\n");
+    let message = include_str!("fixtures/validation/valid.fix");
+    let uri = client.write_workspace("heartbeat.fix", message.as_bytes());
+    client.request(
+        "initialize",
+        json!({ "rootUri": client.root_uri(), "capabilities": {} }),
+    );
+    client.notify("initialized", json!({}));
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "fix",
+                "version": 1,
+                "text": message
+            }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics", |params| {
+        params["uri"] == uri && params["version"] == 1
+    });
+    let hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 0 }
+        }),
+    );
+    assert!(hover.is_null(), "{hover}");
+    assert!(client.shutdown_and_exit().success(), "{}", client.stderr());
 }
 
 fn replace_marker_with_raw_byte(body: &mut Vec<u8>, marker: &[u8], byte: u8) {

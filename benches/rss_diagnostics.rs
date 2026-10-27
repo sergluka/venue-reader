@@ -72,7 +72,7 @@ const URI: &str = "file:///bench.fix";
 
 fn main() {
     let (server_conn, client) = Connection::memory();
-    let server = std::thread::spawn(move || fix_lsp::server::main_loop(server_conn));
+    let server = std::thread::spawn(move || venue_reader::server::main_loop(server_conn));
 
     request(
         &client,

@@ -24,8 +24,8 @@
 mod common;
 
 use common::{context, corpus, report, rss};
-use fix_lsp::config::Config;
-use fix_lsp::document::Document;
+use venue_reader::config::Config;
+use venue_reader::document::Document;
 
 /// The same shape `cache_sequence` drives: forty screens of fifty lines, read
 /// down and then back.

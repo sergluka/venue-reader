@@ -1,4 +1,4 @@
-<!-- Synthetic QuickFIX dictionary written for fix-lsp's tests (Apache-2.0).
+<!-- Synthetic QuickFIX dictionary written for Venue Reader tests (Apache-2.0).
      32 groups nested one inside the next — the only way to reach the
      codec's `MAX_GROUP_DEPTH`, since nesting depth is a property of a
      dictionary and no input line can exceed what its dictionary declares.
