@@ -6,6 +6,21 @@ rust-version = "1.91"
 license = "Apache-2.0"
 description = "LSP server for FIX protocol logs"
 repository = "https://github.com/sergluka/venue-reader"
+include = [
+  "src/**",
+  "tests/**",
+  "xml/**",
+  "schema/**",
+  "build.rs",
+  "Cargo.toml",
+  "Cargo.lock",
+  "README.md",
+  "CHANGELOG.md",
+  "LICENSE",
+  "NOTICE",
+  "THIRD_PARTY_LICENSES.txt",
+  "DEPENDENCY_LICENSES.txt",
+]
 
 [build-dependencies]
 roxmltree = "0.21"

@@ -34,6 +34,23 @@ jobs:
       - run: cargo test --locked --all
       - run: python3 -m unittest discover -s tools
 
+  msrv:
+    name: Minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check MSRV
+        shell: bash
+        run: |
+          minimum_rust_version="$(cargo metadata --locked --no-deps --format-version=1 | jq -er '.packages[0].rust_version')"
+          if [[ "$minimum_rust_version" != *.*.* ]]; then
+            minimum_rust_version="${minimum_rust_version}.0"
+          fi
+          rustup toolchain install "$minimum_rust_version" --profile minimal --no-self-update
+          cargo +"$minimum_rust_version" check --locked --all-targets
+
   ruff:
     name: ruff (tools/)
     runs-on: ubuntu-latest

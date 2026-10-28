@@ -17,3 +17,5 @@ jobs:
     uses: ./.github/workflows/check-release-config.yml
     with:
       plan: ${{ inputs.plan }}
+  package:
+    uses: ./.github/workflows/check-package.yml
