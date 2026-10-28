@@ -48,8 +48,8 @@ FIX5 application messages use `BeginString(8) = FIXT.1.1`, with
 a complete dictionary pair or configure `defaultApplVerID`. There is no built-in
 application default, and the server does not infer one from another log line.
 
-See [FIX versions](../venue-reader.wiki/FIX-Versions.md) for identity resolution and
-[Inspecting logs](../venue-reader.wiki/Inspecting-Logs.md) for input-format limits.
+See [FIX versions](https://github.com/sergluka/venue-reader/wiki/FIX-Versions) for identity resolution and
+[Inspecting logs](https://github.com/sergluka/venue-reader/wiki/Inspecting-Logs) for input-format limits.
 
 ## Build and launch
 
@@ -88,9 +88,39 @@ Installation is per user, in `~/.local/bin` on Linux/macOS and
 configuration or user PATH. Open a new terminal after installation.
 No administrator privileges are needed.
 
-Release archives (`.tar.gz` for Linux/macOS, `.zip` for Windows) remain available
-for manual installation. Extract the archive and put the executable on `PATH`.
-Archive SHA-256 files are included in the release assets.
+The standard cargo-dist shell installer checks archive SHA-256 only when
+`sha256sum` is available; otherwise it skips that check. The PowerShell installer
+does not check archive hashes. Use manual archive verification below when you
+want an explicit checksum check.
+
+### Manual archive installation
+
+After a release, download the archive for your platform and its matching
+`.sha256` file from the same [GitHub Release](https://github.com/sergluka/venue-reader/releases).
+Verify the archive before extracting it.
+
+Linux:
+
+```sh
+sha256sum --check venue-reader-x86_64-unknown-linux-gnu.tar.gz.sha256
+```
+
+macOS (Apple Silicon; use `x86_64-apple-darwin` for Intel):
+
+```sh
+shasum -a 256 --check venue-reader-aarch64-apple-darwin.tar.gz.sha256
+```
+
+Windows PowerShell:
+
+```powershell
+(Get-FileHash .\venue-reader-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
+```
+
+Compare the Windows hash, ignoring letter case, with the first value in the
+matching `.sha256` file. After verification, extract the archive (`.tar.gz` on
+Linux/macOS, `.zip` on Windows) and put the executable on `PATH`, or configure
+your LSP client with its full path.
 
 ### Cargo installation
 
@@ -104,10 +134,11 @@ cargo install --path . --locked
 Or install directly from GitHub:
 
 ```sh
-cargo install --git ssh://git@github.com/sergluka/venue-reader.git --locked
+cargo install --git https://github.com/sergluka/venue-reader.git --locked
 ```
 
 Both commands build from source and do not require a crates.io release.
+GitHub installation requires repository access while the repository is private.
 Cargo installs a release build in `~/.cargo/bin` by default. Add this directory
 to `PATH` if needed. `--locked` uses the dependency versions in `Cargo.lock`.
 
@@ -143,7 +174,7 @@ There is no `--config` option; use the configuration sources below.
 
 Editor setup depends on the client. This repository does not yet provide
 editor-specific installation recipes or an extension. See
-[Running the server](../venue-reader.wiki/Running-the-Server.md) for more detail.
+[Running the server](https://github.com/sergluka/venue-reader/wiki/Running-the-Server) for more detail.
 
 ## Inspecting messages
 
@@ -154,14 +185,31 @@ has a valid body length and checksum:
 8=FIX.4.4|9=61|35=0|49=DEMO_SENDER|56=DEMO_TARGET|34=1|52=20260919-12:00:00|10=149|
 ```
 
-TODO: The screenshot placeholders below will be filled when editor integration is
-available.
+The expandable examples below show server data in text form. Popup layout,
+placement and colours depend on the editor.
 
 ### Hover
 
 Hover over `MsgType(35)` to see the `Heartbeat` definition.
 
-TODO: Add a screenshot of a field hover with its definition and enum meaning.
+<details>
+<summary>Example: hover popup</summary>
+
+Selected hover content for `MsgType(35)` in the Heartbeat above:
+
+```text
++------------------------------------+
+| MsgType (35) - String              |
+| Introduced in FIX.2.7              |
+| Value: 0 - Heartbeat               |
+| Category: Session                  |
++------------------------------------+
+```
+
+The full hover also includes field/message descriptions and an optional
+reference link.
+
+</details>
 
 ### Inlay hints and repeating groups
 
@@ -169,7 +217,23 @@ With tag-name and enum hints enabled, the labels produce
 `35(MsgType)=0(Heartbeat)` without editing the file. A field inside a repeating
 group can also show a path such as `NoMDEntries/1/MDEntryType`.
 
-TODO: Add a screenshot of tag names, enum labels, and repeating-group paths.
+<details>
+<summary>Example: inline labels and group paths</summary>
+
+The first line shows the Heartbeat. The remaining lines show selected fields
+from a synthetic FIX 4.4 market-data snapshot (`MsgType(35) = W`) with two
+`NoMDEntries(268)` entries:
+
+```text
+35(MsgType)=0(Heartbeat)
+
+269(NoMDEntries/1/MDEntryType)=0(Bid)
+270(NoMDEntries/1/MDEntryPx)=100.50
+269(NoMDEntries/2/MDEntryType)=1(Offer)
+270(NoMDEntries/2/MDEntryPx)=100.75
+```
+
+</details>
 
 ### Message summaries
 
@@ -178,7 +242,18 @@ sender, target, and message type. Code-lens summaries are enabled by default.
 Their titles are display-only. Clients that do not show code lens can request
 summaries through inlay hints instead.
 
-TODO: Add a screenshot of message summaries above or beside FIX lines.
+<details>
+<summary>Example: summary above a message</summary>
+
+The default code-lens title appears above the Heartbeat line. The log line
+is shortened here:
+
+```text
+20260919-12:00:00: 1: DEMO_SENDER=>DEMO_TARGET | Heartbeat
+8=FIX.4.4|9=61|35=0|...|10=149|
+```
+
+</details>
 
 ### Document outline
 
@@ -190,7 +265,28 @@ entry to navigate to its location. `documentSymbol.depth` accepts `messages`,
 The client must advertise `hierarchicalDocumentSymbolSupport`. Clients that
 accept only flat `SymbolInformation` lists are not offered document symbols.
 
-TODO: Add a screenshot of the outline with expanded messages and nested groups.
+<details>
+<summary>Example: repeating groups in the outline</summary>
+
+With `documentSymbol.template = "{msgName} ({35})"`, the group portion of
+the same market-data snapshot has this shape. Header and trailer fields are
+omitted from this excerpt:
+
+```text
+MarketDataSnapshotFullRefresh (W)
+|-- Symbol (55) = DEMO
+`-- NoMDEntries (268) = 2
+    |-- [1]
+    |   |-- MDEntryType (269) = 0 (Bid)
+    |   |-- MDEntryPx (270) = 100.50
+    |   `-- MDEntrySize (271) = 10
+    `-- [2]
+        |-- MDEntryType (269) = 1 (Offer)
+        |-- MDEntryPx (270) = 100.75
+        `-- MDEntrySize (271) = 12
+```
+
+</details>
 
 ### Selection and decoding
 
@@ -200,7 +296,21 @@ value → field → group entry → group → message line.
 `fix.decode` returns annotated text for a selection, such as
 `35(MsgType)=0(Heartbeat)`.
 
-TODO: Add a screenshot of a selection and its decoded fields.
+<details>
+<summary>Example: selection expansion and decoded text</summary>
+
+With the cursor on the `0` in `MsgType(35)`, successive selection ranges are:
+
+```text
+0                                value
+35=0                             field
+8=FIX.4.4|9=61|35=0|...|10=149|    message line (shortened)
+
+fix.decode on the selected field:
+35(MsgType)=0(Heartbeat)
+```
+
+</details>
 
 ### Semantic highlighting
 
@@ -208,11 +318,27 @@ Semantic highlighting separates tags and values and can mark group nesting.
 Basic types use standard LSP token names. Types such as `price`, `quantity`,
 `timestamp`, and `group` need client/theme mappings.
 
-TODO: Add a screenshot of field highlighting and nested repeating groups.
+<details>
+<summary>Example: semantic token classifications</summary>
 
-See [Inspecting logs](../venue-reader.wiki/Inspecting-Logs.md) for hover and outline
+The server supplies token classifications; the editor chooses their colours.
+The last two rows come from the grouped market-data example:
+
+```text
+Field                     Tag token  Value token
+35=0                      property   keyword
+34=1                      property   number
+49=DEMO_SENDER            property   string
+52=20260919-12:00:00      property   timestamp
+270=100.50                property   price
+271=10                    property   quantity
+```
+
+</details>
+
+See [Inspecting logs](https://github.com/sergluka/venue-reader/wiki/Inspecting-Logs) for hover and outline
 examples, label formats, and summary templates. See
-[Semantic tokens](../venue-reader.wiki/Semantic-Tokens.md) for the token legend and
+[Semantic tokens](https://github.com/sergluka/venue-reader/wiki/Semantic-Tokens) for the token legend and
 coloring requirements.
 
 ## Basic configuration
@@ -230,8 +356,8 @@ Higher layers override only the settings they supply. Project files can be
 nested; a nearer file can override an ancestor. Keep configuration files sparse.
 
 The wiki has the complete default configuration in
-[TOML for a personal file](../venue-reader.wiki/Configuration-Reference.md#toml-file)
-and [JSON for an LSP client](../venue-reader.wiki/Configuration-Reference.md#json-for-lsp-clients).
+[TOML for a personal file](https://github.com/sergluka/venue-reader/wiki/Configuration-Reference#toml-file)
+and [JSON for an LSP client](https://github.com/sergluka/venue-reader/wiki/Configuration-Reference#json-for-lsp-clients).
 Tag-name and enum hints are **on by default**. For example, this small personal
 configuration turns them off:
 
@@ -255,9 +381,9 @@ personal/global settings. Project files and modelines cannot change them.
 There is no filesystem watcher for TOML or dictionary files: send a
 configuration-change notification or restart after changing those files.
 
-See [Configuration](../venue-reader.wiki/Configuration.md) for source scopes,
+See [Configuration](https://github.com/sergluka/venue-reader/wiki/Configuration) for source scopes,
 project filters, modelines, and reload behavior. The
-[Settings reference](../venue-reader.wiki/Configuration-Reference.md) lists all
+[Settings reference](https://github.com/sergluka/venue-reader/wiki/Configuration-Reference) lists all
 defaults and resource limits.
 
 ## Custom dictionaries
@@ -289,8 +415,8 @@ FIX5 dictionaries may need separate transport and application files. A combined
 FIXT-rooted file needs an explicit application release. Use the form that
 matches the actual XML, not its filename or venue name.
 
-See [Dictionaries](../venue-reader.wiki/Dictionaries.md) for binding forms, accepted
-XML, path rules, and loader limits. [Venue examples](../venue-reader.wiki/Venue-Dictionaries.md)
+See [Dictionaries](https://github.com/sergluka/venue-reader/wiki/Dictionaries) for binding forms, accepted
+XML, path rules, and loader limits. [Venue examples](https://github.com/sergluka/venue-reader/wiki/Venue-Dictionaries)
 show publisher-backed recipes for specific interfaces; they are not venue
 compatibility certifications.
 
@@ -306,13 +432,29 @@ All five FIX rules are enabled by default:
 | `unknownMsgType` | Missing `MsgType(35)`, or a message the dictionary does not define. | Error |
 | `unknownTag` | A tag the resolved dictionary does not define. | Info |
 
-For the `Heartbeat` above, change `CheckSum(10)` to `000` to see an integrity
-diagnostic. A quick fix repairs both length and checksum together and keeps
-the line's separator. Integrity checks for missing envelope fields on any
+For the `Heartbeat` above, change `BodyLength(9)` to `1` and `CheckSum(10)` to
+`000` to see both integrity diagnostics. A quick fix repairs both values together
+and keeps the line's separator. Integrity checks for missing envelope fields on any
 line with parsed fields. Value calculations and repairs require `BeginString(8)`
 and at least two parsed fields; they normalize separators to wire SOH.
 
-TODO: Add a screenshot of integrity diagnostics and the quick-fix action.
+<details>
+<summary>Example: diagnostics and one repair</summary>
+
+```text
+Before (line shortened):
+8=FIX.4.4|9=1|35=0|...|10=000|
+
+BodyLength is 1, expected 61
+CheckSum is 000, expected 149
+
+Quick fix: Fix BodyLength and CheckSum
+
+After (line shortened):
+8=FIX.4.4|9=61|35=0|...|10=149|
+```
+
+</details>
 
 Rules can be disabled or assigned a severity through `diagnostics.rules`.
 Disabling diagnostics or the integrity rule also disables its quick fix.
@@ -320,7 +462,7 @@ Configuration errors remain visible when FIX diagnostics are disabled.
 
 **Limit:** This is not full FIX schema validation. Other required fields, field
 membership, enum values, group-count consistency, and sequence gaps are not
-checked. See [Diagnostics](../venue-reader.wiki/Diagnostics.md) for rule conditions,
+checked yet. See [Diagnostics](https://github.com/sergluka/venue-reader/wiki/Diagnostics) for rule conditions,
 codes, and repair behavior.
 
 ## Client support and large logs
@@ -336,9 +478,9 @@ stop above 20,000 document lines, and full semantic tokens cover the first
 The outline reduces detail when its budget is exhausted; diagnostics are capped.
 For summaries on larger logs, use inlay hints instead of code lens.
 
-See [LSP reference](../venue-reader.wiki/LSP-Reference.md) for capabilities and request
-requirements, [Settings reference](../venue-reader.wiki/Configuration-Reference.md)
-for limits, and [Troubleshooting](../venue-reader.wiki/Troubleshooting.md) for editor
+See [LSP reference](https://github.com/sergluka/venue-reader/wiki/LSP-Reference) for capabilities and request
+requirements, [Settings reference](https://github.com/sergluka/venue-reader/wiki/Configuration-Reference)
+for limits, and [Troubleshooting](https://github.com/sergluka/venue-reader/wiki/Troubleshooting) for editor
 limitations and missing annotations.
 
 ## Commands
@@ -353,7 +495,7 @@ Clients invoke these commands through `workspace/executeCommand`:
 | `fix.describeOverrides` | Show a document's effective settings, their sources, warnings, and dictionary bindings. |
 
 These commands do not reload configuration files. See
-[LSP methods and commands](../venue-reader.wiki/LSP-Reference.md#custom-commands)
+[LSP methods and commands](https://github.com/sergluka/venue-reader/wiki/LSP-Reference#custom-commands)
 for arguments, result formats, and errors.
 
 ## Security and dictionary sources
@@ -372,15 +514,16 @@ Orchestra metadata. QuickFIX/J supplies per-version structure; FIX Latest suppli
 descriptions, lifecycle metadata, and selected enum values. Dictionaries are
 compiled into the binary and are not downloaded at runtime.
 
-See [Security](../venue-reader.wiki/Security.md) for trust controls and reference links,
-[Dictionary sources](../venue-reader.wiki/Dictionary-Sources.md) for the data model,
-and [xml/README.md](xml/README.md) for pinned sources and regeneration.
+See [Security](https://github.com/sergluka/venue-reader/wiki/Security) for trust controls and reference links,
+[Dictionary sources](https://github.com/sergluka/venue-reader/wiki/Dictionary-Sources) for the data model,
+and [dictionary provenance](https://github.com/sergluka/venue-reader/blob/master/xml/README.md) for pinned sources and regeneration.
 
 ## Documentation
 
 The wiki contains the full reference, examples, and troubleshooting guides.
-Start at [Wiki home](../venue-reader.wiki/Home.md); its navigation groups pages by
+Start at [Wiki home](https://github.com/sergluka/venue-reader/wiki/Home); its navigation groups pages by
 getting started, configuration, dictionaries, technical reference, and help.
+The wiki is not published yet.
 
 ## Contributing
 
