@@ -51,7 +51,7 @@ jobs:
             tar -xzf "$archive" -C ../release-archive --strip-components=1
           fi
           cd ../release-archive
-          for required in "$binary" README.md LICENSE NOTICE THIRD_PARTY_LICENSES.txt DEPENDENCY_LICENSES.txt; do
+          for required in "$binary" README.md CHANGELOG.md LICENSE NOTICE THIRD_PARTY_LICENSES.txt DEPENDENCY_LICENSES.txt; do
             test -f "$required"
           done
           if [[ "$RUNNER_OS" == "Windows" ]]; then

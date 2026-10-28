@@ -1,0 +1,20 @@
+publish = false
+push = false
+tag-name = "v{{version}}"
+pre-release-commit-message = "chore: prepare release"
+pre-release-hook = [
+    "sh", "-c",
+    'if [ "$DRY_RUN" = false ]; then cargo about generate --locked --fail about.hbs --output-file DEPENDENCY_LICENSES.txt; fi',
+]
+
+[[pre-release-replacements]]
+file = "CHANGELOG.md"
+search = '(?m)^## \[Unreleased\] - ReleaseDate$'
+replace = "## [{{version}}] - {{date}}"
+exactly = 1
+
+[[pre-release-replacements]]
+file = "CHANGELOG.md"
+search = "<!-- next-header -->"
+replace = "<!-- next-header -->\n\n## [Unreleased] - ReleaseDate"
+exactly = 1
