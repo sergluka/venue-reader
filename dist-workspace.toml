@@ -30,13 +30,16 @@ features = []
 msvc-crt-static = true
 local-artifacts-jobs = ["./source-gate"]
 global-artifacts-jobs = ["./verify-archives"]
-publish-jobs = []
+# Validate stable and RC installers here; registry upload is a final-stage gate.
+publish-jobs = ["./verify-installers"]
+publish-prereleases = true
 github-release = "announce"
 github-build-setup = "../release-build-setup.yml"
 
 [dist.github-custom-job-permissions]
 source-gate = { contents = "read" }
 verify-archives = { contents = "read" }
+verify-installers = { contents = "read" }
 
 [dist.github-custom-runners]
 global = "ubuntu-22.04"
