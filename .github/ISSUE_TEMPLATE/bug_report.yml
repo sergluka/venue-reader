@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a reproducible server problem.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use synthetic FIX messages and public dictionaries. Do not submit real logs,
+        private dictionaries, credentials or unrestricted debug/trace output.
+        For vulnerabilities, follow the [security policy](https://github.com/sergluka/venue-reader/blob/master/SECURITY.md).
+  - type: input
+    id: server-version
+    attributes:
+      label: Server version
+      description: Output of venue-reader --version; include the commit for a source build.
+    validations:
+      required: true
+  - type: input
+    id: client-version
+    attributes:
+      label: Editor and LSP client versions
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Release installer
+        - Release archive
+        - cargo install from crates.io
+        - cargo install from GitHub
+        - Local source build
+        - cargo-binstall
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      value: |
+        Expected:
+
+        Actual:
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal synthetic reproduction
+      description: Include steps, synthetic input, relevant settings and public dictionary links.
+    validations:
+      required: true

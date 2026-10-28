@@ -384,14 +384,12 @@ getting started, configuration, dictionaries, technical reference, and help.
 
 ## Contributing
 
-Issues and pull requests are welcome. Include server/editor versions,
-reproduction steps, expected behavior, and a minimal synthetic sample.
-Discuss substantial changes before implementation.
+Use the [bug report form](https://github.com/sergluka/venue-reader/issues/new?template=bug_report.yml)
+for reproducible problems. Include a minimal synthetic sample; do not submit
+private logs or dictionaries. See the [contributor guide](https://github.com/sergluka/venue-reader/blob/master/CONTRIBUTING.md)
+for source requirements and checks.
 
-Protocol behavior and tests must come from public specifications or independently
-created synthetic data. Include source links; do not submit private logs or
-dictionaries. See [Contributing](../venue-reader.wiki/Contributing.md) for repository
-checks and documentation tests.
+Report suspected vulnerabilities through the [security policy](https://github.com/sergluka/venue-reader/blob/master/SECURITY.md).
 
 ## License
 
