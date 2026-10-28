@@ -90,3 +90,7 @@ harness = false
 
 [profile.release]
 strip = true
+
+[profile.dist]
+inherits = "release"
+lto = "thin"

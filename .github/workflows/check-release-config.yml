@@ -1,0 +1,47 @@
+name: Release configuration
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_DIST_VERSION: "0.33.1"
+  CARGO_DIST_TARGET: "x86_64-unknown-linux-gnu"
+  CARGO_DIST_SHA256: "da68e159d5fed1ee61b00284da444e719927dbd0b7d0e2c34e57a04414453cf9"
+  CARGO_ABOUT_VERSION: "0.9.3"
+  CARGO_ABOUT_TARGET: "x86_64-unknown-linux-musl"
+  CARGO_ABOUT_SHA256: "3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4"
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install release tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-tools"
+          cd "$RUNNER_TEMP/release-tools"
+          curl --proto '=https' --tlsv1.2 -fLsS -o dist.tar.xz "https://github.com/axodotdev/cargo-dist/releases/download/v${CARGO_DIST_VERSION}/cargo-dist-${CARGO_DIST_TARGET}.tar.xz"
+          echo "${CARGO_DIST_SHA256}  dist.tar.xz" | sha256sum --check
+          tar -xf dist.tar.xz --strip-components=1 "cargo-dist-${CARGO_DIST_TARGET}/dist"
+          curl --proto '=https' --tlsv1.2 -fLsS -o about.tar.gz "https://github.com/EmbarkStudios/cargo-about/releases/download/${CARGO_ABOUT_VERSION}/cargo-about-${CARGO_ABOUT_VERSION}-${CARGO_ABOUT_TARGET}.tar.gz"
+          echo "${CARGO_ABOUT_SHA256}  about.tar.gz" | sha256sum --check
+          tar -xf about.tar.gz --strip-components=1 "cargo-about-${CARGO_ABOUT_VERSION}-${CARGO_ABOUT_TARGET}/cargo-about"
+          echo "$RUNNER_TEMP/release-tools" >> "$GITHUB_PATH"
+      - name: Check generated workflow and dependency licences
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist generate --check
+          cargo-about generate --locked --fail about.hbs --output-file "$RUNNER_TEMP/DEPENDENCY_LICENSES.txt"
+          diff -u DEPENDENCY_LICENSES.txt "$RUNNER_TEMP/DEPENDENCY_LICENSES.txt"

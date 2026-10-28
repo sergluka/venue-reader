@@ -1,0 +1,9 @@
+- name: Configure release environment
+  shell: bash
+  run: |
+    echo "RUSTFLAGS=" >> "$GITHUB_ENV"
+    if [[ "$RUNNER_OS" == "macOS" ]]; then
+      echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+    fi
+    rustc --version
+    cargo --version

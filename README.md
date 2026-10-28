@@ -53,9 +53,49 @@ See [FIX versions](../venue-reader.wiki/FIX-Versions.md) for identity resolution
 
 ## Build and launch
 
-TODO: List supported operating systems and architectures.
+### Binary installers
 
-Rust 1.91 or later is required. Install from the cloned repository:
+No public release is available yet. The installer commands below apply after
+the first stable release is published. Until then, use the source installation below.
+
+The installers download a prebuilt binary. Rust and Cargo are not required.
+The URLs select the release marked Latest and do not include drafts or
+prereleases. For a specific version, replace `latest/download` with
+`download/v<version>` in either URL.
+
+| Operating system | Architecture | Release baseline |
+| --- | --- | --- |
+| Linux | x86-64 | glibc 2.35 or later; excludes Alpine/musl and NixOS. |
+| macOS | Intel x86-64, Apple Silicon | macOS 11 or later. |
+| Windows | x86-64 | Windows 10 or later. |
+
+Linux and macOS:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf -o venue-reader-installer.sh https://github.com/sergluka/venue-reader/releases/latest/download/venue-reader-installer.sh
+sh ./venue-reader-installer.sh
+```
+
+Windows PowerShell:
+
+```powershell
+Invoke-WebRequest -UseBasicParsing -Uri https://github.com/sergluka/venue-reader/releases/latest/download/venue-reader-installer.ps1 -OutFile venue-reader-installer.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\venue-reader-installer.ps1
+```
+
+Installation is per user, in `~/.local/bin` on Linux/macOS and
+`%USERPROFILE%\.local\bin` on Windows. The installers update your shell
+configuration or user PATH. Open a new terminal after installation.
+No administrator privileges are needed.
+
+Release archives (`.tar.gz` for Linux/macOS, `.zip` for Windows) remain available
+for manual installation. Extract the archive and put the executable on `PATH`.
+Archive SHA-256 files are included in the release assets.
+
+### Cargo installation
+
+Rust 1.91 or later is required only when building from source.
+Install from the cloned repository:
 
 ```sh
 cargo install --path . --locked
