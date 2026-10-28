@@ -1,0 +1,19 @@
+name: Release source gate
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    uses: ./.github/workflows/ci.yml
+  configuration:
+    uses: ./.github/workflows/check-release-config.yml
+    with:
+      plan: ${{ inputs.plan }}

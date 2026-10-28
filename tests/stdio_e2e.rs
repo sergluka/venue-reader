@@ -2,35 +2,115 @@
 
 mod stdio_harness;
 
-use std::process::Command;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use stdio_harness::StdioClient;
+use stdio_harness::{cli_output, StdioClient};
+use venue_reader::{SERVER_NAME, SERVER_VERSION};
 
 const RAW_BYTE_MARKER: &str = "VENUE_READER_RAW_BYTE";
 
 #[test]
 fn version_flag_prints_and_exits() {
-    let output = Command::new(env!("CARGO_BIN_EXE_venue-reader"))
-        .arg("--version")
-        .output()
-        .expect("run --version");
+    let output = cli_output("--version");
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "venue-reader 0.1.0\n"
+        format!("{SERVER_NAME} {SERVER_VERSION}\n")
     );
 }
 
 #[test]
 fn help_flag_names_the_executable() {
-    let output = Command::new(env!("CARGO_BIN_EXE_venue-reader"))
-        .arg("--help")
-        .output()
-        .expect("run --help");
+    let output = cli_output("--help");
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("Usage: venue-reader --stdio"));
+}
+
+#[test]
+fn release_artifact_smoke() {
+    let version = cli_output("--version");
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout),
+        format!("{SERVER_NAME} {SERVER_VERSION}\n")
+    );
+
+    let mut client = StdioClient::start("release-smoke", None, None);
+    let message = "8=FIX.4.4|35=0|";
+    let uri = client.write_workspace("heartbeat.fix", message.as_bytes());
+    let initialize = client.request(
+        "initialize",
+        json!({
+            "rootUri": client.root_uri(),
+            "capabilities": {
+                "general": { "positionEncodings": ["utf-8"] },
+                "textDocument": { "hover": { "contentFormat": ["markdown"] } }
+            }
+        }),
+    );
+    assert_eq!(initialize["serverInfo"]["name"], SERVER_NAME);
+    assert_eq!(initialize["serverInfo"]["version"], SERVER_VERSION);
+    assert_eq!(initialize["capabilities"]["hoverProvider"], true);
+    assert_eq!(
+        initialize["capabilities"]["codeLensProvider"]["resolveProvider"],
+        true
+    );
+    let commands = initialize["capabilities"]["executeCommandProvider"]["commands"]
+        .as_array()
+        .expect("execute commands");
+    for command in [
+        "fix.decode",
+        "fix.useDictionary",
+        "fix.describeOverrides",
+        "fix.describeTag",
+    ] {
+        assert!(
+            commands.iter().any(|value| value == command),
+            "missing {command}"
+        );
+    }
+    client.notify("initialized", json!({}));
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "fix", "version": 1, "text": message }
+        }),
+    );
+    client.wait_for_notification("textDocument/publishDiagnostics", |params| {
+        params["uri"] == uri && params["version"] == 1
+    });
+    let hover = client.request(
+        "textDocument/hover",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": 0, "character": 11 } }),
+    );
+    assert!(hover["contents"]["value"]
+        .as_str()
+        .expect("hover markdown")
+        .contains("**MsgType** (35)"));
+    let lenses = client.request(
+        "textDocument/codeLens",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let lenses = lenses.as_array().expect("code lenses");
+    assert_eq!(lenses.len(), 1);
+    let resolved = client.request("codeLens/resolve", lenses[0].clone());
+    assert!(!resolved["command"]["title"]
+        .as_str()
+        .expect("summary title")
+        .is_empty());
+    let decoded = client.request(
+        "workspace/executeCommand",
+        json!({
+            "command": "fix.decode",
+            "arguments": [uri, [{
+                "start": { "line": 0, "character": 10 },
+                "end": { "line": 0, "character": 14 }
+            }]]
+        }),
+    );
+    assert_eq!(decoded, "35(MsgType)=0(Heartbeat)");
+    assert!(client.shutdown_and_exit().success(), "{}", client.stderr());
 }
 
 #[test]

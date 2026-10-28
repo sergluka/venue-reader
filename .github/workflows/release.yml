@@ -178,21 +178,23 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
-  custom-check-release-config:
+  custom-source-gate:
     needs:
       - plan
     if: ${{ needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' }}
-    uses: ./.github/workflows/check-release-config.yml
+    uses: ./.github/workflows/source-gate.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
     secrets: inherit
+    permissions:
+      "contents": "read"
 
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
     needs:
       - plan
       - build-local-artifacts
-      - custom-check-release-config
+      - custom-source-gate
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -234,15 +236,28 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+
+  custom-verify-archives:
+    needs:
+      - plan
+      - build-local-artifacts
+      - custom-source-gate
+    uses: ./.github/workflows/verify-archives.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+    permissions:
+      "contents": "read"
   # Determines if we should publish/announce
   host:
     needs:
       - plan
       - build-local-artifacts
-      - custom-check-release-config
+      - custom-source-gate
       - build-global-artifacts
+      - custom-verify-archives
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-check-release-config.result == 'skipped' || needs.custom-check-release-config.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-verify-archives.result == 'skipped' || needs.custom-verify-archives.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-source-gate.result == 'skipped' || needs.custom-source-gate.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
