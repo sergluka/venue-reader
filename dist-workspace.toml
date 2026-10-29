@@ -32,6 +32,7 @@ local-artifacts-jobs = ["./source-gate"]
 global-artifacts-jobs = ["./verify-archives"]
 # Validate stable and RC installers here; registry upload is a final-stage gate.
 publish-jobs = ["./verify-installers"]
+post-announce-jobs = ["./verify-release"]
 publish-prereleases = true
 github-release = "announce"
 # Enable only at the final public stage.
@@ -43,6 +44,7 @@ github-build-setup = "../release-build-setup.yml"
 source-gate = { contents = "read" }
 verify-archives = { contents = "read" }
 verify-installers = { contents = "read" }
+verify-release = { contents = "read" }
 
 [dist.github-custom-runners]
 global = "ubuntu-22.04"

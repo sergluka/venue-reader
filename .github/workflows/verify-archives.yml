@@ -6,6 +6,9 @@ on:
       plan:
         required: true
         type: string
+      published-release:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,9 +25,19 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        if: ${{ !inputs.published-release }}
         with:
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
           path: artifacts
+      - name: Download the published archive
+        if: inputs.published-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ fromJSON(inputs.plan).announcement_tag }}
+          TARGET: ${{ matrix.targets[0] }}
+        run: gh release download "$RELEASE_TAG" --pattern "venue-reader-${TARGET}.*" --dir artifacts
       - name: Verify checksum and extract archive
         shell: bash
         env:

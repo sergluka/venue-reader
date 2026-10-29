@@ -1,0 +1,18 @@
+name: Published release verification
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  archives:
+    uses: ./.github/workflows/verify-archives.yml
+    with:
+      plan: ${{ inputs.plan }}
+      published-release: true
