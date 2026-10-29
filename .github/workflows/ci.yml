@@ -1,9 +1,14 @@
-# CI runs once this repository is pushed to GitHub. No editor-specific jobs.
+# Source checks shared by branch CI and the release pipeline.
 name: CI
 
 on:
   push:
+    branches: ["**"]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,30 +22,47 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all
       - run: python3 -m unittest discover -s tools
+
+  msrv:
+    name: Minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check MSRV
+        shell: bash
+        run: |
+          minimum_rust_version="$(cargo metadata --locked --no-deps --format-version=1 | jq -er '.packages[0].rust_version')"
+          if [[ "$minimum_rust_version" != *.*.* ]]; then
+            minimum_rust_version="${minimum_rust_version}.0"
+          fi
+          rustup toolchain install "$minimum_rust_version" --profile minimal --no-self-update
+          cargo +"$minimum_rust_version" check --locked --all-targets
 
   ruff:
     name: ruff (tools/)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       # Pinned so a ruff release cannot fail CI with rules nobody chose.
-      - uses: astral-sh/ruff-action@v3
+      - uses: astral-sh/ruff-action@4919ec5cf1f49eff0871dbcea0da843445b837e6 # v3
         with:
           version: "0.16.8"
-          args: check
+          args: check tools
 
   deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+    uses: ./.github/workflows/dependency-checks.yml

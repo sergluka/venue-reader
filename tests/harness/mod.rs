@@ -151,6 +151,9 @@ impl TestClient {
                 },
                 path,
             );
+            if let venue_reader::server::ServerExit::Fatal(reason) = &outcome {
+                eprintln!("LSP server exited: {reason}");
+            }
             let _ = completion.send(());
             outcome
         });

@@ -1,0 +1,16 @@
+Rust dependency licences
+========================
+
+Generated with cargo-about 0.9.3 from Cargo.lock and about.toml.
+Bundled FIX data licences are in THIRD_PARTY_LICENSES.txt.
+
+{{#each licenses}}
+{{name}} ({{id}})
+----------------------------------------
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}{{#unless @last}}
+
+{{/unless}}{{/each~}}

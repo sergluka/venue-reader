@@ -1,0 +1,85 @@
+name: Release archive verification
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+      published-release:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify archive (${{ join(matrix.targets, ', ') }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.plan).ci.github.artifacts_matrix }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.published-release && format('refs/tags/{0}', fromJSON(inputs.plan).announcement_tag) || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        if: ${{ !inputs.published-release }}
+        with:
+          name: artifacts-build-local-${{ join(matrix.targets, '_') }}
+          path: artifacts
+      - name: Download the published archive
+        if: inputs.published-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ fromJSON(inputs.plan).announcement_tag }}
+          TARGET: ${{ matrix.targets[0] }}
+        run: gh release download "$RELEASE_TAG" --pattern "venue-reader-${TARGET}.*" --dir artifacts
+      - name: Verify checksum and extract archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.targets[0] }}
+        run: |
+          set -euo pipefail
+          mkdir release-archive
+          cd artifacts
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            archive="venue-reader-${TARGET}.zip"
+            binary="venue-reader.exe"
+          else
+            archive="venue-reader-${TARGET}.tar.gz"
+            binary="venue-reader"
+          fi
+          if command -v sha256sum >/dev/null; then
+            sha256sum --check "${archive}.sha256"
+          else
+            shasum -a 256 --check "${archive}.sha256"
+          fi
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            7z x "$archive" -o../release-archive
+          else
+            tar -xzf "$archive" -C ../release-archive --strip-components=1
+          fi
+          cd ../release-archive
+          for required in "$binary" README.md CHANGELOG.md LICENSE NOTICE THIRD_PARTY_LICENSES.txt DEPENDENCY_LICENSES.txt; do
+            test -f "$required"
+          done
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            executable="$(cygpath -w "$PWD/$binary")"
+          else
+            test -x "$binary"
+            executable="$PWD/$binary"
+          fi
+          echo "VENUE_READER_TEST_BINARY=$executable" >> "$GITHUB_ENV"
+      - name: Build the stdio test harness
+        run: cargo test --locked --test stdio_e2e --no-run
+      - name: Exercise the extracted server
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${VENUE_READER_TEST_BINARY:?archive executable is required}"
+          cargo test --locked --test stdio_e2e release_artifact_smoke -- --exact

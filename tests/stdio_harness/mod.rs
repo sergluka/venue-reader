@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -11,6 +11,40 @@ use serde_json::{json, Value};
 
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn executable() -> PathBuf {
+    match std::env::var_os("VENUE_READER_TEST_BINARY") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            assert!(
+                path.is_file(),
+                "VENUE_READER_TEST_BINARY is not a file: {}",
+                path.display()
+            );
+            path
+        }
+        None => PathBuf::from(env!("CARGO_BIN_EXE_venue-reader")),
+    }
+}
+
+pub fn cli_output(argument: &str) -> Output {
+    let mut child = Command::new(executable())
+        .arg(argument)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start CLI command");
+    let deadline = Instant::now() + PROCESS_TIMEOUT;
+    while child.try_wait().expect("query CLI status").is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("venue-reader {argument} did not exit within {PROCESS_TIMEOUT:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child.wait_with_output().expect("read CLI output")
+}
 
 enum Incoming {
     Message(Value),
@@ -73,7 +107,7 @@ impl StdioClient {
         let config_home = directory.join("xdg-config");
         std::fs::create_dir_all(&workspace).expect("create test workspace");
 
-        let mut command = Command::new(env!("CARGO_BIN_EXE_venue-reader"));
+        let mut command = Command::new(executable());
         command
             .arg("--stdio")
             .env("HOME", &home)
