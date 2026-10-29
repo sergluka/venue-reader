@@ -114,6 +114,9 @@ follows is what is easy to get wrong here and not visible from any one file.
 ## Documentation
 
 - README must describe current behavior, not introduced changes or fixes.
+- Add README and wiki documentation only for completed features with settled behavior.
+  Keep intermediate progress, temporary rollout stages, and unresolved decisions
+  in local task records.
 - After every task, review the sibling `../venue-reader.wiki` repository and
   update documentation affected by the task before marking it complete.
   Run the wiki documentation tests and link checker after documentation changes.

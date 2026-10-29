@@ -34,6 +34,9 @@ global-artifacts-jobs = ["./verify-archives"]
 publish-jobs = ["./verify-installers"]
 publish-prereleases = true
 github-release = "announce"
+# Enable only at the final public stage.
+github-attestations = false
+github-attestations-phase = "announce"
 github-build-setup = "../release-build-setup.yml"
 
 [dist.github-custom-job-permissions]
@@ -49,6 +52,7 @@ aarch64-apple-darwin = "macos-15"
 x86_64-pc-windows-msvc = "windows-2022"
 
 [dist.github-action-commits]
+"actions/attest" = "1e69f48acb82d1966a394da916b4c1698aa569d6"            # v4
 "actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803"          # v6
 "actions/upload-artifact" = "cf430e030ddbb5b0abf93d22962f4752f3646cd9"   # v7
 "actions/download-artifact" = "9000827ccba6bdab643e8b6fd33ac0654aef8333" # v8
