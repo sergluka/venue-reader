@@ -44,7 +44,7 @@ github-build-setup = "../release-build-setup.yml"
 source-gate = { contents = "read" }
 verify-archives = { contents = "read" }
 verify-installers = { contents = "read" }
-verify-release = { contents = "read" }
+verify-release = { contents = "read", id-token = "write" }
 
 [dist.github-custom-runners]
 global = "ubuntu-22.04"

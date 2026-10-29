@@ -6,13 +6,61 @@ on:
       plan:
         required: true
         type: string
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+    steps:
+      - name: Resolve the release plan
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DIST_PLAN: ${{ inputs.plan }}
+          RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$DIST_PLAN" ]]; then
+            plan="$(jq -c . <<< "$DIST_PLAN")"
+          else
+            gh release download --pattern dist-manifest.json --dir "$RUNNER_TEMP/release-plan" -- "$RELEASE_TAG"
+            plan="$(jq -c . "$RUNNER_TEMP/release-plan/dist-manifest.json")"
+            jq -e --arg tag "$RELEASE_TAG" '.announcement_tag == $tag' <<< "$plan" > /dev/null
+          fi
+          echo "plan=$plan" >> "$GITHUB_OUTPUT"
+
   archives:
+    needs: plan
     uses: ./.github/workflows/verify-archives.yml
     with:
-      plan: ${{ inputs.plan }}
+      plan: ${{ needs.plan.outputs.plan }}
       published-release: true
+
+  publish:
+    needs: [plan, archives]
+    if: >-
+      vars.CRATES_IO_PUBLISH == 'true' &&
+      github.event.repository.visibility == 'public' &&
+      !fromJSON(needs.plan.outputs.plan).announcement_is_prerelease
+    uses: ./.github/workflows/publish-crate.yml
+    with:
+      tag: ${{ fromJSON(needs.plan.outputs.plan).announcement_tag }}
+      auth-mode: ${{ vars.CRATES_IO_AUTH_MODE }}
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write

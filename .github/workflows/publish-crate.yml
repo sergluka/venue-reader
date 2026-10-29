@@ -1,0 +1,76 @@
+name: Publish the verified crate
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      auth-mode:
+        required: true
+        type: string
+    secrets:
+      CRATES_IO_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-io-${{ github.repository }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      vars.CRATES_IO_PUBLISH == 'true' &&
+      github.event.repository.visibility == 'public' &&
+      !contains(inputs.tag, '-') &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+       (github.event_name == 'release' && github.event.action == 'published') ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-22.04
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Verify the release tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" |
+            jq -e '.draft == false and .prerelease == false and .immutable == true' > /dev/null
+          version="$(cargo metadata --locked --no-deps --format-version=1 |
+            jq -er '.packages[0].version')"
+          [[ "$RELEASE_TAG" == "v$version" ]]
+
+      - name: Authenticate with Trusted Publishing
+        id: auth
+        if: inputs.auth-mode == 'oidc'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      - name: Publish the verified package
+        shell: bash
+        env:
+          AUTH_MODE: ${{ inputs.auth-mode }}
+          BOOTSTRAP_TOKEN: ${{ inputs.auth-mode == 'bootstrap' && secrets.CRATES_IO_TOKEN || '' }}
+          OIDC_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          case "$AUTH_MODE" in
+            bootstrap) export CARGO_REGISTRY_TOKEN="$BOOTSTRAP_TOKEN" ;;
+            oidc) export CARGO_REGISTRY_TOKEN="$OIDC_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          [[ -n "$CARGO_REGISTRY_TOKEN" ]]
+          cargo publish --locked --no-verify --registry crates-io
