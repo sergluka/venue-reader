@@ -88,6 +88,21 @@ Installation is per user, in `~/.local/bin` on Linux/macOS and
 configuration or user PATH. Open a new terminal after installation.
 No administrator privileges are needed.
 
+Install into a custom directory without modifying PATH or shell configuration:
+
+```sh
+export VENUE_READER_UNMANAGED_INSTALL="$PWD/venue-reader-bin"
+sh ./venue-reader-installer.sh
+```
+
+```powershell
+$env:VENUE_READER_UNMANAGED_INSTALL = Join-Path $PWD 'venue-reader-bin'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\venue-reader-installer.ps1
+```
+
+Configure your LSP client with the installed executable's full path, or add the
+directory to PATH yourself.
+
 The standard cargo-dist shell installer checks archive SHA-256 only when
 `sha256sum` is available; otherwise it skips that check. The PowerShell installer
 does not check archive hashes. Use manual archive verification below when you
@@ -524,6 +539,8 @@ The wiki contains the full reference, examples, and troubleshooting guides.
 Start at [Wiki home](https://github.com/sergluka/venue-reader/wiki/Home); its navigation groups pages by
 getting started, configuration, dictionaries, technical reference, and help.
 The wiki is not published yet.
+
+Release maintainers can use the [release guide](https://github.com/sergluka/venue-reader/blob/master/RELEASING.md).
 
 ## Contributing
 

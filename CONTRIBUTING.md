@@ -25,9 +25,8 @@ python3 -m unittest discover -s tools
 ```
 
 Run `cargo deny check` after dependency changes and refresh the dependency
-notices. Review dependency updates before merging; do not enable auto-merge.
+notices.
 
 Keep affected README/wiki documentation consistent with current behavior.
 The [contributor reference](https://github.com/sergluka/venue-reader/wiki/Contributing)
-covers documentation tests, dependency notices and release preparation.
-GitHub Wiki publication is pending while the repository is private.
+covers pull-request preparation, documentation tests and dependency notices.
