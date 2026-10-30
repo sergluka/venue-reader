@@ -104,10 +104,10 @@ follows is what is easy to get wrong here and not visible from any one file.
 
 ## Release status
 
-- The project has not been released to users. Backward compatibility is not
-  required until the first user release.
-- Prefer a clean current design over compatibility aliases, shims, deprecation
-  periods, or automatic migrations.
+- Version `0.1.0` is published. Preserve compatibility for published CLI,
+  configuration and LSP interfaces within the `0.1.x` series.
+- Unpublished interfaces need no compatibility aliases, shims, deprecation periods,
+  or automatic migrations.
 - Document current behavior. Do not add migration or retirement guidance for
   unpublished features.
 

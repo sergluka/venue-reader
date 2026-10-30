@@ -1,6 +1,6 @@
 # Venue Reader
 
-An editor-independent language server for inspecting FIX protocol logs.
+An language server for inspecting FIX (Financial Information eXchange®) protocol logs.
 It explains fields and values, reconstructs repeating groups, and provides
 annotations, navigation, and diagnostics through the
 [Language Server Protocol](https://microsoft.github.io/language-server-protocol/).
