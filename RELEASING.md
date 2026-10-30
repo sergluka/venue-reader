@@ -66,9 +66,9 @@ cargo release 0.1.0 --execute
 
 Cargo-release updates Cargo.toml/Cargo.lock, generates CHANGELOG.md with git-cliff,
 regenerates dependency licences, and creates the local release commit and tag.
-The hook skips file generation during dry-run. Existing
-prerelease tags are ignored as changelog boundaries so their changes appear in
-the stable notes. A separate tag push starts GitHub Actions, which builds and
+The hook checks changelog generation without writing files during dry-run.
+Existing prerelease tags are ignored as changelog boundaries so their changes
+appear in the stable notes. A separate tag push starts GitHub Actions, which builds and
 verifies the tagged source before creating the GitHub Release with archives,
 installers and checksums.
 

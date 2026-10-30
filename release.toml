@@ -4,5 +4,5 @@ tag-name = "v{{version}}"
 pre-release-commit-message = "chore: prepare {{version}}"
 pre-release-hook = [
     "sh", "-c",
-    'if [ "$DRY_RUN" = false ]; then git cliff --tag "v$NEW_VERSION" --output CHANGELOG.md && cargo about generate --locked --fail about.hbs --output-file DEPENDENCY_LICENSES.txt; fi',
+    'if [ "$DRY_RUN" = true ]; then git cliff --tag "v$NEW_VERSION" > /dev/null; else git cliff --tag "v$NEW_VERSION" --output CHANGELOG.md && cargo about generate --locked --fail about.hbs --output-file DEPENDENCY_LICENSES.txt; fi',
 ]
