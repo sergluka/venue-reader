@@ -55,9 +55,6 @@ See [FIX versions](https://github.com/sergluka/venue-reader/wiki/FIX-Versions) f
 
 ### Binary installers
 
-No public release is available yet. The installer commands below apply after
-the first stable release is published. Until then, use the source installation below.
-
 The installers download a prebuilt binary. Rust and Cargo are not required.
 The URLs select the release marked Latest and do not include drafts or
 prereleases. For a specific version, replace `latest/download` with
@@ -137,6 +134,17 @@ matching `.sha256` file. After verification, extract the archive (`.tar.gz` on
 Linux/macOS, `.zip` on Windows) and put the executable on `PATH`, or configure
 your LSP client with its full path.
 
+### Installation with cargo-binstall
+
+If you use [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), install
+the prebuilt binary from this project's GitHub Release:
+
+```sh
+cargo binstall venue-reader --strategies crate-meta-data
+```
+
+This strategy excludes third-party quickinstall builds and compilation fallback.
+
 ### Release provenance
 
 For a release built with GitHub artifact attestations, verify the downloaded
@@ -153,6 +161,12 @@ code. Keep checksum verification for manual downloads.
 ### Cargo installation
 
 Rust 1.91 or later is required only when building from source.
+Install from crates.io:
+
+```sh
+cargo install venue-reader --locked
+```
+
 Install from the cloned repository:
 
 ```sh
@@ -165,8 +179,7 @@ Or install directly from GitHub:
 cargo install --git https://github.com/sergluka/venue-reader.git --locked
 ```
 
-Both commands build from source and do not require a crates.io release.
-GitHub installation requires repository access while the repository is private.
+The local and GitHub commands do not require a crates.io release.
 Cargo installs a release build in `~/.cargo/bin` by default. Add this directory
 to `PATH` if needed. `--locked` uses the dependency versions in `Cargo.lock`.
 
@@ -551,7 +564,6 @@ and [dictionary provenance](https://github.com/sergluka/venue-reader/blob/master
 The wiki contains the full reference, examples, and troubleshooting guides.
 Start at [Wiki home](https://github.com/sergluka/venue-reader/wiki/Home); its navigation groups pages by
 getting started, configuration, dictionaries, technical reference, and help.
-The wiki is not published yet.
 
 Release maintainers can use the [release guide](https://github.com/sergluka/venue-reader/blob/master/RELEASING.md).
 
