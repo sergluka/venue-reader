@@ -137,6 +137,19 @@ matching `.sha256` file. After verification, extract the archive (`.tar.gz` on
 Linux/macOS, `.zip` on Windows) and put the executable on `PATH`, or configure
 your LSP client with its full path.
 
+### Release provenance
+
+For a release built with GitHub artifact attestations, verify the downloaded
+archive with the [GitHub CLI](https://cli.github.com/):
+
+```sh
+gh attestation verify venue-reader-x86_64-unknown-linux-gnu.tar.gz --repo sergluka/venue-reader
+```
+
+Use your platform's archive name. Review the reported source revision and release
+workflow. This verifies the recorded provenance and digest; it does not audit the
+code. Keep checksum verification for manual downloads.
+
 ### Cargo installation
 
 Rust 1.91 or later is required only when building from source.

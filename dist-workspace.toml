@@ -35,8 +35,7 @@ publish-jobs = ["./verify-installers"]
 post-announce-jobs = ["./verify-release"]
 publish-prereleases = true
 github-release = "announce"
-# Enable only at the final public stage.
-github-attestations = false
+github-attestations = true
 github-attestations-phase = "announce"
 github-build-setup = "../release-build-setup.yml"
 
