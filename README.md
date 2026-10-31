@@ -1,221 +1,38 @@
-# Venue Reader
+# Venue Reader — Language Server for FIX Protocol Logs
 
-An language server for inspecting FIX (Financial Information eXchange®) protocol logs.
-It explains fields and values, reconstructs repeating groups, and provides
-annotations, navigation, and diagnostics through the
-[Language Server Protocol](https://microsoft.github.io/language-server-protocol/).
+**Decode and inspect FIX protocol logs directly in your editor.**
 
-All analysis runs locally. FIX logs are not uploaded to a decoding service.
+Venue Reader is an open-source [language server](https://microsoft.github.io/language-server-protocol/)
+written in Rust that helps editors display and explain Financial Information
+eXchange (FIX) protocol logs.
+It provides:
+
+- Inline FIX tag names and decoded enum values
+- Hover documentation for fields and messages
+- Navigation through nested repeating groups
+- Semantic syntax highlighting and message summaries
+- Diagnostics and quick fixes
+- Support for custom QuickFIX XML dictionaries
+
+**Privacy:** All processing runs locally. No FIX logs are
+uploaded to an external service.
 
 > [!NOTE]
 > The project is evolving; its features and settings may change.
 
-- [Features](#features)
-- [Build and launch](#build-and-launch)
-- [Inspecting messages](#inspecting-messages)
-- [Basic configuration](#basic-configuration)
-- [Custom dictionaries](#custom-dictionaries)
-- [Diagnostics and quick fixes](#diagnostics-and-quick-fixes)
-- [Documentation](#documentation)
-
-## Features
-
-| Feature | What it provides |
-| --- | --- |
-| Inlay hints | Tag names and enum labels beside the original text, with optional repeating-group paths. |
-| Semantic highlighting | Distinguish tags, enum values, datatypes, session fields, and repeating groups. |
-| Message summaries | Configurable message titles above each line through code lens, or at the line start through inlay hints. |
-| Document outline | Messages, fields, and nested repeating-group entries as a navigation tree. |
-| Hover | Field name, type, description, enum meaning, and available lifecycle metadata. `MsgType(35)` also shows the message definition. |
-| Selection expansion | Expand from a value to its field, group entry, enclosing groups, and message line. |
-| Decoded selections | Return annotated fields for a client to display or copy. |
-| Diagnostics and repairs | Report version and dictionary problems; check and repair `BodyLength(9)` and `CheckSum(10)` together. |
-
 ## Supported logs and FIX versions
 
-Venue Reader reads one FIX message per line. It accepts SOH, pipe (`|`), and caret
-(`^`) separators, can skip a log prefix before `BeginString(8)`, and ignores
-blank lines and `#` comments. The parser selects one separator per line.
+Read logs with one FIX message per line, using SOH, pipe (`|`), or caret (`^`)
+separators. Log prefixes, blank lines, and `#` comments are supported.
 
-Bundled dictionaries cover FIX 4.0–4.4, FIX 5.0/SP1/SP2, and standalone FIXT 1.1.
-Each line resolves its own transport and application, so one log can contain
-messages from different FIX versions.
+Bundled dictionaries support FIX 4.0–4.4, FIX 5.0/SP1/SP2, and FIXT 1.1.
+A single log can mix FIX versions. FIXT application messages need an application
+version in the message or configuration.
 
-For conventional FIX4 messages, `BeginString(8)` selects the dictionary.
-FIX5 application messages use `BeginString(8) = FIXT.1.1`, with
-`ApplVerID(1128)` identifying the application release. For example,
-`ApplVerID(1128) = 9` means FIX 5.0 SP2. If the message omits that field, select
-a complete dictionary pair or configure `defaultApplVerID`. There is no built-in
-application default, and the server does not infer one from another log line.
-
-See [FIX versions](https://github.com/sergluka/venue-reader/wiki/FIX-Versions) for identity resolution and
-[Inspecting logs](https://github.com/sergluka/venue-reader/wiki/Inspecting-Logs) for input-format limits.
-
-## Build and launch
-
-### Binary installers
-
-The installers download a prebuilt binary. Rust and Cargo are not required.
-The URLs select the release marked Latest and do not include drafts or
-prereleases. For a specific version, replace `latest/download` with
-`download/v<version>` in either URL.
-
-| Operating system | Architecture | Release baseline |
-| --- | --- | --- |
-| Linux | x86-64 | glibc 2.35 or later; excludes Alpine/musl and NixOS. |
-| macOS | Intel x86-64, Apple Silicon | macOS 11 or later. |
-| Windows | x86-64 | Windows 10 or later. |
-
-Linux and macOS:
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf -o venue-reader-installer.sh https://github.com/sergluka/venue-reader/releases/latest/download/venue-reader-installer.sh
-sh ./venue-reader-installer.sh
-```
-
-Windows PowerShell:
-
-```powershell
-Invoke-WebRequest -UseBasicParsing -Uri https://github.com/sergluka/venue-reader/releases/latest/download/venue-reader-installer.ps1 -OutFile venue-reader-installer.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\venue-reader-installer.ps1
-```
-
-Installation is per user, in `~/.local/bin` on Linux/macOS and
-`%USERPROFILE%\.local\bin` on Windows. The installers update your shell
-configuration or user PATH. Open a new terminal after installation.
-No administrator privileges are needed.
-
-Install into a custom directory without modifying PATH or shell configuration:
-
-```sh
-export VENUE_READER_UNMANAGED_INSTALL="$PWD/venue-reader-bin"
-sh ./venue-reader-installer.sh
-```
-
-```powershell
-$env:VENUE_READER_UNMANAGED_INSTALL = Join-Path $PWD 'venue-reader-bin'
-powershell -NoProfile -ExecutionPolicy Bypass -File .\venue-reader-installer.ps1
-```
-
-Configure your LSP client with the installed executable's full path, or add the
-directory to PATH yourself.
-
-The standard cargo-dist shell installer checks archive SHA-256 only when
-`sha256sum` is available; otherwise it skips that check. The PowerShell installer
-does not check archive hashes. Use manual archive verification below when you
-want an explicit checksum check.
-
-### Manual archive installation
-
-After a release, download the archive for your platform and its matching
-`.sha256` file from the same [GitHub Release](https://github.com/sergluka/venue-reader/releases).
-Verify the archive before extracting it.
-
-Linux:
-
-```sh
-sha256sum --check venue-reader-x86_64-unknown-linux-gnu.tar.gz.sha256
-```
-
-macOS (Apple Silicon; use `x86_64-apple-darwin` for Intel):
-
-```sh
-shasum -a 256 --check venue-reader-aarch64-apple-darwin.tar.gz.sha256
-```
-
-Windows PowerShell:
-
-```powershell
-(Get-FileHash .\venue-reader-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
-```
-
-Compare the Windows hash, ignoring letter case, with the first value in the
-matching `.sha256` file. After verification, extract the archive (`.tar.gz` on
-Linux/macOS, `.zip` on Windows) and put the executable on `PATH`, or configure
-your LSP client with its full path.
-
-### Installation with cargo-binstall
-
-If you use [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), install
-the prebuilt binary from this project's GitHub Release:
-
-```sh
-cargo binstall venue-reader --strategies crate-meta-data
-```
-
-This strategy excludes third-party quickinstall builds and compilation fallback.
-
-### Release provenance
-
-For a release built with GitHub artifact attestations, verify the downloaded
-archive with the [GitHub CLI](https://cli.github.com/):
-
-```sh
-gh attestation verify venue-reader-x86_64-unknown-linux-gnu.tar.gz --repo sergluka/venue-reader
-```
-
-Use your platform's archive name. Review the reported source revision and release
-workflow. This verifies the recorded provenance and digest; it does not audit the
-code. Keep checksum verification for manual downloads.
-
-### Cargo installation
-
-Rust 1.91 or later is required only when building from source.
-Install from crates.io:
-
-```sh
-cargo install venue-reader --locked
-```
-
-Install from the cloned repository:
-
-```sh
-cargo install --path . --locked
-```
-
-Or install directly from GitHub:
-
-```sh
-cargo install --git https://github.com/sergluka/venue-reader.git --locked
-```
-
-The local and GitHub commands do not require a crates.io release.
-Cargo installs a release build in `~/.cargo/bin` by default. Add this directory
-to `PATH` if needed. `--locked` uses the dependency versions in `Cargo.lock`.
-
-Check the installation:
-
-```sh
-venue-reader --version
-```
-
-To build and run without installation:
-
-```sh
-cargo build --release
-./target/release/venue-reader --stdio
-```
-
-Once the binary is on `PATH`, the launch command is:
-
-```sh
-venue-reader --stdio
-```
-
-| Option | Purpose / default |
-| --- | --- |
-| `--stdio` | Start the server over stdin/stdout; required. |
-| `--log-level <level>` | `off`, `error`, `warn`, `info`, `debug`, or `trace`; default `info`. |
-| `--log-file <path>` | Append logs to a file; default is stderr. |
-| `--version` | Print the version and exit. |
-| `--help`, `-h` | Print usage and exit. |
-
-Only stdio transport is supported. Stdout is reserved for LSP traffic.
-There is no `--config` option; use the configuration sources below.
-
-Editor setup depends on the client. This repository does not yet provide
-editor-specific installation recipes or an extension. See
-[Running the server](https://github.com/sergluka/venue-reader/wiki/Running-the-Server) for more detail.
+See [FIX versions](https://github.com/sergluka/venue-reader/wiki/FIX-Versions)
+for dictionary selection and
+[Inspecting logs](https://github.com/sergluka/venue-reader/wiki/Inspecting-Logs)
+for input-format details.
 
 ## Inspecting messages
 
@@ -278,10 +95,14 @@ from a synthetic FIX 4.4 market-data snapshot (`MsgType(35) = W`) with two
 
 ### Message summaries
 
-Message summaries use fields on the line to show time, sequence number,
-sender, target, and message type. Code-lens summaries are enabled by default.
-Their titles are display-only. Clients that do not show code lens can request
-summaries through inlay hints instead.
+Message summaries show time, sequence number, sender, target, and message type.
+Choose either or both display channels in `messageSummary.channels`:
+
+- `codeLens`: above each message line; enabled by default. Titles are display-only.
+- `inlayHints`: at the start of each message line; disabled by default.
+
+Choose the channel that works best in your preferred editor. Some editors do not
+support code lens; others offer better formatting for inlay hints.
 
 <details>
 <summary>Example: summary above a message</summary>
@@ -301,10 +122,6 @@ is shortened here:
 The outline shows messages, fields, and repeating-group entries. Select an
 entry to navigate to its location. `documentSymbol.depth` accepts `messages`,
 `fields`, or `full`; the default is `full`.
-
-**Limit:** The server supports hierarchical `DocumentSymbol` results only.
-The client must advertise `hierarchicalDocumentSymbolSupport`. Clients that
-accept only flat `SymbolInformation` lists are not offered document symbols.
 
 <details>
 <summary>Example: repeating groups in the outline</summary>
@@ -337,70 +154,28 @@ value → field → group entry → group → message line.
 `fix.decode` returns annotated text for a selection, such as
 `35(MsgType)=0(Heartbeat)`.
 
-<details>
-<summary>Example: selection expansion and decoded text</summary>
-
-With the cursor on the `0` in `MsgType(35)`, successive selection ranges are:
-
-```text
-0                                value
-35=0                             field
-8=FIX.4.4|9=61|35=0|...|10=149|    message line (shortened)
-
-fix.decode on the selected field:
-35(MsgType)=0(Heartbeat)
-```
-
-</details>
-
 ### Semantic highlighting
 
 Semantic highlighting separates tags and values and can mark group nesting.
 Basic types use standard LSP token names. Types such as `price`, `quantity`,
 `timestamp`, and `group` need client/theme mappings.
 
-<details>
-<summary>Example: semantic token classifications</summary>
-
-The server supplies token classifications; the editor chooses their colours.
-The last two rows come from the grouped market-data example:
-
-```text
-Field                     Tag token  Value token
-35=0                      property   keyword
-34=1                      property   number
-49=DEMO_SENDER            property   string
-52=20260919-12:00:00      property   timestamp
-270=100.50                property   price
-271=10                    property   quantity
-```
-
-</details>
-
 See [Inspecting logs](https://github.com/sergluka/venue-reader/wiki/Inspecting-Logs) for hover and outline
 examples, label formats, and summary templates. See
 [Semantic tokens](https://github.com/sergluka/venue-reader/wiki/Semantic-Tokens) for the token legend and
 coloring requirements.
 
-## Basic configuration
+## Configuration
 
-Settings apply from lowest to highest priority:
+Settings apply in this order; later sources override earlier ones:
 
-1. Built-in defaults.
-2. Personal `config.toml`: `$XDG_CONFIG_HOME/venue-reader/config.toml`, or
-   `~/.config/venue-reader/config.toml` if that variable is unset, empty, or relative.
-3. Global LSP `fix` settings supplied by the editor.
-4. Matching project `.venue-reader.toml` files, from workspace root to the document.
-5. Document modelines: `# fix:` comments in the first or last five content lines.
+1. Built-in [defaults](https://github.com/sergluka/venue-reader/wiki/Configuration-Reference#built-in-defaults).
+2. Personal `~/.config/venue-reader/config.toml` (or under `$XDG_CONFIG_HOME`).
+3. The editor's global LSP `fix` settings.
+4. Project `.venue-reader.toml` files, from workspace root to the document.
+5. `# fix:` modelines in the first or last five content lines.
 
-Higher layers override only the settings they supply. Project files can be
-nested; a nearer file can override an ancestor. Keep configuration files sparse.
-
-The wiki has the complete default configuration in
-[TOML for a personal file](https://github.com/sergluka/venue-reader/wiki/Configuration-Reference#toml-file)
-and [JSON for an LSP client](https://github.com/sergluka/venue-reader/wiki/Configuration-Reference#json-for-lsp-clients).
-Tag-name and enum hints are **on by default**. For example, this small personal
-configuration turns them off:
+For example, turn off the default tag-name and enum hints in your personal file:
 
 ```toml
 # ~/.config/venue-reader/config.toml
@@ -411,33 +186,116 @@ enabled = false
 enabled = false
 ```
 
-A modeline can select a dictionary for one document:
+Select a dictionary for one document with a modeline:
 
 ```text
 # fix: dictionary=FIX.4.4
 ```
 
-File access, reference URLs, override controls, and resource limits are
-personal/global settings. Project files and modelines cannot change them.
-There is no filesystem watcher for TOML or dictionary files: send a
-configuration-change notification or restart after changing those files.
+See [Configuration](https://github.com/sergluka/venue-reader/wiki/Configuration)
+for file locations, setting scopes, and reload behavior.
 
-See [Configuration](https://github.com/sergluka/venue-reader/wiki/Configuration) for source scopes,
-project filters, modelines, and reload behavior. The
-[Settings reference](https://github.com/sergluka/venue-reader/wiki/Configuration-Reference) lists all
-defaults and resource limits.
+## Build and launch
+
+### Binary installers
+
+The installers download the latest stable prebuilt binary; Rust and Cargo are
+not required. For a specific version, replace `latest/download` with
+`download/v<version>` in either URL.
+
+| Operating system | Architecture | Release baseline |
+| --- | --- | --- |
+| Linux | x86-64 | glibc 2.35 or later; excludes Alpine/musl and NixOS. |
+| macOS | Intel x86-64, Apple Silicon | macOS 11 or later. |
+| Windows | x86-64 | Windows 10 or later. |
+
+Linux and macOS:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf -o venue-reader-installer.sh https://github.com/sergluka/venue-reader/releases/latest/download/venue-reader-installer.sh
+sh ./venue-reader-installer.sh
+```
+
+Windows PowerShell:
+
+```powershell
+Invoke-WebRequest -UseBasicParsing -Uri https://github.com/sergluka/venue-reader/releases/latest/download/venue-reader-installer.ps1 -OutFile venue-reader-installer.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\venue-reader-installer.ps1
+```
+
+Installation is per user, in `~/.local/bin` on Linux/macOS and
+`%USERPROFILE%\.local\bin` on Windows. The installers update your shell
+configuration or user PATH. Open a new terminal after installation.
+No administrator privileges are needed.
+
+See [installation options](https://github.com/sergluka/venue-reader/wiki/Running-the-Server#installation)
+for a custom directory or installation without PATH changes.
+
+The standard cargo-dist shell installer checks archive SHA-256 only when
+`sha256sum` is available; otherwise it skips that check. The PowerShell installer
+does not check archive hashes. See
+[manual archive installation](https://github.com/sergluka/venue-reader/wiki/Running-the-Server#manual-archive-installation)
+for explicit checksum verification.
+
+### Installation with cargo-binstall
+
+If you use [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), install
+the prebuilt binary from this project's GitHub Release:
+
+```sh
+cargo binstall venue-reader --strategies crate-meta-data
+```
+
+This strategy excludes third-party quickinstall builds and compilation fallback.
+
+See [release provenance](https://github.com/sergluka/venue-reader/wiki/Running-the-Server#release-provenance)
+for artifact attestation verification.
+
+### Cargo installation
+
+Rust 1.91 or later is required only when building from source.
+Install from crates.io:
+
+```sh
+cargo install venue-reader --locked
+```
+
+Cargo installs a release build in `~/.cargo/bin` by default. Add this directory
+to `PATH` if needed. `--locked` uses the dependency versions in `Cargo.lock`.
+
+To build from a cloned repository without installation:
+
+```sh
+cargo build --release
+```
+
+Editor setup depends on the client. This repository does not yet provide
+editor-specific installation recipes or an extension. See
+[Running the server](https://github.com/sergluka/venue-reader/wiki/Running-the-Server) for more detail.
+
+## Command-line parameters
+
+| Option | Purpose / default |
+| --- | --- |
+| `--stdio` | Start the server over stdin/stdout; required. |
+| `--log-level <level>` | `off`, `error`, `warn`, `info`, `debug`, or `trace`; default `info`. |
+| `--log-file <path>` | Append logs to a file; default is stderr. |
+| `--version` | Print the version and exit. |
+| `--help`, `-h` | Print usage and exit. |
+
+Only stdio transport is supported. Stdout is reserved for LSP traffic.
+There is no `--config` option; use the sources in [Configuration](#configuration).
 
 ## Custom dictionaries
 
-Custom dictionaries use QuickFIX XML. They can define their own fields, enum
-values, messages, and repeating groups. They do not inherit missing definitions
-from bundled dictionaries.
+Load custom QuickFIX XML dictionaries for fields, enum values, messages, and
+repeating groups.
 
 **Requires explicit permission:** Set `allowDictionaryPath = true` in personal
-TOML or global LSP settings before loading external XML. This permission is
-false by default and cannot be enabled by a project or document.
+TOML or global LSP settings. Loading is disabled by default to prevent untrusted
+projects or modelines from loading local XML files; neither can enable it.
 
-For a conventional FIX 4.4 dictionary, register and select it in a project file:
+Register and select a FIX 4.4 dictionary in a project file:
 
 ```toml
 # .venue-reader.toml
@@ -448,58 +306,22 @@ name = "custom44"
 path = "dict/custom-fix44.xml"
 ```
 
-The path is relative to that project file. Registration and selection are
-separate: `name` identifies the binding, and `dictionary` selects it. Selecting
-a dictionary still checks the message's version.
-
-FIX5 dictionaries may need separate transport and application files. A combined
-FIXT-rooted file needs an explicit application release. Use the form that
-matches the actual XML, not its filename or venue name.
-
-See [Dictionaries](https://github.com/sergluka/venue-reader/wiki/Dictionaries) for binding forms, accepted
-XML, path rules, and loader limits. [Venue examples](https://github.com/sergluka/venue-reader/wiki/Venue-Dictionaries)
-show publisher-backed recipes for specific interfaces; they are not venue
-compatibility certifications.
+Relative paths resolve against the project file's directory. See
+[Dictionaries](https://github.com/sergluka/venue-reader/wiki/Dictionaries)
+for FIX5 bindings, XML requirements, and limits, or
+[Venue examples](https://github.com/sergluka/venue-reader/wiki/Venue-Dictionaries)
+for recipes based on public documentation.
 
 ## Diagnostics and quick fixes
 
-All five FIX rules are enabled by default:
+Venue Reader flags version and dictionary problems, unknown messages and tags,
+missing envelope fields, and incorrect `BodyLength(9)` or `CheckSum(10)`.
+All rules are enabled by default; use `diagnostics.rules` to disable them or
+change their severity.
 
-| Rule | What it checks | Default severity |
-| --- | --- | --- |
-| `unknownVersion` | Missing, invalid, or unresolved transport/application identity. | Warning |
-| `dictionaryVersion` | A selected dictionary conflicts with the message's version. | Warning |
-| `integrity` | Missing `BeginString(8)`, `BodyLength(9)`, or `CheckSum(10)`; incorrect length or checksum. | Error |
-| `unknownMsgType` | Missing `MsgType(35)`, or a message the dictionary does not define. | Error |
-| `unknownTag` | A tag the resolved dictionary does not define. | Info |
-
-For the `Heartbeat` above, change `BodyLength(9)` to `1` and `CheckSum(10)` to
-`000` to see both integrity diagnostics. A quick fix repairs both values together
-and keeps the line's separator. Integrity checks for missing envelope fields on any
-line with parsed fields. Value calculations and repairs require `BeginString(8)`
-and at least two parsed fields; they normalize separators to wire SOH.
-
-<details>
-<summary>Example: diagnostics and one repair</summary>
-
-```text
-Before (line shortened):
-8=FIX.4.4|9=1|35=0|...|10=000|
-
-BodyLength is 1, expected 61
-CheckSum is 000, expected 149
-
-Quick fix: Fix BodyLength and CheckSum
-
-After (line shortened):
-8=FIX.4.4|9=61|35=0|...|10=149|
-```
-
-</details>
-
-Rules can be disabled or assigned a severity through `diagnostics.rules`.
-Disabling diagnostics or the integrity rule also disables its quick fix.
-Configuration errors remain visible when FIX diagnostics are disabled.
+A quick fix repairs length and checksum together while preserving the separator.
+Try changing `BodyLength(9)` to `1` and `CheckSum(10)` to `000` in the Heartbeat
+above to see it in action.
 
 **Limit:** This is not full FIX schema validation. Other required fields, field
 membership, enum values, group-count consistency, and sequence gaps are not
@@ -509,9 +331,9 @@ codes, and repair behavior.
 ## Client support and large logs
 
 Features use the client's advertised capabilities. Document symbols require
-hierarchical support; flat symbol lists are not supported. Quick fixes require
-code-action literals and versioned document edits. Custom commands return data
-that the client must display or use.
+`hierarchicalDocumentSymbolSupport`; flat `SymbolInformation` lists are not
+supported. Quick fixes require code-action literals and versioned document edits.
+Custom commands return data that the client must display or use.
 
 Requests are bounded to keep large logs usable. By default, code-lens summaries
 stop above 20,000 document lines, and full semantic tokens cover the first
@@ -535,18 +357,17 @@ Clients invoke these commands through `workspace/executeCommand`:
 | `fix.useDictionary` | Select a bundled or globally registered dictionary for the session; project/modeline selectors take precedence. |
 | `fix.describeOverrides` | Show a document's effective settings, their sources, warnings, and dictionary bindings. |
 
-These commands do not reload configuration files. See
+See
 [LSP methods and commands](https://github.com/sergluka/venue-reader/wiki/LSP-Reference#custom-commands)
-for arguments, result formats, and errors.
+for request/response examples, arguments, and errors.
 
 ## Security and dictionary sources
 
-The server analyzes logs offline. It can include reference links in hover and
-resolved hints. Opening those links contacts the website through your editor
-or browser. Set `documentLink.url = ""` to remove external reference links.
+Hover and resolved hints can include reference links. Opening those links
+contacts the website through your editor or browser. Set `documentLink.url = ""`
+to remove external reference links.
 
-External dictionaries require the global permission described above. XML reads
-are bounded, dictionaries must be regular files, and DTDs are rejected.
+XML reads are bounded, dictionaries must be regular files, and DTDs are rejected.
 **Debug and trace logs may contain JSON-RPC payloads**, including document text.
 Treat those logs as potentially sensitive.
 
