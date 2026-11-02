@@ -1,5 +1,6 @@
 //! Registry construction is pure except for the bounded, reusable XML loader.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
@@ -629,6 +630,23 @@ impl DictionaryStore {
 }
 
 impl Registry {
+    /// Bundled choices, then named registrations with their configuration origins.
+    pub fn choices(&self) -> impl Iterator<Item = (Cow<'_, DictionaryChoice>, Option<&str>)> {
+        let bundled = Version::ALL.into_iter().map(|version| {
+            (
+                Cow::Owned(self.choice(version.as_str()).expect("bundled choice")),
+                None,
+            )
+        });
+        let named = self.definitions.iter().map(|definition| {
+            (
+                Cow::Borrowed(&definition.choice),
+                Some(definition.source.as_str()),
+            )
+        });
+        bundled.chain(named)
+    }
+
     pub fn choice(&self, name: &str) -> Option<DictionaryChoice> {
         if let Some(version) = Version::parse(name) {
             let source = bundled_source(version);

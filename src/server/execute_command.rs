@@ -18,18 +18,23 @@ use lsp_server::ResponseError;
 use lsp_types::{ExecuteCommandParams, Range, Uri, VersionedTextDocumentIdentifier};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::Write;
 
 use super::dispatch::{Dispatched, HandlerResult, Snapshot};
 use super::ServerState;
 use crate::codec::{ByteOffset, Field};
+use crate::dictionary::{DictionaryChoice, Registry, Version};
 use crate::document::{Column, LineNo, Offsets};
 use crate::render::{decode, hover};
 
 /// Public so `capabilities` advertises these strings rather than copies.
 pub const DECODE: &str = "fix.decode";
 pub const USE_DICTIONARY: &str = "fix.useDictionary";
+pub const LIST_DICTIONARIES: &str = "fix.listDictionaries";
 pub const DESCRIBE_OVERRIDES: &str = "fix.describeOverrides";
 pub const DESCRIBE_TAG: &str = "fix.describeTag";
+
+const DICTIONARY_RESULT_BYTES: usize = 1024 * 1024;
 
 struct DecodeInput<'a> {
     uri: Uri,
@@ -57,15 +62,128 @@ struct RowResult {
     text: String,
 }
 
-pub(super) fn dictionary_details(choice: &crate::dictionary::DictionaryChoice) -> Value {
-    json!({
-        "name": choice.name, "version": choice.version(), "source": choice.source,
-        "transport": {"version": choice.transport.version(), "source": choice.transport_source},
-        "application": choice.application.as_ref().map(|identity| json!({
-            "version": identity.version, "extensionPack": identity.extension_pack,
-            "customVersion": identity.custom_version, "source": choice.source
-        }))
-    })
+#[derive(Serialize)]
+struct DictionaryDetails<'a> {
+    name: Option<&'a str>,
+    version: &'a str,
+    source: &'a str,
+    transport: TransportDetails<'a>,
+    application: Option<ApplicationDetails<'a>>,
+}
+
+#[derive(Serialize)]
+struct TransportDetails<'a> {
+    version: Option<&'a str>,
+    source: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplicationDetails<'a> {
+    version: &'a str,
+    extension_pack: Option<u32>,
+    custom_version: Option<&'a str>,
+    source: &'a str,
+}
+
+impl<'a> From<&'a DictionaryChoice> for DictionaryDetails<'a> {
+    fn from(choice: &'a DictionaryChoice) -> Self {
+        Self {
+            name: choice.name.as_deref(),
+            version: choice.version(),
+            source: &choice.source,
+            transport: TransportDetails {
+                version: choice.transport.version(),
+                source: &choice.transport_source,
+            },
+            application: choice
+                .application
+                .as_ref()
+                .map(|identity| ApplicationDetails {
+                    version: &identity.version,
+                    extension_pack: identity.extension_pack,
+                    custom_version: identity.custom_version.as_deref(),
+                    source: &choice.source,
+                }),
+        }
+    }
+}
+
+pub(super) fn dictionary_details(choice: &DictionaryChoice) -> Value {
+    json!(DictionaryDetails::from(choice))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListedDictionary<'a> {
+    #[serde(flatten)]
+    details: DictionaryDetails<'a>,
+    label: DictionaryLabel<'a>,
+    kind: &'static str,
+    defined_in: Option<&'a str>,
+}
+
+struct DictionaryLabel<'a> {
+    name: &'a str,
+    kind: &'static str,
+}
+
+impl Serialize for DictionaryLabel<'_> {
+    fn serialize<Serializer>(
+        &self,
+        serializer: Serializer,
+    ) -> Result<Serializer::Ok, Serializer::Error>
+    where
+        Serializer: serde::Serializer,
+    {
+        serializer.collect_str(&format_args!("{} ({})", self.name, self.kind))
+    }
+}
+
+impl<'a> ListedDictionary<'a> {
+    fn new(choice: &'a DictionaryChoice, defined_in: Option<&'a str>) -> Self {
+        let kind = if defined_in.is_some() {
+            "global"
+        } else {
+            "bundled"
+        };
+        Self {
+            details: DictionaryDetails::from(choice),
+            label: DictionaryLabel {
+                name: choice.name.as_deref().expect("named registry choice"),
+                kind,
+            },
+            kind,
+            defined_in,
+        }
+    }
+}
+
+fn dictionary_list(registry: &Registry, cap: usize) -> HandlerResult {
+    let too_large = || {
+        super::config_pull::request_failed(&format!(
+            "{LIST_DICTIONARIES}: result exceeds {cap} bytes"
+        ))
+    };
+    let mut budget = ResultBudget(cap);
+    budget
+        .write_all(br#"{"dictionaries":[]}"#)
+        .map_err(|_| too_large())?;
+    let mut choices = Vec::new();
+    for (choice, defined_in) in registry.choices() {
+        if !choices.is_empty() {
+            budget.write_all(b",").map_err(|_| too_large())?;
+        }
+        serde_json::to_writer(&mut budget, &ListedDictionary::new(&choice, defined_in))
+            .map_err(|_| too_large())?;
+        choices.push((choice, defined_in));
+    }
+    choices[Version::ALL.len()..].sort_unstable_by(|left, right| left.0.name.cmp(&right.0.name));
+    let dictionaries: Vec<_> = choices
+        .iter()
+        .map(|(choice, defined_in)| ListedDictionary::new(choice, *defined_in))
+        .collect();
+    Ok(json!({"dictionaries": dictionaries}))
 }
 
 impl ServerState {
@@ -94,10 +212,13 @@ impl ServerState {
         if params.command == DESCRIBE_TAG {
             return Dispatched::Now(self.describe_tag(&params));
         }
+        if params.command == LIST_DICTIONARIES {
+            return Dispatched::Now(self.list_dictionaries(&params));
+        }
         if params.command != DECODE {
             return Dispatched::Now(Err(invalid(format!(
                 "unknown command `{}`; this server offers `{DECODE}`, `{USE_DICTIONARY}`, \
-                 `{DESCRIBE_OVERRIDES}` and `{DESCRIBE_TAG}`",
+                 `{LIST_DICTIONARIES}`, `{DESCRIBE_OVERRIDES}` and `{DESCRIBE_TAG}`",
                 params.command
             ))));
         }
@@ -215,8 +336,7 @@ impl ServerState {
         )
     }
 
-    fn describe_tag(&self, params: &ExecuteCommandParams) -> HandlerResult {
-        let (tag, value) = describe_arguments(params)?;
+    fn require_base_configuration(&self) -> Result<(), ResponseError> {
         // Rejection first: a rejected first pull never commits, and "retry
         // later" would then be wrong forever.
         if self.config.rejected {
@@ -229,6 +349,20 @@ impl ServerState {
                 "configuration is not ready, retry later",
             ));
         }
+        Ok(())
+    }
+
+    fn list_dictionaries(&self, params: &ExecuteCommandParams) -> HandlerResult {
+        if !params.arguments.as_deref().unwrap_or_default().is_empty() {
+            return Err(invalid(format!("{LIST_DICTIONARIES} takes no arguments")));
+        }
+        self.require_base_configuration()?;
+        dictionary_list(&self.registry, DICTIONARY_RESULT_BYTES)
+    }
+
+    fn describe_tag(&self, params: &ExecuteCommandParams) -> HandlerResult {
+        let (tag, value) = describe_arguments(params)?;
+        self.require_base_configuration()?;
         match hover::describe(tag, value, &self.render) {
             Some(text) => Ok(json!(text)),
             None => Err(super::config_pull::request_failed(&format!(
@@ -390,7 +524,7 @@ impl std::io::Write for ResultBudget {
         self.0 = self
             .0
             .checked_sub(bytes.len())
-            .ok_or_else(|| std::io::Error::other("decode result byte limit"))?;
+            .ok_or_else(|| std::io::Error::other("result byte limit"))?;
         Ok(bytes.len())
     }
 
@@ -470,6 +604,94 @@ mod tests {
     const THREE: &str = "8=FIX.4.4|35=0|34=1|10=171|\n\
 8=FIX.4.4|35=1|34=2|10=172|\n\
 8=FIX.4.4|35=2|34=3|10=173|";
+
+    fn listing_registry(names: &[String], origin: &str) -> Registry {
+        use crate::config::{DictionarySpec, Limits};
+        use crate::dictionary::{BuildContext, DictionaryLayer, DictionaryStore};
+        let specs: Vec<_> = names
+            .iter()
+            .map(|name| DictionarySpec {
+                name: name.clone(),
+                transport: Some("FIXT.1.1".into()),
+                application: Some("FIX.5.0SP2".into()),
+                extension_pack: Some(0),
+                custom_version: Some("synthetic-\"β\"\n".into()),
+                ..Default::default()
+            })
+            .collect();
+        let (registry, events) = DictionaryStore::default()
+            .build_registry(
+                &[DictionaryLayer {
+                    specs: &specs,
+                    source: origin,
+                    root_dir: None,
+                }],
+                &BuildContext {
+                    root_dir: None,
+                    home_dir: None,
+                    limits: &Limits::default(),
+                },
+            )
+            .unwrap();
+        assert!(events.is_empty(), "{events:?}");
+        registry
+    }
+
+    #[test]
+    fn dictionary_listing_budget_counts_the_complete_escaped_result() {
+        let cases = [
+            (Vec::new(), "client"),
+            (
+                vec![" quoted-\"β\"\\\n\t\u{1} ".into()],
+                "file:///synthetic/\"β\"\\\n",
+            ),
+            ((0..50).map(|i| format!("alias-{i}")).collect(), "client"),
+        ];
+        for (names, origin) in cases {
+            let registry = listing_registry(&names, origin);
+            let result = dictionary_list(&registry, usize::MAX).unwrap();
+            let bytes = serde_json::to_vec(&result).unwrap().len();
+            assert_eq!(dictionary_list(&registry, bytes).unwrap(), result);
+            assert_eq!(dictionary_list(&registry, bytes + 1).unwrap(), result);
+            for cap in [0, bytes - 1] {
+                let error = dictionary_list(&registry, cap).unwrap_err();
+                assert_eq!(error.code, lsp_server::ErrorCode::RequestFailed as i32);
+                assert_eq!(
+                    error.message,
+                    format!("fix.listDictionaries: result exceeds {cap} bytes")
+                );
+            }
+            assert_eq!(
+                result["dictionaries"].as_array().unwrap().len(),
+                9 + names.len()
+            );
+            if let Some(name) = names.first() {
+                let entry = result["dictionaries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["name"] == *name)
+                    .unwrap();
+                assert_eq!(entry["label"], format!("{name} (global)"));
+                assert_eq!(entry["definedIn"], origin);
+                assert_eq!(entry["application"]["extensionPack"], 0);
+                assert_eq!(entry["application"]["customVersion"], "synthetic-\"β\"\n");
+            }
+        }
+    }
+
+    #[test]
+    fn dictionary_listing_refuses_an_oversized_name_or_origin_without_skipping_it() {
+        let base = dictionary_list(&Registry::bundled_only(), usize::MAX).unwrap();
+        let cap = serde_json::to_vec(&base).unwrap().len() + 512;
+        for (names, origin) in [
+            (vec!["z".repeat(cap), "a".into()], "client".into()),
+            (vec!["a".into()], "source".repeat(cap)),
+        ] {
+            let registry = listing_registry(&names, &origin);
+            assert!(dictionary_list(&registry, cap).is_err());
+        }
+    }
 
     fn selected_text(result: Value) -> Value {
         let text = result["results"]
@@ -655,7 +877,13 @@ mod tests {
         };
         assert_eq!(unknown.code, lsp_server::ErrorCode::InvalidParams as i32);
         assert!(unknown.message.contains("fix.somethingElse"), "{unknown:?}");
-        for offered in [DECODE, USE_DICTIONARY, DESCRIBE_OVERRIDES, DESCRIBE_TAG] {
+        for offered in [
+            DECODE,
+            USE_DICTIONARY,
+            LIST_DICTIONARIES,
+            DESCRIBE_OVERRIDES,
+            DESCRIBE_TAG,
+        ] {
             assert!(unknown.message.contains(offered), "{unknown:?}");
         }
 

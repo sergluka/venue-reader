@@ -14,6 +14,7 @@ fn commands_are_advertised_without_decode_aliases() {
         json!([
             "fix.decode",
             "fix.useDictionary",
+            "fix.listDictionaries",
             "fix.describeOverrides",
             "fix.describeTag"
         ]),

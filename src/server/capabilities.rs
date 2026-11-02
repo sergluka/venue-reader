@@ -195,6 +195,7 @@ pub fn initialize_result(encoding: PositionEncoding, caps: &ClientCapabilities) 
                 commands: vec![
                     super::execute_command::DECODE.to_owned(),
                     super::execute_command::USE_DICTIONARY.to_owned(),
+                    super::execute_command::LIST_DICTIONARIES.to_owned(),
                     super::execute_command::DESCRIBE_OVERRIDES.to_owned(),
                     super::execute_command::DESCRIBE_TAG.to_owned(),
                 ],
@@ -234,6 +235,7 @@ mod tests {
             json!([
                 "fix.decode",
                 "fix.useDictionary",
+                "fix.listDictionaries",
                 "fix.describeOverrides",
                 "fix.describeTag"
             ])

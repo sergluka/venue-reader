@@ -2,7 +2,7 @@
 
 mod stdio_harness;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use stdio_harness::{cli_output, StdioClient};
@@ -62,6 +62,7 @@ fn release_artifact_smoke() {
     for command in [
         "fix.decode",
         "fix.useDictionary",
+        "fix.listDictionaries",
         "fix.describeOverrides",
         "fix.describeTag",
     ] {
@@ -122,6 +123,67 @@ fn release_artifact_smoke() {
             ]
         })
     );
+    assert!(client.shutdown_and_exit().success(), "{}", client.stderr());
+}
+
+#[test]
+fn dictionary_discovery_and_selection_work_without_opening_a_document() {
+    let mut client = StdioClient::start("dictionary-discovery", None, None);
+    let initialize = client.request("initialize", json!({"capabilities":{}}));
+    let commands = initialize["capabilities"]["executeCommandProvider"]["commands"]
+        .as_array()
+        .expect("commands");
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| *command == "fix.listDictionaries")
+            .count(),
+        1
+    );
+    client.notify("initialized", json!({}));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match client.request_result(
+            "workspace/executeCommand",
+            json!({"command":"fix.describeTag","arguments":[1328]}),
+        ) {
+            Ok(_) => break,
+            Err(error) if error["code"] == -32803 && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            result => panic!("base configuration did not become ready: {result:?}"),
+        }
+    }
+    let choices = client.request(
+        "workspace/executeCommand",
+        json!({"command":"fix.listDictionaries","arguments":[]}),
+    );
+    let entries = choices["dictionaries"].as_array().expect("choices");
+    assert_eq!(entries.len(), 9);
+    let entry = entries
+        .iter()
+        .find(|entry| entry["name"] == "FIX.4.4")
+        .expect("bundled FIX.4.4 choice");
+    assert_eq!(
+        entry,
+        &json!({
+            "name":"FIX.4.4","label":"FIX.4.4 (bundled)",
+            "kind":"bundled","definedIn":null,"version":"FIX.4.4",
+            "source":"FIX.4.4",
+            "transport":{"version":"FIX.4.4","source":"FIX.4.4"},
+            "application":{
+                "version":"FIX.4.4","extensionPack":null,"customVersion":null,
+                "source":"FIX.4.4"
+            }
+        })
+    );
+    let selected = client.request(
+        "workspace/executeCommand",
+        json!({"command":"fix.useDictionary","arguments":[entry["name"]]}),
+    );
+    for field in ["name", "version", "source", "transport", "application"] {
+        assert_eq!(selected[field], entry[field]);
+    }
     assert!(client.shutdown_and_exit().success(), "{}", client.stderr());
 }
 
@@ -357,6 +419,7 @@ fn personal_configuration_and_fix_initialization_options_reach_fix_commands() {
             json!([
                 "fix.decode",
                 "fix.useDictionary",
+                "fix.listDictionaries",
                 "fix.describeOverrides",
                 "fix.describeTag"
             ]),

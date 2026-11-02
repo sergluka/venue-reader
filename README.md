@@ -355,6 +355,7 @@ Clients invoke these commands through `workspace/executeCommand`:
 | `fix.decode` | Decode versioned selections with results for each range and source row, including empty rows. |
 | `fix.describeTag` | Describe a tag and optional enum value from bundled reference data; no open document is required. |
 | `fix.useDictionary` | Select a bundled or globally registered dictionary for the session; project/modeline selectors take precedence. |
+| `fix.listDictionaries` | List bundled and committed global dictionary choices; no open document is required. |
 | `fix.describeOverrides` | Show a document's effective settings, their sources, warnings, and dictionary bindings. |
 
 See

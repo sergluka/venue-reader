@@ -268,6 +268,11 @@ impl StdioClient {
     }
 
     pub fn request(&mut self, method: &str, params: Value) -> Value {
+        self.request_result(method, params)
+            .unwrap_or_else(|error| panic!("{method} failed: {error}; {}", self.context()))
+    }
+
+    pub fn request_result(&mut self, method: &str, params: Value) -> Result<Value, Value> {
         self.next_request_id += 1;
         let request_id = self.next_request_id;
         self.send_value(&json!({
@@ -281,12 +286,12 @@ impl StdioClient {
                 && (message.get("result").is_some() || message.get("error").is_some())
         });
         if let Some(error) = response.get("error") {
-            panic!("{method} failed: {error}; {}", self.context());
+            return Err(error.clone());
         }
-        response
+        Ok(response
             .get("result")
             .cloned()
-            .expect("successful response has a result")
+            .expect("successful response has a result"))
     }
 
     pub fn wait_for_request(&mut self, method: &str) -> Value {

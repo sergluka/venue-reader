@@ -320,6 +320,143 @@ fn describe_uses_committed_state_without_loader_work_or_pending_batch_changes() 
 }
 
 #[test]
+fn dictionary_listing_reads_one_committed_registry_during_pull_and_push_updates() {
+    for pull in [false, true] {
+        let (mut state, uri) = testing::state_with(testing::HEARTBEAT);
+        let (sender, received) = crossbeam_channel::unbounded::<Message>();
+        state.sender = sender.into();
+        state.apply_base_value(&json!({"dictionaries":[{
+            "name":"previous", "transport":"FIX.4.4", "application":"FIX.4.4"
+        }]}));
+        testing::settle(&mut state);
+        let previous = testing::answered(state.execute_command_task(&json!({
+            "command":"fix.listDictionaries", "arguments":[]
+        })));
+        assert_eq!(previous["dictionaries"].as_array().unwrap().len(), 10);
+        assert_eq!(previous["dictionaries"][9]["name"], "previous");
+        let context = state.config.documents[&uri].ctx.clone();
+        let replacement = json!({"dictionaries":[{
+            "name":"current", "transport":"FIX.4.2", "application":"FIX.4.2"
+        }]});
+
+        state.client.configuration = pull;
+        let barrier = hold(&state.loader);
+        state.on_did_change_configuration(json!({"settings":{"fix":replacement}}));
+        let generation = state.config.pending.as_ref().unwrap().generation;
+        let started = state.config.pending.as_ref().unwrap().started;
+        if pull {
+            let refused = state.execute_command_task(&json!({
+                "command":"fix.listDictionaries", "arguments":[]
+            }));
+            match refused {
+                Dispatched::Now(Err(error)) => {
+                    assert_eq!(error.code, -32803);
+                    assert_eq!(error.message, "configuration is not ready, retry later");
+                }
+                _ => panic!("an unanswered pull refuses dictionary discovery"),
+            }
+            state.on_base_reply(generation, Ok(json!([replacement])));
+        }
+
+        let jobs = state.loader.jobs_submitted.load(Ordering::Relaxed);
+        state.on_request(Request::new(
+            73.into(),
+            "workspace/executeCommand".into(),
+            json!({"command":"fix.listDictionaries","arguments":[]}),
+        ));
+        let responses: Vec<_> = received
+            .try_iter()
+            .filter_map(|message| match message {
+                Message::Response(response) => Some(response),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            responses.len(),
+            1,
+            "listing answers before releasing the loader"
+        );
+        assert_eq!(responses[0].id, 73.into());
+        assert_eq!(responses[0].response_result.as_ref().unwrap(), &previous);
+        assert_eq!(state.loader.jobs_submitted.load(Ordering::Relaxed), jobs);
+        assert_eq!(
+            state.config.pending.as_ref().unwrap().generation,
+            generation
+        );
+        assert_eq!(state.config.pending.as_ref().unwrap().started, started);
+        assert!(Arc::ptr_eq(&context, &state.config.documents[&uri].ctx));
+
+        barrier.send(()).unwrap();
+        testing::settle(&mut state);
+        let current = testing::answered(state.execute_command_task(&json!({
+            "command":"fix.listDictionaries", "arguments":[]
+        })));
+        let entries = current["dictionaries"].as_array().unwrap();
+        assert_eq!(entries.len(), 10);
+        assert_eq!(
+            entries[..9],
+            previous["dictionaries"].as_array().unwrap()[..9]
+        );
+        assert_eq!(entries[9]["name"], "current");
+        assert_eq!(entries[9]["version"], "FIX.4.2");
+        assert_eq!(entries[9]["definedIn"], "client");
+    }
+}
+
+#[test]
+fn dictionary_listing_preserves_the_effective_session_choice_without_loader_work() {
+    let (mut state, uri) = testing::state_with("8=FIX.4.2|35=0|");
+    state.apply_base_value(&json!({"dictionaries":[
+        {"name":"selected42", "transport":"FIX.4.2", "application":"FIX.4.2"},
+        {"name":"other44", "transport":"FIX.4.4", "application":"FIX.4.4"}
+    ]}));
+    testing::settle(&mut state);
+    let selected = testing::answered(state.execute_command_task(&json!({
+        "command":"fix.useDictionary", "arguments":["selected42"]
+    })));
+    assert_eq!(selected["name"], "selected42");
+    testing::settle(&mut state);
+    let before = describe(&mut state, &uri);
+    assert_eq!(before["effective"]["dictionary"], "selected42");
+    assert_eq!(before["sources"]["dictionary"]["layer"], "session");
+    let hover_params = json!({
+        "textDocument":{"uri":uri.as_str()}, "position":{"line":0,"character":11}
+    });
+    let hover_before = testing::answered(state.hover_task(&hover_params));
+    assert!(hover_before["contents"]["value"]
+        .as_str()
+        .unwrap()
+        .contains("Heartbeat"));
+    let decode_params = json!({"command":"fix.decode","arguments":[{
+        "textDocument":{"uri":uri.as_str(),"version":1},
+        "ranges":[{"start":{"line":0,"character":10},"end":{"line":0,"character":14}}]
+    }]});
+    let decoded_before = testing::answered(state.execute_command_task(&decode_params));
+    assert_eq!(
+        decoded_before["results"][0]["lines"][0]["text"],
+        "35(MsgType)=0(Heartbeat)"
+    );
+    let barrier = hold(&state.loader);
+    let jobs = state.loader.jobs_submitted.load(Ordering::Relaxed);
+    let listed = testing::answered(state.execute_command_task(&json!({
+        "command":"fix.listDictionaries", "arguments":[]
+    })));
+    assert_eq!(listed["dictionaries"].as_array().unwrap().len(), 11);
+    assert_eq!(state.loader.jobs_submitted.load(Ordering::Relaxed), jobs);
+    assert!(state.config.pending.is_none());
+    assert_eq!(describe(&mut state, &uri), before);
+    assert_eq!(
+        testing::answered(state.hover_task(&hover_params)),
+        hover_before
+    );
+    assert_eq!(
+        testing::answered(state.execute_command_task(&decode_params)),
+        decoded_before
+    );
+    barrier.send(()).unwrap();
+}
+
+#[test]
 fn a_loader_panic_becomes_a_fatal_configuration_result() {
     let (mut state, _) = testing::state_with(testing::HEARTBEAT);
     state.client.configuration = true;

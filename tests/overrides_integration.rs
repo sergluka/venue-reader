@@ -493,6 +493,7 @@ fn all_layers_merge_sparsely_and_describe_reports_effective_values() {
         json!([
             "fix.decode",
             "fix.useDictionary",
+            "fix.listDictionaries",
             "fix.describeOverrides",
             "fix.describeTag"
         ])
