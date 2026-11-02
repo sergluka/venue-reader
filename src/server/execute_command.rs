@@ -15,7 +15,9 @@
 //! the reference link, which is what the readiness check below protects.
 
 use lsp_server::ResponseError;
-use lsp_types::{ExecuteCommandParams, Range, Uri, VersionedTextDocumentIdentifier};
+use lsp_types::{
+    ExecuteCommandParams, Range, TextDocumentIdentifier, Uri, VersionedTextDocumentIdentifier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::Write;
@@ -38,7 +40,6 @@ const DICTIONARY_RESULT_BYTES: usize = 1024 * 1024;
 
 struct DecodeInput<'a> {
     uri: Uri,
-    version: i32,
     ranges: &'a [Value],
 }
 
@@ -247,12 +248,6 @@ impl ServerState {
             .expect("configured snapshot")
             .limits;
         let cap = limits.range_lines;
-        if input.version != snapshot.version {
-            return Dispatched::Now(Err(super::content_modified(
-                DECODE,
-                "the document version has changed",
-            )));
-        }
         if input.ranges.len() > cap {
             return Dispatched::Now(Err(selection_too_large(cap)));
         }
@@ -410,21 +405,20 @@ fn result_too_large(cap: usize) -> ResponseError {
 fn arguments(params: &ExecuteCommandParams) -> Result<DecodeInput<'_>, ResponseError> {
     let shape = || {
         invalid(format!(
-            "{DECODE} takes [{{textDocument: {{uri, version}}, ranges}}]"
+            "{DECODE} takes [{{textDocument: {{uri}}, ranges}}]"
         ))
     };
     let [argument] = params.arguments.as_deref().unwrap_or_default() else {
         return Err(shape());
     };
-    let document: VersionedTextDocumentIdentifier =
+    let document: TextDocumentIdentifier =
         serde_json::from_value(argument["textDocument"].clone()).map_err(|_| shape())?;
     let ranges = argument["ranges"]
         .as_array()
         .filter(|ranges| !ranges.is_empty())
         .ok_or_else(shape)?;
     Ok(DecodeInput {
-        uri: document.text_document_identifier.uri,
-        version: document.version,
+        uri: document.uri,
         ranges,
     })
 }
@@ -708,7 +702,7 @@ mod tests {
     fn ask(state: &mut ServerState, uri: &Uri, ranges: Value) -> Value {
         selected_text(answered(state.execute_command_task(&json!({
             "command": DECODE,
-            "arguments": [{"textDocument": {"uri": uri.as_str(), "version": 1}, "ranges": ranges}],
+            "arguments": [{"textDocument": {"uri": uri.as_str()}, "ranges": ranges}],
         }))))
     }
 
@@ -722,7 +716,7 @@ mod tests {
     fn refused(state: &mut ServerState, uri: &Uri, ranges: Value) -> ResponseError {
         match state.execute_command_task(&json!({
             "command": DECODE,
-            "arguments": [{"textDocument": {"uri": uri.as_str(), "version": 1}, "ranges": ranges}],
+            "arguments": [{"textDocument": {"uri": uri.as_str()}, "ranges": ranges}],
         })) {
             Dispatched::Now(Err(e)) => e,
             _ => panic!("refused"),

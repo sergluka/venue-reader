@@ -105,7 +105,7 @@ fn release_artifact_smoke() {
         json!({
             "command": "fix.decode",
             "arguments": [{
-                "textDocument": {"uri": uri, "version": 1},
+                "textDocument": {"uri": uri},
                 "ranges": [
                     {"start":{"line":0,"character":10},"end":{"line":0,"character":14}},
                     {"start":{"line":1,"character":0},"end":{"line":1,"character":0}}
@@ -121,6 +121,30 @@ fn release_artifact_smoke() {
                 {"rangeIndex":0,"lines":[{"line":0,"text":"35(MsgType)=0(Heartbeat)"}]},
                 {"rangeIndex":1,"lines":[{"line":1,"text":""}]}
             ]
+        })
+    );
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument":{"uri":uri,"version":2},
+            "contentChanges":[{"text":"8=FIX.4.4|35=1|"}]
+        }),
+    );
+    let changed = client.request(
+        "workspace/executeCommand",
+        json!({
+            "command":"fix.decode",
+            "arguments":[{
+                "textDocument":{"uri":uri},
+                "ranges":[{"start":{"line":0,"character":10},"end":{"line":0,"character":14}}]
+            }]
+        }),
+    );
+    assert_eq!(
+        changed,
+        json!({
+            "textDocument":{"uri":uri,"version":2},
+            "results":[{"rangeIndex":0,"lines":[{"line":0,"text":"35(MsgType)=1(TestRequest)"}]}]
         })
     );
     assert!(client.shutdown_and_exit().success(), "{}", client.stderr());
@@ -441,7 +465,7 @@ fn personal_configuration_and_fix_initialization_options_reach_fix_commands() {
             json!({
                 "command": "fix.decode",
                 "arguments": [{
-                    "textDocument":{"uri":uri,"version":1},
+                    "textDocument":{"uri":uri},
                     "ranges":[{
                         "start": { "line": 0, "character": 10 },
                         "end": { "line": 0, "character": 14 }

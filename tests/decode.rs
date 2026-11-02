@@ -2,7 +2,7 @@
 
 mod harness;
 
-use harness::{TestClient, Workspace, CONTENT_MODIFIED, INVALID_PARAMS, REQUEST_FAILED};
+use harness::{TestClient, Workspace, INVALID_PARAMS, REQUEST_FAILED};
 use serde_json::{json, Value};
 
 const URI: &str = "file:///decode.fix";
@@ -13,9 +13,9 @@ fn range(first: u32, start: u32, last: u32, end: u32) -> Value {
     json!({"start":{"line":first,"character":start},"end":{"line":last,"character":end}})
 }
 
-fn params(uri: &str, version: i32, ranges: Value) -> Value {
+fn params(uri: &str, ranges: Value) -> Value {
     json!({"command":"fix.decode","arguments":[{
-        "textDocument":{"uri":uri,"version":version},"ranges":ranges
+        "textDocument":{"uri":uri},"ranges":ranges
     }]})
 }
 
@@ -30,7 +30,7 @@ fn start(text: &str, settings: Value) -> TestClient {
 }
 
 fn decode(client: &mut TestClient, ranges: Value) -> Result<Value, i32> {
-    client.request("workspace/executeCommand", params(URI, 1, ranges))
+    client.request("workspace/executeCommand", params(URI, ranges))
 }
 
 fn result(lines: &[&str]) -> Value {
@@ -135,12 +135,12 @@ fn malformed_envelopes_and_ranges_are_invalid_params() {
         json!([]),
         json!([URI, []]),
         json!([{}]),
-        json!([{"textDocument":{"uri":URI},"ranges":[range(0,10,0,14)]}]),
-        json!([{"textDocument":{"uri":URI,"version":null},"ranges":[range(0,10,0,14)]}]),
-        json!([{"textDocument":{"uri":URI,"version":1},"ranges":[]}]),
-        json!([{"textDocument":{"uri":URI,"version":1},"ranges":"bad"}]),
-        json!([{"textDocument":{"uri":URI,"version":1},"ranges":[null]}]),
-        json!([{"textDocument":{"uri":URI,"version":1},"ranges":[{"start":{"line":-1,"character":0},"end":{"line":0,"character":1}}]}]),
+        json!([{"textDocument":{},"ranges":[range(0,10,0,14)]}]),
+        json!([{"textDocument":{"uri":null},"ranges":[range(0,10,0,14)]}]),
+        json!([{"textDocument":{"uri":URI},"ranges":[]}]),
+        json!([{"textDocument":{"uri":URI},"ranges":"bad"}]),
+        json!([{"textDocument":{"uri":URI},"ranges":[null]}]),
+        json!([{"textDocument":{"uri":URI},"ranges":[{"start":{"line":-1,"character":0},"end":{"line":0,"character":1}}]}]),
     ] {
         assert_eq!(
             client.request(
@@ -184,14 +184,7 @@ fn range_count_and_work_limits_have_explicit_validation_precedence() {
     assert_eq!(
         client.request(
             "workspace/executeCommand",
-            params(URI, 0, json!([null, null, null]))
-        ),
-        Err(CONTENT_MODIFIED)
-    );
-    assert_eq!(
-        client.request(
-            "workspace/executeCommand",
-            params("file:///closed.fix", 1, json!([null]))
+            params("file:///closed.fix", json!([null]))
         ),
         Err(REQUEST_FAILED)
     );
@@ -205,20 +198,11 @@ fn range_count_and_work_limits_have_explicit_validation_precedence() {
 }
 
 #[test]
-fn edits_close_and_reopen_are_checked_against_the_requested_version() {
+fn edits_close_and_reopen_return_the_snapshot_data_and_version() {
     let mut client = start(HEARTBEAT, json!({}));
     client.did_change_full(URI, "8=FIX.4.4|35=1|", 2);
-    assert_eq!(
-        decode(&mut client, json!([range(0, 10, 0, 14)])),
-        Err(CONTENT_MODIFIED)
-    );
-    let current = client
-        .request(
-            "workspace/executeCommand",
-            params(URI, 2, json!([range(0, 10, 0, 14)])),
-        )
-        .unwrap();
-    assert_eq!(current["textDocument"]["version"], 2);
+    let current = decode(&mut client, json!([range(0, 10, 0, 14)])).unwrap();
+    assert_eq!(current["textDocument"], json!({"uri":URI,"version":2}));
     assert_eq!(
         current["results"][0]["lines"][0]["text"],
         "35(MsgType)=1(TestRequest)"
@@ -228,13 +212,9 @@ fn edits_close_and_reopen_are_checked_against_the_requested_version() {
         decode(&mut client, json!([range(0, 10, 0, 14)])),
         Err(REQUEST_FAILED)
     );
-    client.did_open(URI, HEARTBEAT, 2);
-    let reopened = client
-        .request(
-            "workspace/executeCommand",
-            params(URI, 2, json!([range(0, 10, 0, 14)])),
-        )
-        .unwrap();
+    client.did_open(URI, HEARTBEAT, 7);
+    let reopened = decode(&mut client, json!([range(0, 10, 0, 14)])).unwrap();
+    assert_eq!(reopened["textDocument"], json!({"uri":URI,"version":7}));
     assert_eq!(reopened["results"][0]["lines"][0]["text"], DECODED_TYPE);
     client.shutdown();
 }
@@ -362,7 +342,7 @@ fn local_settings_cannot_override_the_global_result_budget() {
     assert!(client
         .request(
             "workspace/executeCommand",
-            params(&uri, 1, json!([range(1, 10, 1, 14)]))
+            params(&uri, json!([range(1, 10, 1, 14)]))
         )
         .is_ok());
     client.shutdown();
@@ -379,7 +359,7 @@ fn cancellation_after_dispatch_produces_no_duplicate_response() {
     let mut client = start(HEARTBEAT, json!({}));
     let request = client.send_request(
         "workspace/executeCommand",
-        params(URI, 1, json!([range(0, 10, 0, 14)])),
+        params(URI, json!([range(0, 10, 0, 14)])),
     );
     client.notify("$/cancelRequest", json!({"id":request}));
     let barrier = client.send_request(

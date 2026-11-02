@@ -153,6 +153,8 @@ value → field → group entry → group → message line.
 
 `fix.decode` returns decoded text for each selected range and source row,
 including empty rows. A field's text can be `35(MsgType)=0(Heartbeat)`.
+The request needs the document URI and ranges. The result includes the version
+of the document snapshot used for decoding.
 
 ### Semantic highlighting
 
@@ -352,7 +354,7 @@ Clients invoke these commands through `workspace/executeCommand`:
 
 | Command | Purpose |
 | --- | --- |
-| `fix.decode` | Decode versioned selections with results for each range and source row, including empty rows. |
+| `fix.decode` | Decode selections from the current document snapshot, with its version and results for each range and source row, including empty rows. |
 | `fix.describeTag` | Describe a tag and optional enum value from bundled reference data; no open document is required. |
 | `fix.useDictionary` | Select a bundled or globally registered dictionary for the session; project/modeline selectors take precedence. |
 | `fix.listDictionaries` | List bundled and committed global dictionary choices; no open document is required. |
