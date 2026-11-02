@@ -138,7 +138,10 @@ fn global_sources_aliases_and_duplicate_winners_are_reported_accurately() {
         let name = entry["name"].as_str().unwrap();
         assert_eq!(entry["label"], format!("{name} (global)"));
         if name == "same" {
-            assert_eq!(entry["definedIn"], file_uri(&user_file));
+            assert_eq!(
+                entry["definedIn"],
+                file_uri(&user_file.canonicalize().unwrap())
+            );
             assert_eq!(entry["version"], "FIX.4.2");
             assert_eq!(entry["source"], "FIX.4.2");
         } else {
