@@ -46,6 +46,50 @@ fn every_schema_lists_exactly_the_registered_rules() {
 }
 
 #[test]
+fn user_schemas_list_the_registered_limits_with_their_effective_defaults() {
+    use std::collections::BTreeSet;
+    use venue_reader::overrides::catalog::{Scope, SETTINGS};
+
+    let registered: BTreeSet<_> = SETTINGS
+        .iter()
+        .filter_map(|setting| setting.path.strip_prefix("limits."))
+        .collect();
+    let defaults = serde_json::to_value(venue_reader::config::Config::default()).unwrap();
+    for filename in ["venue-reader.schema.json", "venue-reader-user.schema.json"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("schema")
+            .join(filename);
+        let schema: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let limits = &schema["properties"]["limits"];
+        assert_eq!(limits["x-venue-reader-scope"], "user-global");
+        let properties = limits["properties"].as_object().unwrap();
+        assert_eq!(
+            properties
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            registered
+        );
+        for (name, property) in properties {
+            assert_eq!(property["type"], "integer", "{filename}: {name}");
+            assert_eq!(
+                property["default"], defaults["limits"][name],
+                "{filename}: {name}"
+            );
+        }
+        assert_eq!(properties["decodeResultBytes"]["minimum"], 0);
+        assert_eq!(properties["decodeResultBytes"]["default"], 8 * 1024 * 1024);
+    }
+    assert!(SETTINGS
+        .iter()
+        .filter(|setting| setting.path.starts_with("limits."))
+        .all(|setting| matches!(setting.scope, Scope::Global)));
+    let project: Value =
+        serde_json::from_str(include_str!("../schema/venue-reader-project.schema.json")).unwrap();
+    assert!(project["properties"].get("limits").is_none());
+}
+
+#[test]
 fn begin_string_is_an_unknown_rule_in_every_configuration_source() {
     let toml = "[diagnostics.rules]\nbeginString = false\n[diagnostics.rules.integrity]\nenabled = true\nseverity = 'hint'\n";
     let modeline = b"# fix: diagnostics.rules.beginString=false diagnostics.rules.integrity.enabled=true diagnostics.rules.integrity.severity=hint";

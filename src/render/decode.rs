@@ -7,13 +7,15 @@
 //! spelled is one choice, not two, so `inlayHints.tagNames.format`,
 //! `.enumValues.format` and `groupPaths` all apply — only `enabled` does not.
 
+use std::fmt;
+
 use crate::codec::{Field, MessageAnalysis};
 
 use super::Options;
 
 /// Between fields, as the log itself reads. Not `SOH`: this text is going into
 /// a register or a clipboard, where a control byte is invisible.
-const SEPARATOR: char = '|';
+const SEPARATOR: &str = "|";
 
 /// The selected fields of one line.
 pub fn line<'a>(
@@ -22,14 +24,37 @@ pub fn line<'a>(
     fields: impl Iterator<Item = &'a Field>,
     options: &Options,
 ) -> String {
-    let mut out = String::new();
-    for field in fields {
-        if !out.is_empty() {
-            out.push(SEPARATOR);
+    render_line(analysis, bytes, fields, options, None).expect("unbounded decode")
+}
+
+pub(crate) fn bounded_line<'a>(
+    analysis: &MessageAnalysis,
+    bytes: &[u8],
+    fields: impl Iterator<Item = &'a Field>,
+    options: &Options,
+    remaining: &mut usize,
+) -> Result<String, fmt::Error> {
+    render_line(analysis, bytes, fields, options, Some(remaining))
+}
+
+fn render_line<'a>(
+    analysis: &MessageAnalysis,
+    bytes: &[u8],
+    fields: impl Iterator<Item = &'a Field>,
+    options: &Options,
+    remaining: Option<&mut usize>,
+) -> Result<String, fmt::Error> {
+    let mut out = Output {
+        text: String::new(),
+        remaining,
+    };
+    for (index, field) in fields.enumerate() {
+        if index != 0 {
+            out.push(SEPARATOR)?;
         }
-        push_field(analysis, bytes, field, options, &mut out);
+        push_field(analysis, bytes, field, options, &mut out)?;
     }
-    out
+    Ok(out.text)
 }
 
 fn push_field(
@@ -37,20 +62,62 @@ fn push_field(
     bytes: &[u8],
     field: &Field,
     options: &Options,
-    out: &mut String,
-) {
+    out: &mut Output<'_>,
+) -> fmt::Result {
     // The digits as written, not `field.tag`: a run that overflowed a `u32`
     // reads as `4294967295` there and as itself here.
-    out.push_str(&String::from_utf8_lossy(field.tag_digits(bytes)));
-    if let Some(label) = super::hint::tag_label(analysis, field, bytes, options) {
-        out.push_str(&label);
+    out.push_lossy(field.tag_digits(bytes))?;
+    if let Some(label) =
+        super::hint::tag_label_bounded(analysis, field, bytes, options, out.allowance())?
+    {
+        out.push(&label)?;
     }
-    out.push('=');
+    out.push("=")?;
     // Lossy because the answer is a JSON string and a FIX value need not be
     // text — RawData carries whatever the sender put there.
-    out.push_str(&String::from_utf8_lossy(field.value(bytes)));
-    if let Some(label) = super::hint::value_label(analysis, field, options) {
-        out.push_str(&label);
+    out.push_lossy(field.value(bytes))?;
+    if let Some(label) =
+        super::hint::value_label_bounded(analysis, field, options, out.allowance())?
+    {
+        out.push(&label)?;
+    }
+    Ok(())
+}
+
+struct Output<'a> {
+    text: String,
+    remaining: Option<&'a mut usize>,
+}
+
+impl Output<'_> {
+    fn allowance(&self) -> usize {
+        self.remaining.as_deref().copied().unwrap_or(usize::MAX)
+    }
+
+    fn push(&mut self, text: &str) -> fmt::Result {
+        if let Some(remaining) = &mut self.remaining {
+            let left = text.bytes().try_fold(**remaining, |left, byte| {
+                let cost = match byte {
+                    b'"' | b'\\' | b'\x08' | b'\x0c' | b'\n' | b'\r' | b'\t' => 2,
+                    0..=0x1f => 6,
+                    _ => 1,
+                };
+                left.checked_sub(cost).ok_or(fmt::Error)
+            })?;
+            **remaining = left;
+        }
+        self.text.push_str(text);
+        Ok(())
+    }
+
+    fn push_lossy(&mut self, bytes: &[u8]) -> fmt::Result {
+        for chunk in bytes.utf8_chunks() {
+            self.push(chunk.valid())?;
+            if !chunk.invalid().is_empty() {
+                self.push("\u{fffd}")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -204,5 +271,111 @@ mod tests {
             "35(MsgType)=0(Heartbeat)|34(MsgSeqNum)=1"
         );
         assert_eq!(line(&message, bytes, [].iter(), &Options::default()), "");
+    }
+
+    #[test]
+    fn the_budget_counts_serialized_text_including_lossy_values() {
+        let cases: &[&[u8]] = &[
+            b"8=FIX.4.4|35=0|58=quote\"slash\\tab\tcontrol\x02|",
+            b"8=FIX.4.4|35=0|58=\xff\xfe\xe2\x82|",
+            "8=FIX.4.4|35=0|58=é😀|".as_bytes(),
+            GROUPS.as_bytes(),
+        ];
+        for bytes in cases {
+            let message = message_of(bytes);
+            let options = Options::default();
+            let expected = line(&message, bytes, message.fields.iter(), &options);
+            let cost = serde_json::to_vec(&expected).unwrap().len() - 2;
+            let mut remaining = cost;
+            assert_eq!(
+                bounded_line(
+                    &message,
+                    bytes,
+                    message.fields.iter(),
+                    &options,
+                    &mut remaining,
+                )
+                .unwrap(),
+                expected,
+            );
+            assert_eq!(remaining, 0);
+            remaining = cost - 1;
+            assert!(bounded_line(
+                &message,
+                bytes,
+                message.fields.iter(),
+                &options,
+                &mut remaining,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn a_failed_append_does_not_copy_its_text() {
+        let text = "\"\\\u{8}\u{c}\n\r\t\u{0}\u{1f}é😀";
+        let cost = serde_json::to_vec(text).unwrap().len() - 2;
+        let mut remaining = cost - 1;
+        let mut out = Output {
+            text: String::new(),
+            remaining: Some(&mut remaining),
+        };
+        assert!(out.push(text).is_err());
+        assert!(out.text.is_empty());
+        assert_eq!(out.text.capacity(), 0);
+    }
+
+    #[test]
+    fn repeated_labels_are_checked_before_expansion() {
+        let bytes = b"8=FIX.4.4|35=0|";
+        let message = message_of(bytes);
+        let options = rendered(json!({
+            "inlayHints": { "tagNames": { "format": "{}".repeat(1000) } }
+        }));
+        let mut remaining = 16;
+        assert!(bounded_line(
+            &message,
+            bytes,
+            message.fields.iter(),
+            &options,
+            &mut remaining,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn an_unused_group_path_needs_no_temporary_allowance() {
+        let bytes = GROUPS.as_bytes();
+        let message = message_of(bytes);
+        let field = message
+            .fields
+            .iter()
+            .find(|field| field.tag == 270)
+            .unwrap();
+        let options = rendered(json!({
+            "inlayHints": { "tagNames": { "format": "!" } }
+        }));
+        let expected = "270!=65000.50";
+        let mut remaining = expected.len();
+        assert_eq!(
+            bounded_line(
+                &message,
+                bytes,
+                [field].into_iter(),
+                &options,
+                &mut remaining,
+            )
+            .unwrap(),
+            expected,
+        );
+        assert_eq!(remaining, 0);
+        assert!(super::super::hint::tag_label_bounded(
+            &message,
+            field,
+            bytes,
+            &Options::default(),
+            4,
+        )
+        .is_err());
     }
 }

@@ -1,24 +1,9 @@
-//! `workspace/executeCommand` — `fix.decode`, `fix.useDictionary`,
-//! `fix.describeOverrides` and `fix.describeTag`.
+//! Decode selections, choose dictionaries, and inspect configuration or tag references.
 //!
-//! `fix.decode` first. The decoded text has no home among the standard requests: hover answers one
-//! position, a code lens one line, and nothing takes a selection and gives back
-//! a string. A command does exactly that, and what the client does with the
-//! string — a register, a clipboard, a scratch buffer — is the client's.
-//!
-//! **The argument is a list of ranges and there is no mode.** An LSP `Range` is
-//! two positions in reading order, which *is* a characterwise selection; a
-//! linewise one is the same thing from column 0 to the end of the last line.
-//! A rectangle is the one shape two positions cannot carry, so a blockwise
-//! selection is composed by the client as one range per line — as is a
-//! multi-cursor selection, which some editors have natively. Ranges answer
-//! independently and an overlap duplicates: merging them is a decision about
-//! what the user selected, and the client is the one that knows.
-//!
-//! An empty range is a cursor, and answers with the field under it.
-//!
-//! Not a cache populator. The range is bounded, so caching would be permitted,
-//! but a yank is a one-shot gesture and nothing re-reads these lines.
+//! Decode returns one versioned result per range and source row. Empty rows
+//! retain their identity; filtering and presentation belong to the client.
+//! Ranges answer independently, so overlaps repeat fields. An empty range is
+//! a cursor and selects the field under it. Decode populates no line cache.
 //!
 //! `fix.describeTag` is hover for a tag no line carries: `[tag]` or
 //! `[tag, value]`, no document, so it works with none open. It names no version
@@ -30,10 +15,11 @@
 //! the reference link, which is what the readiness check below protects.
 
 use lsp_server::ResponseError;
-use lsp_types::{ExecuteCommandParams, Range, Uri};
+use lsp_types::{ExecuteCommandParams, Range, Uri, VersionedTextDocumentIdentifier};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::dispatch::{Dispatched, HandlerResult, Notices, RequestTask, Snapshot};
+use super::dispatch::{Dispatched, HandlerResult, Snapshot};
 use super::ServerState;
 use crate::codec::{ByteOffset, Field};
 use crate::document::{Column, LineNo, Offsets};
@@ -44,6 +30,32 @@ pub const DECODE: &str = "fix.decode";
 pub const USE_DICTIONARY: &str = "fix.useDictionary";
 pub const DESCRIBE_OVERRIDES: &str = "fix.describeOverrides";
 pub const DESCRIBE_TAG: &str = "fix.describeTag";
+
+struct DecodeInput<'a> {
+    uri: Uri,
+    version: i32,
+    ranges: &'a [Value],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DecodeResult {
+    text_document: VersionedTextDocumentIdentifier,
+    results: Vec<RangeResult>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RangeResult {
+    range_index: usize,
+    lines: Vec<RowResult>,
+}
+
+#[derive(Serialize)]
+struct RowResult {
+    line: u32,
+    text: String,
+}
 
 pub(super) fn dictionary_details(choice: &crate::dictionary::DictionaryChoice) -> Value {
     json!({
@@ -89,51 +101,71 @@ impl ServerState {
                 params.command
             ))));
         }
-        let (uri, ranges) = match arguments(&params) {
-            Ok(pair) => pair,
+        let input = match arguments(&params) {
+            Ok(input) => input,
             Err(e) => return Dispatched::Now(Err(e)),
         };
-        if let Some(not_ready) = super::dispatch::configuration_not_ready(self, &uri) {
+        if let Some(not_ready) = super::dispatch::configuration_not_ready(self, &input.uri) {
             return not_ready;
         }
 
-        let Some(snapshot) = self.snapshot_for(&uri) else {
-            // A command is invoked by a person, so say so rather than handing
-            // back an empty string they would paste without noticing. Ahead of
-            // the bound, or a selection past the end of a closed document is
-            // reported as too big rather than as closed.
+        let Some(snapshot) = self.snapshot_for(&input.uri) else {
             return Dispatched::Now(Err(ResponseError {
                 code: lsp_server::ErrorCode::RequestFailed as i32,
-                message: format!("{DECODE}: no open document at {}", uri.as_str()),
+                message: format!(
+                    "{}: no open document at {}",
+                    params.command,
+                    input.uri.as_str()
+                ),
                 data: None,
             }));
         };
 
-        let cap = self
-            .effective_config(&uri)
+        let limits = &self
+            .effective_config(&input.uri)
             .expect("configured snapshot")
-            .limits
-            .range_lines;
+            .limits;
+        let cap = limits.range_lines;
+        if input.version != snapshot.version {
+            return Dispatched::Now(Err(super::content_modified(
+                DECODE,
+                "the document version has changed",
+            )));
+        }
+        if input.ranges.len() > cap {
+            return Dispatched::Now(Err(selection_too_large(cap)));
+        }
+        let ranges = match input.parsed_ranges() {
+            Ok(ranges) => ranges,
+            Err(e) => return Dispatched::Now(Err(e)),
+        };
+        if ranges
+            .iter()
+            .any(|range| range.start.line >= snapshot.line_count())
+        {
+            return Dispatched::Now(Err(invalid(format!(
+                "{DECODE}: range starts beyond the document"
+            ))));
+        }
         // Counted against the document rather than against what was asked:
         // "to the end of the file" is a sentinel line number in some clients,
         // and refusing a three-line selection for naming `u32::MAX` would be a
         // bound on the arithmetic instead of on the work.
         let last = snapshot.line_count().saturating_sub(1);
-        let asked: usize = ranges.iter().map(|range| spanned_lines(range, last)).sum();
-        if asked > cap {
+        let fits = ranges.iter().try_fold(cap, |remaining, range| {
+            remaining.checked_sub(spanned_lines(range, last))
+        });
+        if fits.is_none() {
             // Refused rather than truncated, as a code action is: the answer
             // goes into a register, and half a selection is worse there than
             // being told the selection is too big.
-            return Dispatched::Now(Err(ResponseError {
-                code: lsp_server::ErrorCode::RequestFailed as i32,
-                message: format!(
-                    "selection is over {cap} lines; select fewer, or raise \
-                     fix.limits.rangeLines"
-                ),
-                data: None,
-            }));
+            return Dispatched::Now(Err(selection_too_large(cap)));
         }
-        Dispatched::Task(snapshot, prepare(ranges))
+        let result_limit = limits.decode_result_bytes;
+        Dispatched::Task(
+            snapshot,
+            Box::new(move |snapshot, _| answer(&input.uri, &ranges, snapshot, result_limit)),
+        )
     }
 
     fn describe_overrides(&self, params: &ExecuteCommandParams) -> HandlerResult {
@@ -228,24 +260,49 @@ fn invalid(message: String) -> ResponseError {
     }
 }
 
-/// `[uri, ranges]`, typed. The protocol says only "any[]", so the shape is
-/// this server's to document and to check.
-fn arguments(params: &ExecuteCommandParams) -> Result<(Uri, Vec<Range>), ResponseError> {
-    let args = params.arguments.as_deref().unwrap_or_default();
-    let [uri, ranges] = args else {
-        return Err(invalid(format!(
-            "{DECODE} takes [uri, ranges]; got {} argument(s)",
-            args.len()
-        )));
+fn selection_too_large(cap: usize) -> ResponseError {
+    super::config_pull::request_failed(&format!(
+        "selection is over {cap} lines; select fewer, or raise fix.limits.rangeLines"
+    ))
+}
+
+fn result_too_large(cap: usize) -> ResponseError {
+    super::config_pull::request_failed(&format!(
+        "{DECODE}: result is over {cap} bytes; select less, or raise fix.limits.decodeResultBytes"
+    ))
+}
+
+/// Parse the envelope before allocating its typed range vector.
+fn arguments(params: &ExecuteCommandParams) -> Result<DecodeInput<'_>, ResponseError> {
+    let shape = || {
+        invalid(format!(
+            "{DECODE} takes [{{textDocument: {{uri, version}}, ranges}}]"
+        ))
     };
-    let uri: Uri = serde_json::from_value(uri.clone())
-        .map_err(|e| invalid(format!("{DECODE} argument 1 (uri): {e}")))?;
-    let ranges: Vec<Range> = serde_json::from_value(ranges.clone())
-        .map_err(|e| invalid(format!("{DECODE} argument 2 (ranges): {e}")))?;
-    if ranges.is_empty() {
-        return Err(invalid(format!("{DECODE}: no ranges to decode")));
+    let [argument] = params.arguments.as_deref().unwrap_or_default() else {
+        return Err(shape());
+    };
+    let document: VersionedTextDocumentIdentifier =
+        serde_json::from_value(argument["textDocument"].clone()).map_err(|_| shape())?;
+    let ranges = argument["ranges"]
+        .as_array()
+        .filter(|ranges| !ranges.is_empty())
+        .ok_or_else(shape)?;
+    Ok(DecodeInput {
+        uri: document.text_document_identifier.uri,
+        version: document.version,
+        ranges,
+    })
+}
+
+impl DecodeInput<'_> {
+    fn parsed_ranges(&self) -> Result<Vec<Range>, ResponseError> {
+        self.ranges
+            .iter()
+            .map(|range| Range::deserialize(range).map(ordered))
+            .collect::<Result<_, _>>()
+            .map_err(|_| invalid(format!("{DECODE}: invalid range positions")))
     }
-    Ok((uri, ranges.into_iter().map(ordered).collect()))
 }
 
 /// `[tag]` or `[tag, value]`, typed: a positive tag number, an optional string.
@@ -292,33 +349,74 @@ fn spanned_lines(range: &Range, last: u32) -> usize {
     (end - first) as usize + 1
 }
 
-fn prepare(ranges: Vec<Range>) -> RequestTask {
-    Box::new(move |snapshot: &Snapshot, _: &mut Notices| answer(&ranges, snapshot))
-}
-
-fn answer(ranges: &[Range], snapshot: &Snapshot) -> HandlerResult {
-    let mut out: Vec<String> = Vec::new();
-    // Clamped to the document, not merely bounded by `rangeLines`: a client
-    // saying "to the end of the file" with a sentinel line number would
-    // otherwise spin through four billion numbers that address nothing.
+fn answer(uri: &Uri, ranges: &[Range], snapshot: &Snapshot, cap: usize) -> HandlerResult {
     let last = snapshot.line_count().saturating_sub(1);
-    for range in ranges {
-        for line in range.start.line.min(last)..=range.end.line.min(last) {
-            if let Some(text) = decoded_line(range, LineNo::new(line), snapshot) {
-                out.push(text);
-            }
+    let mut result = DecodeResult {
+        text_document: VersionedTextDocumentIdentifier {
+            version: snapshot.version,
+            text_document_identifier: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+        },
+        results: ranges
+            .iter()
+            .enumerate()
+            .map(|(range_index, range)| RangeResult {
+                range_index,
+                lines: (range.start.line..=range.end.line.min(last))
+                    .map(|line| RowResult {
+                        line,
+                        text: String::new(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+    let mut budget = ResultBudget(cap);
+    serde_json::to_writer(&mut budget, &result).map_err(|_| result_too_large(cap))?;
+    for (range, answer) in ranges.iter().zip(&mut result.results) {
+        for row in &mut answer.lines {
+            row.text = decoded_line(range, LineNo::new(row.line), snapshot, &mut budget.0)
+                .map_err(|_| result_too_large(cap))?
+                .unwrap_or_default();
         }
     }
-    Ok(json!(out.join("\n")))
+    serde_json::to_writer(ResultBudget(cap), &result).map_err(|_| result_too_large(cap))?;
+    Ok(json!(result))
 }
 
-/// One line of one range, or `None` when the window selects no field — an
-/// empty string per skipped line would be a blank line in the answer.
-fn decoded_line(range: &Range, number: LineNo, snapshot: &Snapshot) -> Option<String> {
-    let line = snapshot.line(number)?;
+struct ResultBudget(usize);
+
+impl std::io::Write for ResultBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_sub(bytes.len())
+            .ok_or_else(|| std::io::Error::other("decode result byte limit"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// No selected field leaves this source row's result text empty.
+fn decoded_line(
+    range: &Range,
+    number: LineNo,
+    snapshot: &Snapshot,
+    remaining: &mut usize,
+) -> Result<Option<String>, std::fmt::Error> {
+    let Some(line) = snapshot.line(number) else {
+        return Ok(None);
+    };
     // `analyze` and drop: see the module doc.
     let analysis = crate::ctx::analyze(&line.bytes, &snapshot.ctx);
-    let message = analysis.message()?;
+    let Some(message) = analysis.message() else {
+        return Ok(None);
+    };
+    let mut render = |fields: &mut dyn Iterator<Item = &Field>| {
+        decode::bounded_line(message, &line.bytes, fields, &snapshot.render, remaining)
+    };
 
     let first = range.start.line == number.raw();
     let last = range.end.line == number.raw();
@@ -337,23 +435,21 @@ fn decoded_line(range: &Range, number: LineNo, snapshot: &Snapshot) -> Option<St
     // An empty range is a cursor: the field under it, and nothing when it sits
     // on a separator.
     if range.start == range.end {
-        let at = ByteOffset::from_len(start)?;
-        let field = message.field_at(at)?;
-        return Some(decode::line(
-            message,
-            &line.bytes,
-            [field].into_iter(),
-            &snapshot.render,
-        ));
+        let Some(field) = ByteOffset::from_len(start).and_then(|at| message.field_at(at)) else {
+            return Ok(None);
+        };
+        return render(&mut std::iter::once(field)).map(Some);
     }
 
-    let selected: Vec<&Field> = message
+    let mut selected = message
         .fields
         .iter()
         .filter(|field| overlaps(field, start, end))
-        .collect();
-    (!selected.is_empty())
-        .then(|| decode::line(message, &line.bytes, selected.into_iter(), &snapshot.render))
+        .peekable();
+    if selected.peek().is_none() {
+        return Ok(None);
+    }
+    render(&mut selected).map(Some)
 }
 
 /// Half-open both ends, which is what makes a selection ending at column 0 of
@@ -375,11 +471,23 @@ mod tests {
 8=FIX.4.4|35=1|34=2|10=172|\n\
 8=FIX.4.4|35=2|34=3|10=173|";
 
+    fn selected_text(result: Value) -> Value {
+        let text = result["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|range| range["lines"].as_array().unwrap())
+            .filter_map(|line| line["text"].as_str().filter(|text| !text.is_empty()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        json!(text)
+    }
+
     fn ask(state: &mut ServerState, uri: &Uri, ranges: Value) -> Value {
-        answered(state.execute_command_task(&json!({
+        selected_text(answered(state.execute_command_task(&json!({
             "command": DECODE,
-            "arguments": [uri.as_str(), ranges],
-        })))
+            "arguments": [{"textDocument": {"uri": uri.as_str(), "version": 1}, "ranges": ranges}],
+        }))))
     }
 
     fn range(sl: u32, sc: u32, el: u32, ec: u32) -> Value {
@@ -392,7 +500,7 @@ mod tests {
     fn refused(state: &mut ServerState, uri: &Uri, ranges: Value) -> ResponseError {
         match state.execute_command_task(&json!({
             "command": DECODE,
-            "arguments": [uri.as_str(), ranges],
+            "arguments": [{"textDocument": {"uri": uri.as_str(), "version": 1}, "ranges": ranges}],
         })) {
             Dispatched::Now(Err(e)) => e,
             _ => panic!("refused"),
@@ -419,7 +527,7 @@ mod tests {
     /// A linewise selection, as a client sends one: to column 0 of the line
     /// after. The exclusive end falls out of the window being empty there.
     #[test]
-    fn a_range_ending_at_column_zero_does_not_reach_that_line() {
+    fn a_range_ending_at_column_zero_selects_no_fields_on_that_line() {
         let (mut state, uri) = state_with(THREE);
         let answer = ask(&mut state, &uri, json!([range(0, 0, 1, 0)]));
         let text = answer.as_str().expect("a string");
@@ -429,7 +537,7 @@ mod tests {
 
     /// A block is ranges, one per line — the shape two positions cannot carry.
     #[test]
-    fn a_block_is_one_range_a_line_and_they_join() {
+    fn a_block_can_select_fields_from_each_line() {
         let (mut state, uri) = state_with(THREE);
         let answer = ask(
             &mut state,
@@ -457,7 +565,7 @@ mod tests {
             ask(&mut state, &uri, json!([range(1, 11, 1, 11)])),
             json!("35(MsgType)=1(TestRequest)")
         );
-        // On a separator there is no field, and no line in the answer.
+        // A separator contributes no decoded field text.
         assert_eq!(ask(&mut state, &uri, json!([range(1, 9, 1, 9)])), json!(""));
     }
 
@@ -474,9 +582,11 @@ mod tests {
 
         let mut snapshot = state.snapshot_for(&uri).expect("open");
         snapshot.encoding = PositionEncoding::Utf8;
-        let as_bytes = answer(&ranges, &snapshot).expect("answered");
+        let as_bytes =
+            selected_text(answer(&uri, &ranges, &snapshot, usize::MAX).expect("answered"));
         snapshot.encoding = PositionEncoding::Utf16;
-        let as_units = answer(&ranges, &snapshot).expect("answered");
+        let as_units =
+            selected_text(answer(&uri, &ranges, &snapshot, usize::MAX).expect("answered"));
 
         assert_eq!(as_bytes, json!("58(Text)=🙂ok|10(CheckSum)=1"));
         assert_eq!(as_units, json!("10(CheckSum)=1"));
@@ -729,15 +839,26 @@ mod tests {
         );
     }
 
-    /// A yank is one-shot: the contract permits it to cache and it declines.
     #[test]
     #[cfg(not(feature = "bench-no-line-cache"))]
-    fn a_decode_caches_nothing() {
+    fn range_decode_caches_nothing_on_success_or_output_refusal() {
         let (mut state, uri) = state_with(THREE);
-        ask(&mut state, &uri, json!([range(0, 0, 2, 27)]));
-        assert!(
-            cached(&mut state, &uri).iter().all(|seen| !seen),
-            "a decode reads every line it answers about and keeps none"
-        );
+        let snapshot = state.snapshot_for(&uri).expect("open");
+        let ranges = vec![Range {
+            start: lsp_types::Position {
+                line: 0,
+                character: 0,
+            },
+            end: lsp_types::Position {
+                line: 2,
+                character: u32::MAX,
+            },
+        }];
+        let response = answer(&uri, &ranges, &snapshot, usize::MAX).expect("answered");
+        let size = serde_json::to_vec(&response).unwrap().len();
+        assert!(cached(&mut state, &uri).iter().all(|present| !present));
+        let error = answer(&uri, &ranges, &snapshot, size - 1).expect_err("over budget");
+        assert_eq!(error.code, lsp_server::ErrorCode::RequestFailed as i32);
+        assert!(cached(&mut state, &uri).iter().all(|present| !present));
     }
 }

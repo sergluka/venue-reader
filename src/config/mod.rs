@@ -604,6 +604,8 @@ pub struct Limits {
     /// but with its own line only. Whole-document limits are elsewhere —
     /// `codeLensLines` and `documentSymbolItems` bound answers, not spans.
     pub range_lines: usize,
+    /// Compact JSON result byte cap for `fix.decode`, excluding its envelope.
+    pub decode_result_bytes: usize,
     /// Largest document `codeLens` will classify. `CodeLensParams` carries no
     /// range, so the lens *list* is whole-document by protocol; past this the
     /// answer is `[]`, because the alternative is a truncated list whose gaps a
@@ -654,6 +656,7 @@ impl Default for Limits {
             dictionary_bytes: 16 * 1024 * 1024,
             diagnostics_per_document: 10_000,
             range_lines: 2000,
+            decode_result_bytes: 8 * 1024 * 1024,
             code_lens_lines: 20_000,
             document_symbol_items: 50_000,
             semantic_tokens_full_lines: 2000,
@@ -789,6 +792,7 @@ mod tests {
             "https://www.onixs.biz/fix-dictionary/{version}/tagNum_{tag}.html"
         );
         assert_eq!(cfg.limits.range_lines, 2000);
+        assert_eq!(cfg.limits.decode_result_bytes, 8 * 1024 * 1024);
         assert_eq!(cfg.limits.code_lens_lines, 20_000);
         assert!(cfg.message_summary.enabled);
         assert!(cfg.message_summary.details);
@@ -832,6 +836,7 @@ mod tests {
             ],
             "limits": {
                 "dictionaryBytes": 10, "rangeLines": 40, "codeLensLines": 5,
+                "decodeResultBytes": 1024,
             }
         }))
         .unwrap();
@@ -845,10 +850,12 @@ mod tests {
         assert_eq!(cfg.limits.dictionary_bytes, 10);
         assert_eq!(cfg.limits.range_lines, 40);
         assert_eq!(cfg.limits.code_lens_lines, 5);
+        assert_eq!(cfg.limits.decode_result_bytes, 1024);
         // Lifted out of `rest` by the stage that enforces each; the ones with
         // no stage yet stay raw.
         for lifted in [
             "rangeLines",
+            "decodeResultBytes",
             "codeLensLines",
             "semanticTokensFullLines",
             "cachedLines",

@@ -240,16 +240,7 @@ impl TestClient {
         method: &str,
         params: Value,
     ) -> (Result<Value, i32>, Vec<(String, Value)>) {
-        self.next_id += 1;
-        let id = RequestId::from(self.next_id);
-        self.conn
-            .sender
-            .send(Message::Request(Request::new(
-                id.clone(),
-                method.into(),
-                params,
-            )))
-            .unwrap();
+        let id = self.send_request(method, params);
         let mut notes = std::mem::take(&mut self.pending);
         loop {
             match self
@@ -264,6 +255,43 @@ impl TestClient {
                 Message::Notification(n) => notes.push((n.method, n.params)),
                 Message::Request(request) => self.pending_requests.push(request),
                 _ => {}
+            }
+        }
+    }
+
+    pub fn send_request(&mut self, method: &str, params: Value) -> RequestId {
+        self.next_id += 1;
+        let id = RequestId::from(self.next_id);
+        self.conn
+            .sender
+            .send(Message::Request(Request::new(
+                id.clone(),
+                method.into(),
+                params,
+            )))
+            .unwrap();
+        id
+    }
+
+    /// Keep unmatched responses so a FIFO barrier can expose duplicate replies.
+    pub fn responses_through_barrier(&mut self, barrier: &RequestId) -> Vec<Response> {
+        let mut responses = Vec::new();
+        loop {
+            match self
+                .conn
+                .receiver
+                .recv_timeout(Duration::from_secs(10))
+                .expect("response within 10s")
+            {
+                Message::Response(response) => {
+                    let reached = &response.id == barrier;
+                    responses.push(response);
+                    if reached {
+                        return responses;
+                    }
+                }
+                Message::Notification(note) => self.pending.push((note.method, note.params)),
+                Message::Request(request) => self.pending_requests.push(request),
             }
         }
     }

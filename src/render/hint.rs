@@ -4,6 +4,8 @@
 //! parentheses, spacing and all — because a client renders a hint verbatim and
 //! because the shape is a user's to choose (`inlayHints.tagNames.format`).
 
+use std::fmt;
+
 use crate::codec::{Field, MessageAnalysis};
 use crate::config::InlayHints;
 use crate::dictionary::standard;
@@ -20,25 +22,73 @@ pub fn tag_label(
     line: &[u8],
     options: &Options,
 ) -> Option<String> {
+    tag_label_bounded(analysis, field, line, options, usize::MAX).expect("unbounded label")
+}
+
+pub(super) fn tag_label_bounded(
+    analysis: &MessageAnalysis,
+    field: &Field,
+    line: &[u8],
+    options: &Options,
+    max_bytes: usize,
+) -> Result<Option<String>, fmt::Error> {
+    if !options.tag_format.needs_value() {
+        return options.tag_format.render_bounded(None, max_bytes);
+    }
     // What a tag is called: its group path inside a group when `group_paths`
     // asks, else the dictionary's name. The format takes it and knows nothing
     // else about the field.
-    let path = options
-        .group_paths
-        .then(|| analysis.group_path(field, line))
-        .flatten();
+    let path = if options.group_paths {
+        if max_bytes != usize::MAX {
+            check_group_path(analysis, field, line, max_bytes)?;
+        }
+        analysis.group_path(field, line)
+    } else {
+        None
+    };
     let own = analysis.field_name(field);
     // The mark is part of the name, so the user's wrapper is kept.
     let foreign = (path.is_none() && own.is_none())
         .then(|| standard::name_of(&analysis.standard(field), field.tag))
         .flatten()
-        .map(|name| format!("{name}{FOREIGN_MARK}"));
+        .map(|name| {
+            name.len()
+                .checked_add(FOREIGN_MARK.len())
+                .filter(|length| *length <= max_bytes)
+                .ok_or(fmt::Error)?;
+            Ok(format!("{name}{FOREIGN_MARK}"))
+        })
+        .transpose()?;
     let name = match (&path, &foreign) {
         (Some(path), _) => Some(path.as_str()),
         (None, Some(foreign)) => Some(foreign.as_str()),
         (None, None) => own,
     };
-    options.tag_format.render(name)
+    options.tag_format.render_bounded(name, max_bytes)
+}
+
+fn check_group_path(
+    analysis: &MessageAnalysis,
+    field: &Field,
+    line: &[u8],
+    max_bytes: usize,
+) -> fmt::Result {
+    let chain = analysis.ancestors(field);
+    if chain.is_empty() {
+        return Ok(());
+    }
+    let leaf_bytes = analysis
+        .field_name(field)
+        .map_or_else(|| field.tag_digits(line).len(), str::len);
+    let length = chain.iter().try_fold(leaf_bytes, |length, instance| {
+        let digits = instance.entry.checked_ilog10().unwrap_or(0) as usize + 1;
+        length
+            .checked_add(analysis.group_definition(instance).name().len())
+            .and_then(|length| length.checked_add(digits + 2))
+            .filter(|length| *length <= max_bytes)
+            .ok_or(fmt::Error)
+    })?;
+    (length <= max_bytes).then_some(()).ok_or(fmt::Error)
 }
 
 /// Appended to a standard name the bound dictionary does not have.
@@ -46,9 +96,18 @@ const FOREIGN_MARK: &str = "?";
 
 /// How a field's value is spelled. Switch-free for the reason [`tag_label`] is.
 pub fn value_label(analysis: &MessageAnalysis, field: &Field, options: &Options) -> Option<String> {
+    value_label_bounded(analysis, field, options, usize::MAX).expect("unbounded label")
+}
+
+pub(super) fn value_label_bounded(
+    analysis: &MessageAnalysis,
+    field: &Field,
+    options: &Options,
+    max_bytes: usize,
+) -> Result<Option<String>, fmt::Error> {
     options
         .value_format
-        .render(super::value_name(analysis, field))
+        .render_bounded(super::value_name(analysis, field), max_bytes)
 }
 
 /// What to draw after a field's tag, or `None` when nothing should be.

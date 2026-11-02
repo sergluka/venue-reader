@@ -375,6 +375,12 @@
           "description": "Largest span of lines any ranged request will answer about: a code action, an inlay hint, an expanded selection, a coloured viewport. Each request decides for itself what happens past it.",
           "minimum": 0
         },
+        "decodeResultBytes": {
+          "type": "integer",
+          "default": 8388608,
+          "minimum": 0,
+          "description": "Maximum compact JSON result bytes for fix.decode, including metadata and escaping but excluding the JSON-RPC envelope. Oversized results fail as a whole."
+        },
         "semanticTokensFullLines": {
           "type": "integer",
           "default": 2000,

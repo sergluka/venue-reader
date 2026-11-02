@@ -43,6 +43,7 @@ settings! {
     ("limits.dictionaryBytes", Global, Unsigned),
     ("limits.diagnosticsPerDocument", Global, Unsigned),
     ("limits.rangeLines", Global, Unsigned),
+    ("limits.decodeResultBytes", Global, Unsigned),
     ("limits.codeLensLines", Global, Unsigned),
     ("limits.documentSymbolItems", Global, Unsigned),
     ("limits.semanticTokensFullLines", Global, Unsigned),

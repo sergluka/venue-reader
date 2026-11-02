@@ -37,7 +37,7 @@ fn release_artifact_smoke() {
     );
 
     let mut client = StdioClient::start("release-smoke", None, None);
-    let message = "8=FIX.4.4|35=0|";
+    let message = "8=FIX.4.4|35=0|\n\n";
     let uri = client.write_workspace("heartbeat.fix", message.as_bytes());
     let initialize = client.request(
         "initialize",
@@ -99,17 +99,29 @@ fn release_artifact_smoke() {
         .as_str()
         .expect("summary title")
         .is_empty());
-    let decoded = client.request(
+    let rows = client.request(
         "workspace/executeCommand",
         json!({
             "command": "fix.decode",
-            "arguments": [uri, [{
-                "start": { "line": 0, "character": 10 },
-                "end": { "line": 0, "character": 14 }
-            }]]
+            "arguments": [{
+                "textDocument": {"uri": uri, "version": 1},
+                "ranges": [
+                    {"start":{"line":0,"character":10},"end":{"line":0,"character":14}},
+                    {"start":{"line":1,"character":0},"end":{"line":1,"character":0}}
+                ]
+            }]
         }),
     );
-    assert_eq!(decoded, "35(MsgType)=0(Heartbeat)");
+    assert_eq!(
+        rows,
+        json!({
+            "textDocument":{"uri":uri,"version":1},
+            "results":[
+                {"rangeIndex":0,"lines":[{"line":0,"text":"35(MsgType)=0(Heartbeat)"}]},
+                {"rangeIndex":1,"lines":[{"line":1,"text":""}]}
+            ]
+        })
+    );
     assert!(client.shutdown_and_exit().success(), "{}", client.stderr());
 }
 
@@ -365,13 +377,22 @@ fn personal_configuration_and_fix_initialization_options_reach_fix_commands() {
             "workspace/executeCommand",
             json!({
                 "command": "fix.decode",
-                "arguments": [uri, [{
-                    "start": { "line": 0, "character": 10 },
-                    "end": { "line": 0, "character": 14 }
-                }]]
+                "arguments": [{
+                    "textDocument":{"uri":uri,"version":1},
+                    "ranges":[{
+                        "start": { "line": 0, "character": 10 },
+                        "end": { "line": 0, "character": 14 }
+                    }]
+                }]
             }),
         );
-        assert_eq!(decoded, "35<MsgType>=0[Heartbeat]");
+        assert_eq!(
+            decoded,
+            json!({
+                "textDocument":{"uri":uri,"version":1},
+                "results":[{"rangeIndex":0,"lines":[{"line":0,"text":"35<MsgType>=0[Heartbeat]"}]}]
+            })
+        );
         assert!(client.shutdown_and_exit().success(), "{}", client.stderr());
     }
 }

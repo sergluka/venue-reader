@@ -22,7 +22,7 @@
 //! asking after something this grammar does not have, while `{}{}` asks twice
 //! after something it does.
 
-use std::sync::LazyLock;
+use std::{fmt, sync::LazyLock};
 
 use super::template::{scan, Element, TemplateError};
 
@@ -65,18 +65,41 @@ impl LabelFormat {
 
     /// The label, or `None` when there is none to draw.
     pub fn render(&self, value: Option<&str>) -> Option<String> {
-        let mut out = String::new();
+        self.render_bounded(value, usize::MAX)
+            .expect("unbounded label")
+    }
+
+    pub(super) fn needs_value(&self) -> bool {
+        self.pieces.iter().any(|piece| matches!(piece, Piece::Hole))
+    }
+
+    pub(super) fn render_bounded(
+        &self,
+        value: Option<&str>,
+        max_bytes: usize,
+    ) -> Result<Option<String>, fmt::Error> {
+        if self.needs_value() && value.is_none_or(str::is_empty) {
+            return Ok(None);
+        }
+        let length = self.pieces.iter().try_fold(0usize, |length, piece| {
+            let extra = match piece {
+                Piece::Literal(text) => text.len(),
+                Piece::Hole => value.unwrap_or_default().len(),
+            };
+            length
+                .checked_add(extra)
+                .filter(|length| *length <= max_bytes)
+                .ok_or(fmt::Error)
+        })?;
+        let mut out = String::with_capacity(length);
         for piece in &self.pieces {
             match piece {
                 Piece::Literal(text) => out.push_str(text),
-                Piece::Hole => match value {
-                    Some(value) if !value.is_empty() => out.push_str(value),
-                    _ => return None,
-                },
+                Piece::Hole => out.push_str(value.unwrap_or_default()),
             }
         }
         // A format of nothing but empty literals has nothing to say either.
-        (!out.is_empty()).then_some(out)
+        Ok((!out.is_empty()).then_some(out))
     }
 }
 
@@ -181,5 +204,22 @@ mod tests {
             &LabelFormat::parse(DEFAULT_LABEL_FORMAT).unwrap(),
             LabelFormat::default_label()
         );
+    }
+
+    #[test]
+    fn a_missing_value_suppresses_literals_before_budget_checks() {
+        let format = LabelFormat::parse("a long prefix {} a long suffix").unwrap();
+        assert_eq!(format.render_bounded(None, 0).unwrap(), None);
+        assert_eq!(format.render_bounded(Some(""), 0).unwrap(), None);
+    }
+
+    #[test]
+    fn bounded_labels_accept_exactly_their_rendered_length() {
+        let format = LabelFormat::parse("<{}:{}>").unwrap();
+        assert_eq!(
+            format.render_bounded(Some("é"), 7).unwrap().as_deref(),
+            Some("<é:é>"),
+        );
+        assert!(format.render_bounded(Some("é"), 6).is_err());
     }
 }

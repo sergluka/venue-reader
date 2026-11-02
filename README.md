@@ -151,8 +151,8 @@ MarketDataSnapshotFullRefresh (W)
 Selection expansion follows the message structure:
 value → field → group entry → group → message line.
 
-`fix.decode` returns annotated text for a selection, such as
-`35(MsgType)=0(Heartbeat)`.
+`fix.decode` returns decoded text for each selected range and source row,
+including empty rows. A field's text can be `35(MsgType)=0(Heartbeat)`.
 
 ### Semantic highlighting
 
@@ -352,7 +352,7 @@ Clients invoke these commands through `workspace/executeCommand`:
 
 | Command | Purpose |
 | --- | --- |
-| `fix.decode` | Decode selections from an open document into annotated text. |
+| `fix.decode` | Decode versioned selections with results for each range and source row, including empty rows. |
 | `fix.describeTag` | Describe a tag and optional enum value from bundled reference data; no open document is required. |
 | `fix.useDictionary` | Select a bundled or globally registered dictionary for the session; project/modeline selectors take precedence. |
 | `fix.describeOverrides` | Show a document's effective settings, their sources, warnings, and dictionary bindings. |
