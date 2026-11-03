@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
+const TRUNCATED_FRAME: &str = "stdout ended inside a frame";
 
 pub fn executable() -> PathBuf {
     match std::env::var_os("VENUE_READER_TEST_BINARY") {
@@ -324,11 +325,38 @@ impl StdioClient {
     }
 
     pub fn wait_for_exit(&mut self, timeout: Duration) -> ExitStatus {
+        let status = self.wait_for_process_exit(timeout);
+        self.assert_reader_clean();
+        status
+    }
+
+    /// Fatal exit may interrupt the writer; complete frames must still be valid.
+    pub fn wait_for_fatal_exit(&mut self, timeout: Duration) -> Vec<Value> {
+        assert!(!self.wait_for_process_exit(timeout).success());
+        if let Some(error) = self
+            .reader_error
+            .lock()
+            .expect("reader error lock")
+            .as_ref()
+        {
+            assert_eq!(error, TRUNCATED_FRAME, "unexpected reader error: {error}");
+        }
+        let mut messages = std::mem::take(&mut self.pending);
+        for incoming in self.incoming.try_iter() {
+            match incoming {
+                Incoming::Message(message) => messages.push(message),
+                Incoming::Error(error) => assert_eq!(error, TRUNCATED_FRAME),
+                Incoming::Eof => {}
+            }
+        }
+        messages
+    }
+
+    fn wait_for_process_exit(&mut self, timeout: Duration) -> ExitStatus {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.child.try_wait().expect("query child status") {
                 self.join_readers();
-                self.assert_reader_clean();
                 return status;
             }
             if Instant::now() >= deadline {
@@ -457,10 +485,13 @@ fn read_frame(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, String> {
             .map_err(|error| format!("read stdout header: {error}"))?;
         if read == 0 {
             return if header_seen {
-                Err("stdout ended inside a frame header".into())
+                Err(TRUNCATED_FRAME.into())
             } else {
                 Ok(None)
             };
+        }
+        if !line.ends_with(b"\n") {
+            return Err(TRUNCATED_FRAME.into());
         }
         if !line.ends_with(b"\r\n") {
             return Err(format!(
@@ -499,8 +530,29 @@ fn read_frame(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, String> {
     }
     let content_length = content_length.ok_or("missing Content-Length header")?;
     let mut body = vec![0; content_length];
-    reader
-        .read_exact(&mut body)
-        .map_err(|error| format!("read stdout body: {error}"))?;
+    reader.read_exact(&mut body).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            TRUNCATED_FRAME.to_owned()
+        } else {
+            format!("read stdout body: {error}")
+        }
+    })?;
     Ok(Some(body))
+}
+
+#[test]
+fn truncated_frames_are_distinct_from_malformed_complete_frames() {
+    for bytes in [
+        b"Content-Len".as_slice(),
+        b"Content-Length: 2\r\n",
+        b"Content-Length: 2\r\n\r\n{",
+    ] {
+        assert_eq!(read_frame(&mut &bytes[..]).unwrap_err(), TRUNCATED_FRAME);
+    }
+    for bytes in [
+        b"Content-Length: 2\n".as_slice(),
+        b"Content-Length: invalid\r\n\r\n",
+    ] {
+        assert_ne!(read_frame(&mut &bytes[..]).unwrap_err(), TRUNCATED_FRAME);
+    }
 }

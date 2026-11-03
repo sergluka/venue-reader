@@ -605,8 +605,7 @@ fn fatal_configuration_with_pending_commands_exits_even_if_responses_are_not_flu
         if refuse {
             client.send_value(&json!({"jsonrpc":"2.0","id":pull["id"],"error":{"code":-32603,"message":"configuration unavailable"}}));
         }
-        assert!(!client.wait_for_exit(Duration::from_secs(5)).success());
-        let messages = client.received_after_exit();
+        let messages = client.wait_for_fatal_exit(Duration::from_secs(5));
         for request_id in ["fatal-list", "fatal-tag"] {
             let replies: Vec<_> = messages
                 .iter()
