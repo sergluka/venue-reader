@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.0] - 2026-11-03
+
+### Added
+
+- expose session dictionary choices to clients
+- decode current snapshots without version preflight
+
+### Breaking changes
+
+- preserve source rows in decode results **Breaking change.**
+
+### Fixed
+
+- validate changelog generation during release dry-run
+- wait for configuration before document-free commands
 ## [0.1.0] - 2026-10-30
 
 ### Added

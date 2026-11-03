@@ -1,7 +1,7 @@
 [package]
 name = "venue-reader"
 description = "Rust language server for viewing and decoding FIX protocol logs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.91"
 license = "Apache-2.0"
