@@ -80,6 +80,9 @@ pub(crate) fn cached(state: &mut ServerState, uri: &Uri) -> Vec<bool> {
 pub(crate) fn answered_with(dispatched: Dispatched) -> (Value, Vec<(MessageType, String)>) {
     let mut notices = Notices::collecting();
     let answer = match dispatched {
+        Dispatched::WaitingForBase(_) => {
+            panic!("expected an immediate answer, got deferred command")
+        }
         Dispatched::Task(snapshot, task) => task(&snapshot, &mut notices).expect("answered"),
         Dispatched::Now(result) => result.expect("answered"),
         // Serialised and parsed back so a lazy answer is asserted like any

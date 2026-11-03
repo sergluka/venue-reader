@@ -219,6 +219,7 @@ impl From<Value> for Answer {
 /// the single execution site, so Stage 3/4 submits the task to a bounded executor
 /// there — no handler changes shape.
 pub enum Dispatched {
+    WaitingForBase(super::pending_commands::BaseCommand),
     Now(HandlerResult),
     Task(Snapshot, RequestTask),
     /// Answered from server state like `Now`, as a value the writer

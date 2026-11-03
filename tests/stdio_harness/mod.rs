@@ -342,11 +342,31 @@ impl StdioClient {
         }
     }
 
+    /// Call after wait_for_exit has joined readers and checked frame integrity.
+    pub fn received_after_exit(&mut self) -> Vec<Value> {
+        let mut messages = std::mem::take(&mut self.pending);
+        for incoming in self.incoming.try_iter() {
+            match incoming {
+                Incoming::Message(message) => messages.push(message),
+                Incoming::Error(error) => panic!("stdio reader failed: {error}"),
+                Incoming::Eof => {}
+            }
+        }
+        messages
+    }
+
+    pub fn response(&mut self, request_id: &Value) -> Value {
+        self.wait_for(|message| {
+            message.get("id") == Some(request_id)
+                && (message.get("result").is_some() || message.get("error").is_some())
+        })
+    }
+
     pub fn stderr(&self) -> String {
         String::from_utf8_lossy(&self.stderr.lock().expect("stderr lock")).into_owned()
     }
 
-    fn send_value(&self, value: &Value) {
+    pub fn send_value(&self, value: &Value) {
         write_value(&self.input, value).expect("write JSON-RPC message");
     }
 

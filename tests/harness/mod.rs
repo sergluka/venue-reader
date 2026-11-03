@@ -262,6 +262,11 @@ impl TestClient {
     pub fn send_request(&mut self, method: &str, params: Value) -> RequestId {
         self.next_id += 1;
         let id = RequestId::from(self.next_id);
+        self.send_request_with_id(id.clone(), method, params);
+        id
+    }
+
+    pub fn send_request_with_id(&self, id: RequestId, method: &str, params: Value) {
         self.conn
             .sender
             .send(Message::Request(Request::new(
@@ -270,7 +275,6 @@ impl TestClient {
                 params,
             )))
             .unwrap();
-        id
     }
 
     /// Keep unmatched responses so a FIFO barrier can expose duplicate replies.
@@ -397,23 +401,16 @@ impl TestClient {
         }
     }
 
-    /// Wait until the base configuration has committed, through the one
-    /// request that needs no document: `fix.describeTag` is refused until then.
+    /// Wait for the document-free command without client polling.
     pub fn wait_base_ready(&mut self) -> String {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let asked = self.request(
-                "workspace/executeCommand",
-                json!({"command": "fix.describeTag", "arguments": [1328]}),
-            );
-            match asked {
-                Ok(text) => return text.as_str().expect("a string").to_owned(),
-                Err(REQUEST_FAILED) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(1))
-                }
-                error => panic!("the base configuration did not commit: {error:?}"),
-            }
-        }
+        self.request(
+            "workspace/executeCommand",
+            json!({"command": "fix.describeTag", "arguments": [1328]}),
+        )
+        .expect("base configuration ready")
+        .as_str()
+        .expect("a string")
+        .to_owned()
     }
 
     pub fn wait_for_exit(&mut self) -> venue_reader::server::ServerExit {

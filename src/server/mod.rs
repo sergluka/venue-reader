@@ -24,6 +24,7 @@ pub mod hover;
 mod inlay_hint;
 pub mod lifecycle;
 mod method;
+mod pending_commands;
 mod selection_range;
 mod semantic_tokens;
 #[cfg(test)]
@@ -33,6 +34,7 @@ pub mod text_sync;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use lsp_server::{
     Connection, ErrorCode, Message, Notification, ReqQueue, Request, RequestId, Response,
@@ -131,6 +133,7 @@ pub fn serve_started(link: Link, startup: Startup) -> ServerExit {
     let configuration_rx = state.loader.reports.clone();
     loop {
         state.check_config_deadline();
+        state.process_pending_commands(Instant::now());
         if let Some(error) = state.fatal.take() {
             state.diagnostics.abandon();
             return ServerExit::Fatal(error);
@@ -159,7 +162,7 @@ pub fn serve_started(link: Link, startup: Startup) -> ServerExit {
                     Err(_) => state.fail_configuration("configuration worker disconnected".into()),
                 }
             }
-            default(state.diagnostics.tick_in().min(state.config_tick_in())) => state.dispatch_due_diagnostics(),
+            default(state.diagnostics.tick_in().min(state.config_tick_in()).min(state.pending_commands.tick_in(Instant::now()))) => state.dispatch_due_diagnostics(),
         }
     }
     ServerExit::Normal
@@ -174,6 +177,7 @@ pub(crate) struct ServerState {
     pub(super) docs: HashMap<Uri, Document>,
     pub(super) encoding: PositionEncoding,
     pub(super) req_queue: ReqQueue<(), OutgoingRequest>,
+    pending_commands: pending_commands::PendingCommands,
     pub(super) shutdown_requested: bool,
     pub(super) config: ConfigState,
     pub(super) client: ClientSupport,
@@ -266,6 +270,7 @@ impl ServerState {
             docs: HashMap::new(),
             encoding: PositionEncoding::Utf16, // until initialize negotiates
             req_queue: ReqQueue::default(),
+            pending_commands: pending_commands::PendingCommands::default(),
             shutdown_requested: false,
             config: ConfigState::default(),
             client: ClientSupport::default(),
@@ -288,9 +293,15 @@ impl ServerState {
     // --- requests ---
 
     fn on_request(&mut self, req: Request) {
+        // Preserve the original request even when a duplicate ID names shutdown.
+        if self.pending_commands.contains(&req.id) {
+            log::warn!("ignoring duplicate pending command ID {}", req.id);
+            return;
+        }
         if req.method == method::SHUTDOWN {
             self.shutdown_requested = true;
             self.stop_configuration();
+            self.fail_pending_commands("server is shutting down");
             self.respond(Response::new_ok(req.id, Value::Null));
             return;
         }
@@ -320,7 +331,19 @@ impl ServerState {
                     .map(|value| Some(Answer::Json(value)))
             }
             Dispatched::Lazy(result) => result.map(|value| Some(Answer::Lazy(value))),
+            Dispatched::WaitingForBase(command) => self
+                .pending_commands
+                .push(id.clone(), command, Instant::now())
+                .map(|()| None),
         });
+        self.complete_request(id, outcome);
+    }
+
+    fn complete_request(
+        &mut self,
+        id: RequestId,
+        outcome: Result<Result<Option<Answer>, ResponseError>, String>,
+    ) {
         let outbound: Outbound = match outcome {
             // Built rather than `Response::new_ok`, which runs the value
             // through `serde_json::to_value` and so copies the whole tree.
@@ -353,6 +376,49 @@ impl ServerState {
             self.sender.send(outbound);
         }
         self.sweep_caches();
+    }
+
+    fn fail_pending_commands(&mut self, message: &str) {
+        while let Some(entry) = self.pending_commands.pop() {
+            self.complete_request(entry.id, Ok(Err(config_pull::request_failed(message))));
+        }
+    }
+
+    fn process_pending_commands(&mut self, now: Instant) {
+        if self.fatal.is_some() {
+            self.fail_pending_commands("configuration failed; server is exiting");
+            return;
+        }
+        if self.shutdown_requested {
+            return;
+        }
+        if self.config.rejected {
+            self.fail_pending_commands(pending_commands::REJECTED);
+            return;
+        }
+        while self.pending_commands.expired(now) {
+            let entry = self.pending_commands.pop().expect("expired entry");
+            self.complete_request(
+                entry.id,
+                Ok(Err(config_pull::request_failed(pending_commands::EXPIRED))),
+            );
+        }
+        if self.base_configuration_ready() {
+            while let Some(entry) = self.pending_commands.pop() {
+                if entry.expired(now.max(Instant::now())) {
+                    self.complete_request(
+                        entry.id,
+                        Ok(Err(config_pull::request_failed(pending_commands::EXPIRED))),
+                    );
+                    continue;
+                }
+                let outcome = catch_handler_panic(method::EXECUTE_COMMAND, || {
+                    self.run_base_command(entry.command)
+                        .map(|value| Some(Answer::Json(value)))
+                });
+                self.complete_request(entry.id, outcome);
+            }
+        }
     }
 
     /// Evict what the last request left over the bound. Here, after every
@@ -466,7 +532,9 @@ impl ServerState {
         let Some(params) = from_params::<CancelParams>(method::CANCEL_REQUEST, params) else {
             return;
         };
-        if let Some(resp) = self.req_queue.incoming.cancel(params.id) {
+        let id: RequestId = params.id;
+        self.pending_commands.remove(&id);
+        if let Some(resp) = self.req_queue.incoming.cancel(id) {
             self.respond(resp);
         }
     }

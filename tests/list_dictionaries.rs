@@ -240,16 +240,15 @@ fn argument_validation_precedes_initial_readiness_and_bundled_selection_still_wo
             Err(INVALID_PARAMS)
         );
     }
-    assert_eq!(
-        client.request(
-            "workspace/executeCommand",
-            json!({"command":"fix.listDictionaries","arguments":[]}),
-        ),
-        Err(REQUEST_FAILED)
+    let pending = client.send_request(
+        "workspace/executeCommand",
+        json!({"command":"fix.listDictionaries","arguments":[]}),
     );
     assert_eq!(select(&mut client, "FIX.4.2").unwrap()["name"], "FIX.4.2");
     client.answer_base_pull();
-    client.wait_base_ready();
+    let replies = client.responses_through_barrier(&pending);
+    assert_eq!(replies.len(), 1);
+    assert!(replies[0].response_result.is_ok());
     assert_eq!(list(&mut client).len(), BUNDLED.len());
     client.shutdown();
 }
@@ -270,6 +269,9 @@ fn a_rejected_configuration_refuses_discovery_until_a_valid_update() {
         Err(REQUEST_FAILED)
     );
     client.notify("workspace/didChangeConfiguration", json!({"settings":null}));
+    client.notify("workspace/didChangeConfiguration", json!({"settings":null}));
+    client.answer_base_pull();
+    // Receiving the queued pull proves the valid recovery batch committed.
     client.answer_base_pull();
     client.wait_base_ready();
     assert_eq!(list(&mut client).len(), BUNDLED.len());

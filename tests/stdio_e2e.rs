@@ -539,3 +539,84 @@ fn diagnostic_codes(params: &Value) -> Vec<&str> {
         .filter_map(|diagnostic| diagnostic["code"].as_str())
         .collect()
 }
+
+#[test]
+fn cold_commands_survive_a_queued_second_configuration_pull_over_stdio() {
+    let mut client = StdioClient::start("cold-command-pulls", None, None);
+    client.request(
+        "initialize",
+        json!({"capabilities":{"workspace":{"configuration":true}}}),
+    );
+    client.notify("initialized", json!({}));
+    let first = client.wait_for_request("workspace/configuration");
+    client.notify("workspace/didChangeConfiguration", json!({"settings":null}));
+    client.send_value(&json!({"jsonrpc":"2.0","id":first["id"],"result":[null]}));
+    let second = client.wait_for_request("workspace/configuration");
+    for (request_id, params) in [
+        ("cold-list", json!({"command":"fix.listDictionaries"})),
+        (
+            "cold-tag",
+            json!({"command":"fix.describeTag","arguments":[54,"1"]}),
+        ),
+    ] {
+        client.send_value(&json!({"jsonrpc":"2.0","id":request_id,"method":"workspace/executeCommand","params":params}));
+    }
+    client.send_value(&json!({"jsonrpc":"2.0","id":second["id"],"result":[null]}));
+    let listing = client.response(&json!("cold-list"));
+    assert!(listing["result"]["dictionaries"].is_array(), "{listing}");
+    let description = client.response(&json!("cold-tag"));
+    assert!(description["result"].as_str().unwrap().contains("Buy"));
+    assert!(client.shutdown_and_exit().success());
+    assert!(
+        !client
+            .received_after_exit()
+            .iter()
+            .any(|message| { message["id"] == "cold-list" || message["id"] == "cold-tag" }),
+        "one response per cold request"
+    );
+}
+
+#[test]
+fn fatal_configuration_with_pending_commands_exits_even_if_responses_are_not_flushed() {
+    for refuse in [true, false] {
+        let mut client = StdioClient::start("fatal-pending-command", None, None);
+        client.request(
+            "initialize",
+            json!({"capabilities":{"workspace":{"configuration":true}}}),
+        );
+        client.notify("initialized", json!({}));
+        let pull = client.wait_for_request("workspace/configuration");
+        for (request_id, command) in [
+            ("fatal-list", "fix.listDictionaries"),
+            ("fatal-tag", "fix.describeTag"),
+        ] {
+            let arguments = if command == "fix.describeTag" {
+                json!([54])
+            } else {
+                json!([])
+            };
+            client.send_value(&json!({"jsonrpc":"2.0","id":request_id,"method":"workspace/executeCommand","params":{"command":command,"arguments":arguments}}));
+        }
+        // An independent request proves the server accepted the preceding commands.
+        let error = client
+            .request_result("workspace/executeCommand", json!({"command":"fix.unknown"}))
+            .unwrap_err();
+        assert_eq!(error["code"], -32602);
+        if refuse {
+            client.send_value(&json!({"jsonrpc":"2.0","id":pull["id"],"error":{"code":-32603,"message":"configuration unavailable"}}));
+        }
+        assert!(!client.wait_for_exit(Duration::from_secs(5)).success());
+        let messages = client.received_after_exit();
+        for request_id in ["fatal-list", "fatal-tag"] {
+            let replies: Vec<_> = messages
+                .iter()
+                .filter(|message| message["id"] == request_id)
+                .collect();
+            assert!(replies.len() <= 1, "{messages:?}");
+            if let Some(reply) = replies.first() {
+                assert_eq!(reply["error"]["code"], -32803, "{reply}");
+                assert!(reply.get("result").is_none());
+            }
+        }
+    }
+}

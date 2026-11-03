@@ -2,7 +2,7 @@
 
 mod harness;
 
-use harness::{TestClient, INVALID_PARAMS, REQUEST_FAILED};
+use harness::{TestClient, INVALID_PARAMS};
 use serde_json::json;
 
 #[test]
@@ -88,20 +88,25 @@ fn a_tag_is_described_with_no_document_open() {
     client.shutdown();
 }
 
-/// Until the configuration answer commits, the reference-link template is a
-/// guess the command declines to answer under; the pull it is waiting on is
-/// still there to answer afterwards.
+/// A pending reference waits for the configured link template.
 #[test]
-fn a_description_before_the_configuration_answer_is_refused() {
+fn a_description_before_the_configuration_answer_waits() {
     let mut client = TestClient::start();
     client.initialize_caps(TestClient::caps_with_pull());
-    let early = client.request(
+    let early = client.send_request(
         "workspace/executeCommand",
         json!({"command": "fix.describeTag", "arguments": [1328]}),
     );
-    assert_eq!(early, Err(REQUEST_FAILED));
     client.answer_base_pull();
-    client.wait_base_ready();
+    let replies = client.responses_through_barrier(&early);
+    assert_eq!(replies.len(), 1);
+    assert!(replies[0]
+        .response_result
+        .as_ref()
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .contains("RejectText"));
     client.shutdown();
 }
 

@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 
 use super::dispatch::{Dispatched, HandlerResult, Snapshot};
+use super::pending_commands::{BaseCommand, REJECTED};
 use super::ServerState;
 use crate::codec::{ByteOffset, Field};
 use crate::dictionary::{DictionaryChoice, Registry, Version};
@@ -189,7 +190,7 @@ fn dictionary_list(registry: &Registry, cap: usize) -> HandlerResult {
 
 impl ServerState {
     pub(super) fn execute_command_task(&mut self, params: &Value) -> Dispatched {
-        let params: ExecuteCommandParams =
+        let mut params: ExecuteCommandParams =
             match super::params(super::method::EXECUTE_COMMAND, params) {
                 Ok(params) => params,
                 Err(e) => return Dispatched::Now(Err(e)),
@@ -211,10 +212,29 @@ impl ServerState {
             return Dispatched::Now(self.select_dictionary(raw.to_owned()));
         }
         if params.command == DESCRIBE_TAG {
-            return Dispatched::Now(self.describe_tag(&params));
+            let (tag, _) = match describe_arguments(&params) {
+                Ok(arguments) => arguments,
+                Err(error) => return Dispatched::Now(Err(error)),
+            };
+            let value = params
+                .arguments
+                .as_mut()
+                .and_then(|arguments| arguments.get_mut(1))
+                .map(|value| {
+                    let Value::String(value) = value.take() else {
+                        unreachable!("validated string")
+                    };
+                    value
+                });
+            return self.base_command(BaseCommand::DescribeTag { tag, value });
         }
         if params.command == LIST_DICTIONARIES {
-            return Dispatched::Now(self.list_dictionaries(&params));
+            if !params.arguments.as_deref().unwrap_or_default().is_empty() {
+                return Dispatched::Now(Err(invalid(format!(
+                    "{LIST_DICTIONARIES} takes no arguments"
+                ))));
+            }
+            return self.base_command(BaseCommand::ListDictionaries);
         }
         if params.command != DECODE {
             return Dispatched::Now(Err(invalid(format!(
@@ -331,38 +351,31 @@ impl ServerState {
         )
     }
 
-    fn require_base_configuration(&self) -> Result<(), ResponseError> {
-        // Rejection first: a rejected first pull never commits, and "retry
-        // later" would then be wrong forever.
+    fn base_command(&self, command: BaseCommand) -> Dispatched {
         if self.config.rejected {
-            return Err(super::config_pull::request_failed(
-                "configuration is not ready; send a valid configuration update",
-            ));
+            return Dispatched::Now(Err(super::config_pull::request_failed(REJECTED)));
         }
         if !self.base_configuration_ready() {
-            return Err(super::config_pull::request_failed(
-                "configuration is not ready, retry later",
-            ));
+            return Dispatched::WaitingForBase(command);
         }
-        Ok(())
+        Dispatched::Now(self.run_base_command(command))
     }
 
-    fn list_dictionaries(&self, params: &ExecuteCommandParams) -> HandlerResult {
-        if !params.arguments.as_deref().unwrap_or_default().is_empty() {
-            return Err(invalid(format!("{LIST_DICTIONARIES} takes no arguments")));
-        }
-        self.require_base_configuration()?;
-        dictionary_list(&self.registry, DICTIONARY_RESULT_BYTES)
-    }
-
-    fn describe_tag(&self, params: &ExecuteCommandParams) -> HandlerResult {
-        let (tag, value) = describe_arguments(params)?;
-        self.require_base_configuration()?;
-        match hover::describe(tag, value, &self.render) {
-            Some(text) => Ok(json!(text)),
-            None => Err(super::config_pull::request_failed(&format!(
-                "{DESCRIBE_TAG}: no bundled dictionary defines tag {tag}"
-            ))),
+    pub(super) fn run_base_command(&self, command: BaseCommand) -> HandlerResult {
+        match command {
+            #[cfg(test)]
+            BaseCommand::Panic => panic!("deferred command panicked"),
+            BaseCommand::ListDictionaries => {
+                dictionary_list(&self.registry, DICTIONARY_RESULT_BYTES)
+            }
+            BaseCommand::DescribeTag { tag, value } => {
+                match hover::describe(tag, value.as_deref(), &self.render) {
+                    Some(text) => Ok(json!(text)),
+                    None => Err(super::config_pull::request_failed(&format!(
+                        "{DESCRIBE_TAG}: no bundled dictionary defines tag {tag}"
+                    ))),
+                }
+            }
         }
     }
 
@@ -900,7 +913,7 @@ mod tests {
             "arguments": arguments,
         })) {
             Dispatched::Now(result) => result,
-            Dispatched::Task(..) | Dispatched::Lazy(..) => {
+            Dispatched::Task(..) | Dispatched::Lazy(..) | Dispatched::WaitingForBase(..) => {
                 panic!("a description needs no document")
             }
         }
@@ -970,15 +983,15 @@ mod tests {
         }
     }
 
-    /// Before the first configuration commit the reference-link template is a
-    /// guess, so the command says to come back rather than answer under it.
+    /// Wait rather than render with an uncommitted reference-link template.
     #[test]
-    fn a_description_before_the_first_commit_is_refused() {
+    fn a_description_before_the_first_commit_is_deferred() {
         let (sender, _receiver) = crossbeam_channel::unbounded::<lsp_server::Message>();
         let mut state = ServerState::new(sender);
-        let error = refused_description(&mut state, json!([49]));
-        assert_eq!(error.code, lsp_server::ErrorCode::RequestFailed as i32);
-        assert_eq!(error.message, "configuration is not ready, retry later");
+        assert!(matches!(
+            state.execute_command_task(&json!({"command": DESCRIBE_TAG, "arguments": [49]})),
+            Dispatched::WaitingForBase(_)
+        ));
     }
 
     /// A rejected first configuration never commits, so "retry later" would
@@ -1004,13 +1017,15 @@ mod tests {
     /// been asked for its settings and has not answered, the link template is
     /// still the one without that layer.
     #[test]
-    fn a_description_while_a_pull_is_unanswered_is_refused() {
+    fn a_description_while_a_pull_is_unanswered_is_deferred() {
         let (mut state, _) = state_with(HEARTBEAT);
         state.client.configuration = true;
         state.pull_base_config();
 
-        let error = refused_description(&mut state, json!([49]));
-        assert_eq!(error.message, "configuration is not ready, retry later");
+        assert!(matches!(
+            state.execute_command_task(&json!({"command": DESCRIBE_TAG, "arguments": [49]})),
+            Dispatched::WaitingForBase(_)
+        ));
 
         let generation = state.config.global_generation;
         state.on_base_reply(generation, Ok(json!([null])));

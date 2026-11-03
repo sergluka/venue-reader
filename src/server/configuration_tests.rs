@@ -345,16 +345,12 @@ fn dictionary_listing_reads_one_committed_registry_during_pull_and_push_updates(
         let generation = state.config.pending.as_ref().unwrap().generation;
         let started = state.config.pending.as_ref().unwrap().started;
         if pull {
-            let refused = state.execute_command_task(&json!({
-                "command":"fix.listDictionaries", "arguments":[]
-            }));
-            match refused {
-                Dispatched::Now(Err(error)) => {
-                    assert_eq!(error.code, -32803);
-                    assert_eq!(error.message, "configuration is not ready, retry later");
-                }
-                _ => panic!("an unanswered pull refuses dictionary discovery"),
-            }
+            assert!(matches!(
+                state.execute_command_task(&json!({
+                    "command":"fix.listDictionaries", "arguments":[]
+                })),
+                Dispatched::WaitingForBase(_)
+            ));
             state.on_base_reply(generation, Ok(json!([replacement])));
         }
 
