@@ -16,18 +16,7 @@ use crate::document::{Columns, LineNo, LineRange};
 use crate::rules::{integrity, Edit, LineCtx, Rule, Scope};
 
 impl ServerState {
-    pub(super) fn code_action_task(&mut self, params: &Value) -> Dispatched {
-        let params: CodeActionParams = match super::params(super::method::CODE_ACTION, params) {
-            Ok(params) => params,
-            // A request, not a notification: an unparseable one is the client's
-            // error. `[]` would claim the document has nothing to repair.
-            Err(e) => return Dispatched::Now(Err(e)),
-        };
-        if let Some(answer) =
-            super::dispatch::configuration_not_ready(self, &params.text_document.uri)
-        {
-            return answer;
-        }
+    pub(super) fn code_action_task_prepared(&mut self, params: CodeActionParams) -> Dispatched {
         let cap = self
             .effective_config(&params.text_document.uri)
             .unwrap_or(&self.config.base)

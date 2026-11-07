@@ -13,15 +13,8 @@ use crate::render::hover;
 impl ServerState {
     /// Resolves the document and hands the dispatcher a task; it never runs the
     /// task itself, so the main loop stays the only execution site.
-    pub(super) fn hover_task(&mut self, params: &Value) -> Dispatched {
-        let params: HoverParams = match super::params(super::method::HOVER, params) {
-            Ok(params) => params,
-            Err(e) => return Dispatched::Now(Err(e)),
-        };
+    pub(super) fn hover_task_prepared(&mut self, params: HoverParams) -> Dispatched {
         let uri = &params.text_document_position_params.text_document.uri;
-        if let Some(answer) = super::dispatch::configuration_not_ready(self, uri) {
-            return answer;
-        }
         if !self
             .effective_config(uri)
             .unwrap_or(&self.config.base)

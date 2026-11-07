@@ -46,16 +46,11 @@ use crate::codec::{ByteOffset, GroupSpans, MessageAnalysis};
 use crate::document::{Column, Columns, LineNo, Offsets};
 
 impl ServerState {
-    pub(super) fn selection_range_task(&mut self, params: &Value) -> Dispatched {
-        let params: SelectionRangeParams =
-            match super::params(super::method::SELECTION_RANGE, params) {
-                Ok(params) => params,
-                Err(e) => return Dispatched::Now(Err(e)),
-            };
+    pub(super) fn selection_range_task_prepared(
+        &mut self,
+        params: SelectionRangeParams,
+    ) -> Dispatched {
         let uri = params.text_document.uri.clone();
-        if let Some(answer) = super::dispatch::configuration_not_ready(self, &uri) {
-            return answer;
-        }
         let cap = self
             .effective_config(&uri)
             .unwrap_or(&self.config.base)
@@ -429,7 +424,9 @@ mod tests {
                 { "line": 3, "character": 18 },
             ],
         });
-        let answers = answered(state.selection_range_task(&params));
+        let answers = answered(state.selection_range_task_prepared(
+            serde_json::from_value(params).expect("valid selection parameters"),
+        ));
         assert_eq!(answers.as_array().expect("an array").len(), 2);
         assert_eq!(
             cached(&mut state, &uri),
@@ -451,7 +448,9 @@ mod tests {
                 { "line": 3, "character": 18 },
             ],
         });
-        answered(state.selection_range_task(&params));
+        answered(state.selection_range_task_prepared(
+            serde_json::from_value(params).expect("valid selection parameters"),
+        ));
         assert!(cached(&mut state, &uri).iter().all(|seen| !seen));
     }
 
@@ -482,7 +481,9 @@ mod tests {
                 .collect::<Vec<Value>>(),
         });
         let started = std::time::Instant::now();
-        let answers = answered(state.selection_range_task(&params));
+        let answers = answered(state.selection_range_task_prepared(
+            serde_json::from_value(params).expect("valid selection parameters"),
+        ));
         let elapsed = started.elapsed();
         assert_eq!(answers.as_array().expect("an array").len(), 1000);
         assert!(

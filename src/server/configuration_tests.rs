@@ -7,7 +7,6 @@ use lsp_server::{Connection, Message, Request, ResponseError};
 use lsp_types::Uri;
 use serde_json::{json, Value};
 
-use super::dispatch::Dispatched;
 use super::external::{self, Job, Loader};
 use super::{testing, ServerExit, ServerState, Startup};
 
@@ -116,6 +115,7 @@ fn workspace_changes_during_loading_rediscover_with_the_committed_global_setting
 fn dictionary_selection_preserves_an_outstanding_global_pull() {
     let (mut state, uri) = testing::state_with(testing::HEARTBEAT);
     state.client.configuration = true;
+    state.config.initial_pull_committed = true;
     state.pull_base_config();
     let batch = state.config.pending.as_ref().unwrap();
     let generation = batch.generation;
@@ -151,9 +151,18 @@ fn receive(state: &ServerState) -> external::Report {
 }
 
 fn describe(state: &mut ServerState, uri: &Uri) -> Value {
-    testing::answered(state.execute_command_task(&json!({
-        "command":"fix.describeOverrides", "arguments":[uri.as_str()]
-    })))
+    testing::answered(
+        state
+            .prepare_request(&Request::new(
+                1.into(),
+                "workspace/executeCommand".into(),
+                json!({
+                    "command":"fix.describeOverrides", "arguments":[uri.as_str()]
+                }),
+            ))
+            .unwrap()
+            .expect("prepared command"),
+    )
 }
 
 #[test]
@@ -278,15 +287,25 @@ fn rejection_leaves_new_documents_unprocessed_until_a_valid_update() {
     state.on_base_reply(generation, Ok(json!([{"hover":{"enabled":"invalid"}}])));
     assert!(state.config.pending.is_none());
     assert!(state.effective_config(&uri).is_none());
-    let result = state.hover_task(
-        &json!({"textDocument":{"uri":uri.as_str()},"position":{"line":0,"character":0}}),
-    );
-    assert!(matches!(result, Dispatched::Now(Err(error)) if error.code == -32803));
+
+    let (sender, received) = crossbeam_channel::unbounded::<Message>();
+    state.sender = sender.into();
+    state.on_request(Request::new(
+        91.into(),
+        "textDocument/hover".into(),
+        json!({"textDocument":{"uri":uri.as_str()},"position":{"line":0,"character":0}}),
+    ));
+    let Message::Response(response) = received.recv_timeout(Duration::from_secs(2)).unwrap() else {
+        panic!("expected rejected request response");
+    };
+    assert_eq!(response.response_result.unwrap_err().code, -32803);
+
     state.on_did_change(json!({"textDocument":{"uri":uri.as_str(),"version":2},"contentChanges":[{"text":"# fix: hover.enabled=false\n8=FIX.4.4|35=0|"}]}));
     assert!(
         state.config.pending.is_none(),
         "no automatic retry of the old base"
     );
+
     state.apply_base_value(&json!({}));
     testing::settle(&mut state);
     assert_eq!(state.snapshot_for(&uri).unwrap().version, 2);
@@ -329,9 +348,18 @@ fn dictionary_listing_reads_one_committed_registry_during_pull_and_push_updates(
             "name":"previous", "transport":"FIX.4.4", "application":"FIX.4.4"
         }]}));
         testing::settle(&mut state);
-        let previous = testing::answered(state.execute_command_task(&json!({
-            "command":"fix.listDictionaries", "arguments":[]
-        })));
+        let previous = testing::answered(
+            state
+                .prepare_request(&Request::new(
+                    1.into(),
+                    "workspace/executeCommand".into(),
+                    json!({
+                        "command":"fix.listDictionaries", "arguments":[]
+                    }),
+                ))
+                .unwrap()
+                .expect("prepared command"),
+        );
         assert_eq!(previous["dictionaries"].as_array().unwrap().len(), 10);
         assert_eq!(previous["dictionaries"][9]["name"], "previous");
         let context = state.config.documents[&uri].ctx.clone();
@@ -340,17 +368,27 @@ fn dictionary_listing_reads_one_committed_registry_during_pull_and_push_updates(
         }]});
 
         state.client.configuration = pull;
+        state.config.initial_pull_committed = pull;
         let barrier = hold(&state.loader);
         state.on_did_change_configuration(json!({"settings":{"fix":replacement}}));
         let generation = state.config.pending.as_ref().unwrap().generation;
         let started = state.config.pending.as_ref().unwrap().started;
         if pull {
-            assert!(matches!(
-                state.execute_command_task(&json!({
-                    "command":"fix.listDictionaries", "arguments":[]
-                })),
-                Dispatched::WaitingForBase(_)
-            ));
+            assert_eq!(
+                testing::answered(
+                    state
+                        .prepare_request(&Request::new(
+                            1.into(),
+                            "workspace/executeCommand".into(),
+                            json!({
+                                "command":"fix.listDictionaries", "arguments":[]
+                            })
+                        ))
+                        .unwrap()
+                        .expect("prepared command")
+                ),
+                previous
+            );
             state.on_base_reply(generation, Ok(json!([replacement])));
         }
 
@@ -384,9 +422,18 @@ fn dictionary_listing_reads_one_committed_registry_during_pull_and_push_updates(
 
         barrier.send(()).unwrap();
         testing::settle(&mut state);
-        let current = testing::answered(state.execute_command_task(&json!({
-            "command":"fix.listDictionaries", "arguments":[]
-        })));
+        let current = testing::answered(
+            state
+                .prepare_request(&Request::new(
+                    1.into(),
+                    "workspace/executeCommand".into(),
+                    json!({
+                        "command":"fix.listDictionaries", "arguments":[]
+                    }),
+                ))
+                .unwrap()
+                .expect("prepared command"),
+        );
         let entries = current["dictionaries"].as_array().unwrap();
         assert_eq!(entries.len(), 10);
         assert_eq!(
@@ -407,9 +454,18 @@ fn dictionary_listing_preserves_the_effective_session_choice_without_loader_work
         {"name":"other44", "transport":"FIX.4.4", "application":"FIX.4.4"}
     ]}));
     testing::settle(&mut state);
-    let selected = testing::answered(state.execute_command_task(&json!({
-        "command":"fix.useDictionary", "arguments":["selected42"]
-    })));
+    let selected = testing::answered(
+        state
+            .prepare_request(&Request::new(
+                1.into(),
+                "workspace/executeCommand".into(),
+                json!({
+                    "command":"fix.useDictionary", "arguments":["selected42"]
+                }),
+            ))
+            .unwrap()
+            .expect("prepared command"),
+    );
     assert_eq!(selected["name"], "selected42");
     testing::settle(&mut state);
     let before = describe(&mut state, &uri);
@@ -418,7 +474,9 @@ fn dictionary_listing_preserves_the_effective_session_choice_without_loader_work
     let hover_params = json!({
         "textDocument":{"uri":uri.as_str()}, "position":{"line":0,"character":11}
     });
-    let hover_before = testing::answered(state.hover_task(&hover_params));
+    let hover_before = testing::answered(
+        state.hover_task_prepared(serde_json::from_value(hover_params.clone()).unwrap()),
+    );
     assert!(hover_before["contents"]["value"]
         .as_str()
         .unwrap()
@@ -427,26 +485,55 @@ fn dictionary_listing_preserves_the_effective_session_choice_without_loader_work
         "textDocument":{"uri":uri.as_str(),"version":1},
         "ranges":[{"start":{"line":0,"character":10},"end":{"line":0,"character":14}}]
     }]});
-    let decoded_before = testing::answered(state.execute_command_task(&decode_params));
+    let decoded_before = testing::answered(
+        state
+            .prepare_request(&Request::new(
+                1.into(),
+                "workspace/executeCommand".into(),
+                decode_params.clone(),
+            ))
+            .unwrap()
+            .expect("prepared command"),
+    );
     assert_eq!(
         decoded_before["results"][0]["lines"][0]["text"],
         "35(MsgType)=0(Heartbeat)"
     );
     let barrier = hold(&state.loader);
     let jobs = state.loader.jobs_submitted.load(Ordering::Relaxed);
-    let listed = testing::answered(state.execute_command_task(&json!({
-        "command":"fix.listDictionaries", "arguments":[]
-    })));
+    let listed = testing::answered(
+        state
+            .prepare_request(&Request::new(
+                1.into(),
+                "workspace/executeCommand".into(),
+                json!({
+                    "command":"fix.listDictionaries", "arguments":[]
+                }),
+            ))
+            .unwrap()
+            .expect("prepared command"),
+    );
     assert_eq!(listed["dictionaries"].as_array().unwrap().len(), 11);
     assert_eq!(state.loader.jobs_submitted.load(Ordering::Relaxed), jobs);
     assert!(state.config.pending.is_none());
     assert_eq!(describe(&mut state, &uri), before);
     assert_eq!(
-        testing::answered(state.hover_task(&hover_params)),
+        testing::answered(
+            state.hover_task_prepared(serde_json::from_value(hover_params.clone()).unwrap())
+        ),
         hover_before
     );
     assert_eq!(
-        testing::answered(state.execute_command_task(&decode_params)),
+        testing::answered(
+            state
+                .prepare_request(&Request::new(
+                    1.into(),
+                    "workspace/executeCommand".into(),
+                    decode_params.clone()
+                ))
+                .unwrap()
+                .expect("prepared command")
+        ),
         decoded_before
     );
     barrier.send(()).unwrap();
@@ -552,6 +639,8 @@ fn fatal_server_return_does_not_join_a_held_configuration_loader() {
 fn dictionary_command_responds_synchronously_while_loader_is_busy() {
     let (sender, received) = crossbeam_channel::unbounded::<Message>();
     let mut state = ServerState::new(sender);
+    state.apply_base_value(&json!({}));
+    testing::settle(&mut state);
     let release = hold(&state.loader);
     state.on_request(Request::new(
         41.into(),
@@ -580,6 +669,8 @@ fn dictionary_command_responds_synchronously_while_loader_is_busy() {
 fn rejected_update_keeps_a_committed_session_selection() {
     let (sender, received) = crossbeam_channel::unbounded::<Message>();
     let mut state = ServerState::new(sender);
+    state.apply_base_value(&json!({}));
+    testing::settle(&mut state);
     state.on_request(Request::new(
         42.into(),
         "workspace/executeCommand".into(),
@@ -625,20 +716,28 @@ fn a_deferred_document_keeps_its_committed_limits_after_the_global_base_changes(
             > 0
     );
     let params = json!({"textDocument":{"uri":uri.as_str()}});
-    let tokens = testing::answered(state.semantic_tokens_full(&params));
+    let tokens = testing::answered(
+        state.semantic_tokens_full_prepared(serde_json::from_value(params.clone()).unwrap()),
+    );
     assert!(
         !tokens["data"].as_array().unwrap().is_empty(),
         "old committed token cap still applies"
     );
-    let lenses = testing::answered(state.code_lens_task(&params));
+    let lenses = testing::answered(
+        state.code_lens_task_prepared(serde_json::from_value(params.clone()).unwrap()),
+    );
     assert!(
         !lenses.as_array().unwrap().is_empty(),
         "old committed lens cap still applies"
     );
     second_barrier.send(()).unwrap();
     testing::settle(&mut state);
-    let tokens = testing::answered(state.semantic_tokens_full(&params));
+    let tokens = testing::answered(
+        state.semantic_tokens_full_prepared(serde_json::from_value(params.clone()).unwrap()),
+    );
     assert!(tokens["data"].as_array().unwrap().is_empty());
-    let lenses = testing::answered(state.code_lens_task(&params));
+    let lenses = testing::answered(
+        state.code_lens_task_prepared(serde_json::from_value(params.clone()).unwrap()),
+    );
     assert!(lenses.as_array().unwrap().is_empty());
 }

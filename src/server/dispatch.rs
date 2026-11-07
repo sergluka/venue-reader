@@ -219,23 +219,12 @@ impl From<Value> for Answer {
 /// the single execution site, so Stage 3/4 submits the task to a bounded executor
 /// there — no handler changes shape.
 pub enum Dispatched {
-    WaitingForBase(super::pending_commands::BaseCommand),
+    WaitingForConfiguration(super::pending_requests::PendingRequest),
     Now(HandlerResult),
     Task(Snapshot, RequestTask),
     /// Answered from server state like `Now`, as a value the writer
     /// serialises rather than a tree this builds.
     Lazy(Result<Box<dyn WriteJson>, ResponseError>),
-}
-
-pub(super) fn configuration_not_ready(
-    state: &super::ServerState,
-    uri: &lsp_types::Uri,
-) -> Option<Dispatched> {
-    (state.docs.contains_key(uri) && state.effective_config(uri).is_none()).then(|| {
-        Dispatched::Now(Err(super::config_pull::request_failed(
-            "document configuration is not ready",
-        )))
-    })
 }
 
 /// A `'static + Send` unit of work over a [`Snapshot`]. `Send` is required now so

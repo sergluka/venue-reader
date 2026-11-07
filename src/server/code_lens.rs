@@ -16,15 +16,8 @@ use crate::codec::{tokenize, LineKind};
 use crate::document::LineNo;
 
 impl ServerState {
-    pub(super) fn code_lens_task(&mut self, params: &Value) -> Dispatched {
-        let params: CodeLensParams = match super::params(super::method::CODE_LENS, params) {
-            Ok(params) => params,
-            Err(e) => return Dispatched::Now(Err(e)),
-        };
+    pub(super) fn code_lens_task_prepared(&mut self, params: CodeLensParams) -> Dispatched {
         let uri = &params.text_document.uri;
-        if let Some(answer) = super::dispatch::configuration_not_ready(self, uri) {
-            return answer;
-        }
         let summary = &self
             .effective_config(uri)
             .unwrap_or(&self.config.base)
@@ -97,8 +90,11 @@ fn list(params: &CodeLensParams, cap: usize, snapshot: &Snapshot) -> HandlerResu
 
 impl ServerState {
     pub(super) fn code_lens_resolve_task(&mut self, params: &Value) -> Dispatched {
-        let lens = params.clone();
-        let data = &params["data"];
+        self.code_lens_resolve_task_owned(params.clone())
+    }
+
+    pub(super) fn code_lens_resolve_task_owned(&mut self, lens: Value) -> Dispatched {
+        let data = &lens["data"];
         let Some(uri) = data["uri"]
             .as_str()
             .and_then(|raw| super::parse_uri("codeLens/resolve", raw))
@@ -108,9 +104,6 @@ impl ServerState {
                 "the lens carries no document",
             )));
         };
-        if let Some(answer) = super::dispatch::configuration_not_ready(self, &uri) {
-            return answer;
-        }
         match self.snapshot_for(&uri) {
             Some(snapshot) => Dispatched::Task(
                 snapshot,

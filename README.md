@@ -177,6 +177,10 @@ Settings apply in this order; later sources override earlier ones:
 4. Project `.venue-reader.toml` files, from workspace root to the document.
 5. `# fix:` modelines in the first or last five content lines.
 
+Requests that need configuration wait for its initial preparation. Later updates
+keep the last committed settings available. See the
+[waiting rules and limits](https://github.com/sergluka/venue-reader/wiki/LSP-Reference#waiting-for-configuration).
+
 For example, turn off the default tag-name and enum hints in your personal file:
 
 ```toml

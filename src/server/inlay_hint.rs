@@ -37,15 +37,8 @@ impl Wanted {
 }
 
 impl ServerState {
-    pub(super) fn inlay_hint_task(&mut self, params: &Value) -> Dispatched {
-        let params: InlayHintParams = match super::params(super::method::INLAY_HINT, params) {
-            Ok(params) => params,
-            Err(e) => return Dispatched::Now(Err(e)),
-        };
+    pub(super) fn inlay_hint_task_prepared(&mut self, params: InlayHintParams) -> Dispatched {
         let uri = params.text_document.uri.clone();
-        if let Some(answer) = super::dispatch::configuration_not_ready(self, &uri) {
-            return answer;
-        }
         let base = self.effective_config(&uri).unwrap_or(&self.config.base);
         let wanted = Wanted {
             hints: base.inlay_hints.clone(),
@@ -371,8 +364,11 @@ impl ServerState {
     /// is: `offset` is unique only within a line, so `line` travels with it and
     /// both are checked against the document rather than trusted.
     pub(super) fn inlay_hint_resolve_task(&mut self, params: &Value) -> Dispatched {
-        let hint = params.clone();
-        let data = &params["data"];
+        self.inlay_hint_resolve_task_owned(params.clone())
+    }
+
+    pub(super) fn inlay_hint_resolve_task_owned(&mut self, hint: Value) -> Dispatched {
+        let data = &hint["data"];
         let Some(uri) = data["uri"]
             .as_str()
             .and_then(|raw| super::parse_uri("inlayHint/resolve", raw))
@@ -380,9 +376,6 @@ impl ServerState {
             return Dispatched::Now(Ok(hint));
         };
         let format = self.client.hover_format.clone();
-        if let Some(answer) = super::dispatch::configuration_not_ready(self, &uri) {
-            return answer;
-        }
         let Some(snapshot) = self.snapshot_for(&uri) else {
             // The document closed; the hint is still a hint, just an unadorned
             // one. An error would make a client discard what it is showing.
@@ -458,7 +451,9 @@ mod tests {
     }
 
     fn run(state: &mut ServerState, params: Value) -> Value {
-        answered(state.inlay_hint_task(&params))
+        answered(state.inlay_hint_task_prepared(
+            serde_json::from_value(params).expect("valid hint parameters"),
+        ))
     }
 
     // Only the cache-asserting tests use it.

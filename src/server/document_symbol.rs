@@ -93,16 +93,11 @@ pub(super) fn lists_symbol_kinds(caps: &lsp_types::ClientCapabilities) -> bool {
 }
 
 impl ServerState {
-    pub(super) fn document_symbol_task(&mut self, params: &Value) -> Dispatched {
-        let params: DocumentSymbolParams =
-            match super::params(super::method::DOCUMENT_SYMBOL, params) {
-                Ok(params) => params,
-                Err(e) => return Dispatched::Now(Err(e)),
-            };
+    pub(super) fn document_symbol_task_prepared(
+        &mut self,
+        params: DocumentSymbolParams,
+    ) -> Dispatched {
         let uri = &params.text_document.uri;
-        if let Some(answer) = super::dispatch::configuration_not_ready(self, uri) {
-            return answer;
-        }
         let base = &self
             .effective_config(uri)
             .unwrap_or(&self.config.base)
@@ -535,13 +530,14 @@ mod tests {
     const PARTIES: &str = "8=FIX.4.4|35=D|453=2|448=A|447=D|452=1|802=1|523=S1|803=1\
                            |448=B|447=D|452=2|54=1";
 
-    fn request(uri: &lsp_types::Uri) -> Value {
-        json!({ "textDocument": { "uri": uri.as_str() } })
+    fn request(uri: &lsp_types::Uri) -> DocumentSymbolParams {
+        serde_json::from_value(json!({ "textDocument": { "uri": uri.as_str() } }))
+            .expect("valid symbol parameters")
     }
 
     fn outline(text: &str) -> Value {
         let (mut state, uri) = state_with(text);
-        answered(state.document_symbol_task(&request(&uri)))
+        answered(state.document_symbol_task_prepared(request(&uri)))
     }
 
     /// The tree as one readable block: names, kinds and ranges at once, so a
@@ -638,12 +634,12 @@ mod tests {
 
         state.config.base.document_symbol.depth = SymbolDepth::Messages;
         super::super::testing::reconfigure(&mut state);
-        let messages = answered(state.document_symbol_task(&request(&uri)));
+        let messages = answered(state.document_symbol_task_prepared(request(&uri)));
         assert_eq!(shape(&messages).lines().count(), 1, "the message alone");
 
         state.config.base.document_symbol.depth = SymbolDepth::Fields;
         super::super::testing::reconfigure(&mut state);
-        let fields = answered(state.document_symbol_task(&request(&uri)));
+        let fields = answered(state.document_symbol_task_prepared(request(&uri)));
         let flat = shape(&fields);
         assert_eq!(
             flat.lines().count(),
@@ -664,12 +660,16 @@ mod tests {
     #[test]
     fn kinds_outside_the_legacy_set_are_answered_only_to_a_client_that_asked() {
         let (mut state, uri) = state_with(PARTIES);
-        let legacy = shape(&answered(state.document_symbol_task(&request(&uri))));
+        let legacy = shape(&answered(
+            state.document_symbol_task_prepared(request(&uri)),
+        ));
         assert!(legacy.starts_with("# → NewOrderSingle (D) [5]"), "{legacy}");
         assert!(legacy.contains("[1] [18]"), "an entry as Array: {legacy}");
 
         state.client.extended_symbol_kinds = true;
-        let extended = shape(&answered(state.document_symbol_task(&request(&uri))));
+        let extended = shape(&answered(
+            state.document_symbol_task_prepared(request(&uri)),
+        ));
         assert!(
             extended.starts_with("# → NewOrderSingle (D) [19]"),
             "a message as Object: {extended}"
@@ -703,7 +703,7 @@ mod tests {
     #[test]
     fn walking_the_document_populates_nothing() {
         let (mut state, uri) = state_with(&heartbeats(5));
-        answered(state.document_symbol_task(&request(&uri)));
+        answered(state.document_symbol_task_prepared(request(&uri)));
         assert!(cached(&mut state, &uri).iter().all(|seen| !seen));
     }
 
@@ -715,7 +715,7 @@ mod tests {
         let (mut state, uri) = state_with(text);
         state.config.base.limits.document_symbol_items = cap;
         super::super::testing::reconfigure(&mut state);
-        answered_with(state.document_symbol_task(&request(&uri)))
+        answered_with(state.document_symbol_task_prepared(request(&uri)))
     }
 
     fn rows(answer: &Value) -> usize {
@@ -844,7 +844,7 @@ mod tests {
         state.config.base.document_symbol.enabled = false;
         super::super::testing::reconfigure(&mut state);
         assert_eq!(
-            answered(state.document_symbol_task(&request(&uri))),
+            answered(state.document_symbol_task_prepared(request(&uri))),
             json!([])
         );
     }

@@ -59,6 +59,8 @@ pub struct ConfigState {
     /// does not mean the client's settings are in; see
     /// [`ServerState::base_configuration_ready`].
     pub(super) committed: bool,
+    /// A successful client pull has reached the commit boundary.
+    pub(super) initial_pull_committed: bool,
     /// Committed session-level dictionary selector.
     pub(super) session: Option<String>,
     /// Initialization settings consumed by the first global pull.
@@ -92,6 +94,7 @@ impl Default for ConfigState {
             next_lifetime: 0,
             rejected: false,
             committed: false,
+            initial_pull_committed: false,
             session: None,
             initial_client: None,
             session_choice: None,
@@ -105,6 +108,7 @@ impl Default for ConfigState {
 pub(super) struct Batch {
     /// Identity used to discard replies and reports from superseded work.
     pub generation: u64,
+    pulled: bool,
     /// Deadline origin covering both the client pull and worker preparation.
     pub started: Instant,
     /// Present until an optional client pull completes and the job is submitted.
@@ -137,21 +141,9 @@ impl ServerState {
             .map(|document| &document.resolved.config)
     }
 
-    /// Whether the committed base configuration is the client's last word: a
-    /// batch has committed and no answer is outstanding.
-    ///
-    /// A pull batch keeps its `input` until the client replies (`submit_batch`
-    /// takes it), which is what tells it from the push-mode batch `initialize`
-    /// starts and submits at once. An answer that is still coming can change
-    /// `tagUrl`, so a document-less request waits for it rather than answer
-    /// with a reference link it knows may be the wrong one.
+    /// Initialization defaults cannot stand in for the first client pull.
     pub(super) fn base_configuration_ready(&self) -> bool {
-        self.config.committed
-            && self
-                .config
-                .pending
-                .as_ref()
-                .is_none_or(|batch| batch.input.is_none())
+        self.config.committed && (!self.client.configuration || self.config.initial_pull_committed)
     }
 
     /// Duration until the configuration deadline, or a long idle interval.
@@ -307,6 +299,7 @@ impl ServerState {
         };
         self.config.pending = Some(Batch {
             generation,
+            pulled: pull,
             started,
             input: Some(input),
             documents: captured,
@@ -432,6 +425,7 @@ impl ServerState {
             Err(error) => self.fail_configuration(error),
             Ok(prepared) => {
                 self.commit_configuration(*prepared);
+                self.config.initial_pull_committed |= batch.pulled;
                 if batch.clears_rejected_at == Some(self.config.validity_revision) {
                     self.config.rejected = false;
                 }

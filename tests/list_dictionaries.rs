@@ -223,7 +223,7 @@ fn project_names_are_excluded_and_document_overrides_survive_selection() {
 }
 
 #[test]
-fn argument_validation_precedes_initial_readiness_and_bundled_selection_still_works() {
+fn argument_validation_precedes_initial_readiness_and_valid_commands_wait() {
     let mut client = TestClient::start();
     client.initialize_caps(TestClient::caps_with_pull());
     for arguments in [
@@ -244,11 +244,19 @@ fn argument_validation_precedes_initial_readiness_and_bundled_selection_still_wo
         "workspace/executeCommand",
         json!({"command":"fix.listDictionaries","arguments":[]}),
     );
-    assert_eq!(select(&mut client, "FIX.4.2").unwrap()["name"], "FIX.4.2");
+    let selection = client.send_request(
+        "workspace/executeCommand",
+        json!({"command":"fix.useDictionary","arguments":["FIX.4.2"]}),
+    );
     client.answer_base_pull();
-    let replies = client.responses_through_barrier(&pending);
-    assert_eq!(replies.len(), 1);
+    let replies = client.responses_through_barrier(&selection);
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[0].id, pending);
     assert!(replies[0].response_result.is_ok());
+    assert_eq!(
+        replies[1].response_result.as_ref().unwrap()["name"],
+        "FIX.4.2"
+    );
     assert_eq!(list(&mut client).len(), BUNDLED.len());
     client.shutdown();
 }

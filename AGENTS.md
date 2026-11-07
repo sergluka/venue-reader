@@ -149,6 +149,9 @@ follows is what is easy to get wrong here and not visible from any one file.
 
 - Use Conventional Commits notation for every commit message.
 - Keep every commit message to a single line.
+- Do not edit `CHANGELOG.md` manually. The `cargo release` pre-release hook in
+  `release.toml` regenerates it with `git-cliff` using `cliff.toml`. Describe
+  user-visible changes in Conventional Commit messages instead.
 
 ## The gate
 

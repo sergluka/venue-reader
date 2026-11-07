@@ -393,6 +393,7 @@ impl TestClient {
         loop {
             match self.describe(uri) {
                 Ok(report) => return report,
+                // Rejected settings remain rejected while their correction loads.
                 Err(REQUEST_FAILED) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(1))
                 }
@@ -401,7 +402,7 @@ impl TestClient {
         }
     }
 
-    /// Wait for the document-free command without client polling.
+    /// Wait for initial base readiness; this is not a refresh-commit barrier.
     pub fn wait_base_ready(&mut self) -> String {
         self.request(
             "workspace/executeCommand",

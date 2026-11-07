@@ -178,6 +178,13 @@ fn range_count_and_work_limits_have_explicit_validation_precedence() {
     );
     assert_eq!(
         decode(&mut client, json!([null, null, null])),
+        Err(INVALID_PARAMS)
+    );
+    assert_eq!(
+        decode(
+            &mut client,
+            json!([range(0, 0, 0, 0), range(0, 0, 0, 0), range(0, 0, 0, 0)])
+        ),
         Err(REQUEST_FAILED)
     );
     assert_eq!(decode(&mut client, json!([null])), Err(INVALID_PARAMS));
@@ -186,7 +193,7 @@ fn range_count_and_work_limits_have_explicit_validation_precedence() {
             "workspace/executeCommand",
             params("file:///closed.fix", json!([null]))
         ),
-        Err(REQUEST_FAILED)
+        Err(INVALID_PARAMS)
     );
     client.shutdown();
     let mut disabled = start(HEARTBEAT, json!({"limits":{"rangeLines":0}}));
@@ -220,11 +227,11 @@ fn edits_close_and_reopen_return_the_snapshot_data_and_version() {
 }
 
 #[test]
-fn unavailable_configuration_is_reported_before_parsing_range_elements() {
+fn malformed_ranges_are_rejected_before_configuration_is_ready() {
     let mut client = TestClient::start();
     client.initialize_caps(TestClient::caps_with_pull());
     client.did_open_unready(URI, HEARTBEAT, 1);
-    assert_eq!(decode(&mut client, json!([null])), Err(REQUEST_FAILED));
+    assert_eq!(decode(&mut client, json!([null])), Err(INVALID_PARAMS));
     client.shutdown();
 }
 

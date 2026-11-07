@@ -1,4 +1,4 @@
-//! Bounded waiting for commands that need committed base configuration.
+//! Bounded waiting for requests that need committed configuration.
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -11,12 +11,14 @@ use super::config_pull::request_failed;
 const MAX_COMMANDS: usize = 64;
 const MAX_BYTES: usize = 1024 * 1024;
 const WAIT: Duration = Duration::from_secs(5);
-pub(super) const REJECTED: &str = "configuration is not ready; send a valid configuration update";
-pub(super) const EXPIRED: &str = "configuration command wait deadline exceeded (5 seconds)";
 const CAPACITY: &str = "pending configuration command capacity exceeded";
 
-/// Parsed commands retained without their original JSON request.
-pub enum BaseCommand {
+pub(super) const REJECTED: &str = "configuration is not ready; send a valid configuration update";
+pub(super) const EXPIRED: &str = "configuration command wait deadline exceeded (5 seconds)";
+
+/// Prepared work retained without the original request envelope.
+pub enum PendingRequest {
+    Request(Box<super::prepared_request::DeferredRequest>),
     ListDictionaries,
     #[cfg(test)]
     Panic,
@@ -26,10 +28,17 @@ pub enum BaseCommand {
     },
 }
 
-impl BaseCommand {
+impl PendingRequest {
     fn bytes(&self) -> usize {
         match self {
             Self::ListDictionaries => 0,
+            Self::Request(request) => {
+                let mut counter = ByteCount(0);
+                if serde_json::to_writer(&mut counter, &request.request.params()).is_err() {
+                    return usize::MAX;
+                }
+                counter.0.saturating_add(request.retained_uri_bytes())
+            }
             #[cfg(test)]
             Self::Panic => 0,
             Self::DescribeTag { value, .. } => value.as_deref().map_or(0, str::len),
@@ -37,26 +46,26 @@ impl BaseCommand {
     }
 }
 
-pub(super) struct PendingCommand {
+pub(super) struct PendingEntry {
     pub id: RequestId,
-    pub command: BaseCommand,
+    pub command: PendingRequest,
     deadline: Instant,
     bytes: usize,
 }
 
-impl PendingCommand {
+impl PendingEntry {
     pub fn expired(&self, now: Instant) -> bool {
         now >= self.deadline
     }
 }
 
 #[derive(Default)]
-pub(super) struct PendingCommands {
-    entries: VecDeque<PendingCommand>,
+pub(super) struct PendingRequests {
+    entries: VecDeque<PendingEntry>,
     bytes: usize,
 }
 
-impl PendingCommands {
+impl PendingRequests {
     pub fn contains(&self, id: &RequestId) -> bool {
         self.entries.iter().any(|entry| &entry.id == id)
     }
@@ -64,7 +73,7 @@ impl PendingCommands {
     pub fn push(
         &mut self,
         id: RequestId,
-        mut command: BaseCommand,
+        mut command: PendingRequest,
         now: Instant,
     ) -> Result<(), ResponseError> {
         if self.entries.len() == MAX_COMMANDS {
@@ -77,13 +86,13 @@ impl PendingCommands {
         let Some(total) = total.filter(|total| *total <= MAX_BYTES) else {
             return Err(request_failed(CAPACITY));
         };
-        if let BaseCommand::DescribeTag {
+        if let PendingRequest::DescribeTag {
             value: Some(value), ..
         } = &mut command
         {
             value.shrink_to_fit();
         }
-        self.entries.push_back(PendingCommand {
+        self.entries.push_back(PendingEntry {
             id,
             command,
             deadline: now + WAIT,
@@ -93,6 +102,15 @@ impl PendingCommands {
         Ok(())
     }
 
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn retain_waiting(&mut self, entry: PendingEntry) {
+        self.bytes += entry.bytes;
+        self.entries.push_back(entry);
+    }
+
     pub fn remove(&mut self, id: &RequestId) {
         if let Some(index) = self.entries.iter().position(|entry| &entry.id == id) {
             let entry = self.entries.remove(index).expect("located entry");
@@ -100,21 +118,16 @@ impl PendingCommands {
         }
     }
 
-    pub fn pop(&mut self) -> Option<PendingCommand> {
+    pub fn pop(&mut self) -> Option<PendingEntry> {
         let entry = self.entries.pop_front()?;
         self.bytes -= entry.bytes;
         Some(entry)
     }
 
-    pub fn expired(&self, now: Instant) -> bool {
-        self.entries
-            .front()
-            .is_some_and(|entry| now >= entry.deadline)
-    }
-
     pub fn tick_in(&self, now: Instant) -> Duration {
         self.entries
-            .front()
+            .iter()
+            .min_by_key(|entry| entry.deadline)
             .map_or(Duration::from_secs(3600), |entry| {
                 entry.deadline.saturating_duration_since(now)
             })
@@ -175,8 +188,8 @@ mod tests {
         let now = Instant::now();
         let id: RequestId = "\"é\n".to_owned().into();
         let id_bytes = serde_json::to_vec(&id).unwrap().len();
-        let mut queue = PendingCommands::default();
-        let command = |bytes| BaseCommand::DescribeTag {
+        let mut queue = PendingRequests::default();
+        let command = |bytes| PendingRequest::DescribeTag {
             tag: 54,
             value: Some("a".repeat(bytes)),
         };
@@ -189,7 +202,7 @@ mod tests {
             .unwrap();
         assert_eq!(queue.bytes, MAX_BYTES);
         assert!(queue
-            .push(2.into(), BaseCommand::ListDictionaries, now)
+            .push(2.into(), PendingRequest::ListDictionaries, now)
             .is_err());
         queue.remove(&id);
         assert_eq!(queue.bytes, 0);
@@ -198,7 +211,7 @@ mod tests {
         assert_eq!(queue.bytes, 0);
         let oversized_id: RequestId = "a".repeat(MAX_BYTES).into();
         assert!(queue
-            .push(oversized_id, BaseCommand::ListDictionaries, now)
+            .push(oversized_id, PendingRequest::ListDictionaries, now)
             .is_err());
         assert!(queue.entries.is_empty());
     }
@@ -206,19 +219,19 @@ mod tests {
     #[test]
     fn count_capacity_and_cancelled_slots_are_reusable() {
         let now = Instant::now();
-        let mut queue = PendingCommands::default();
+        let mut queue = PendingRequests::default();
         for index in 0..MAX_COMMANDS {
             queue
-                .push((index as i32).into(), BaseCommand::ListDictionaries, now)
+                .push((index as i32).into(), PendingRequest::ListDictionaries, now)
                 .unwrap();
         }
         assert!(queue
-            .push(100.into(), BaseCommand::ListDictionaries, now)
+            .push(100.into(), PendingRequest::ListDictionaries, now)
             .is_err());
         queue.remove(&10.into());
         queue.remove(&10.into());
         queue
-            .push(100.into(), BaseCommand::ListDictionaries, now)
+            .push(100.into(), PendingRequest::ListDictionaries, now)
             .unwrap();
         while queue.pop().is_some() {}
         assert_eq!(queue.bytes, 0);
@@ -228,25 +241,73 @@ mod tests {
     fn deadline_is_fixed_and_expiry_wins_at_readiness_equality() {
         let (mut state, receiver) = state();
         request(&mut state, 1, 35);
-        let deadline = state.pending_commands.entries.front().unwrap().deadline;
-        assert_eq!(state.pending_commands.tick_in(deadline), Duration::ZERO);
-        state.process_pending_commands(deadline - Duration::from_nanos(1));
+        let deadline = state.pending_requests.entries.front().unwrap().deadline;
+        assert_eq!(state.pending_requests.tick_in(deadline), Duration::ZERO);
+        state.process_pending_requests(deadline - Duration::from_nanos(1));
         assert!(responses(&receiver).is_empty());
         assert_eq!(
-            state.pending_commands.entries.front().unwrap().deadline,
+            state.pending_requests.entries.front().unwrap().deadline,
             deadline
         );
         state.config.committed = true;
-        state.process_pending_commands(deadline);
-        state.process_pending_commands(deadline + WAIT);
+        state.process_pending_requests(deadline);
+        state.process_pending_requests(deadline + WAIT);
         let replies = responses(&receiver);
         assert_eq!(replies.len(), 1);
         let error = replies[0].response_result.as_ref().unwrap_err();
         assert_eq!(error.code, ErrorCode::RequestFailed as i32);
         assert_eq!(error.message, EXPIRED);
-        assert_eq!(state.pending_commands.bytes, 0);
+        assert_eq!(state.pending_requests.bytes, 0);
         request(&mut state, 1, 35);
         assert!(responses(&receiver).pop().unwrap().response_result.is_ok());
+    }
+
+    #[test]
+    fn a_document_request_expires_once_and_releases_its_payload_and_registration() {
+        let (mut state, receiver) = state();
+        let release = hold_loader(&state);
+        let uri = testing::file_uri("waiting-deadline.fix");
+        state.on_did_open(json!({"textDocument": {
+            "uri": uri, "version": 1, "text": testing::HEARTBEAT
+        }}));
+        let params = json!({"textDocument":{"uri":uri},"position":{"line":0,"character":2}});
+        let admitted = Instant::now();
+        state.on_request(Request::new(
+            71.into(),
+            method::HOVER.into(),
+            params.clone(),
+        ));
+        assert!(responses(&receiver).is_empty());
+        assert_eq!(state.pending_requests.entries.len(), 1);
+        assert!(state.pending_requests.bytes > 0);
+        let deadline = state.pending_requests.entries.front().unwrap().deadline;
+        assert!(deadline >= admitted + WAIT);
+        assert!(deadline <= Instant::now() + WAIT);
+        state.process_pending_requests(deadline - Duration::from_nanos(1));
+        assert!(responses(&receiver).is_empty());
+        assert_eq!(
+            state.pending_requests.entries.front().unwrap().deadline,
+            deadline
+        );
+        state.process_pending_requests(deadline);
+        state.process_pending_requests(deadline + WAIT);
+        let replies = responses(&receiver);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].id, 71.into());
+        let error = replies[0].response_result.as_ref().unwrap_err();
+        assert_eq!(error.code, ErrorCode::RequestFailed as i32);
+        assert_eq!(error.message, EXPIRED);
+        assert!(state.pending_requests.entries.is_empty());
+        assert_eq!(state.pending_requests.bytes, 0);
+        assert!(!state.req_queue.incoming.has_pending());
+        release.send(()).unwrap();
+        testing::settle(&mut state);
+        state.process_pending_requests(Instant::now());
+        assert!(responses(&receiver).is_empty());
+        state.on_request(Request::new(71.into(), method::HOVER.into(), params));
+        let replies = responses(&receiver);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].response_result.is_ok());
     }
 
     #[test]
@@ -255,12 +316,12 @@ mod tests {
         request(&mut state, 1, 9999);
         state.req_queue.incoming.register(2.into(), ());
         state
-            .pending_commands
-            .push(2.into(), BaseCommand::Panic, Instant::now())
+            .pending_requests
+            .push(2.into(), PendingRequest::Panic, Instant::now())
             .unwrap();
         state.config.committed = true;
-        state.process_pending_commands(Instant::now());
-        state.process_pending_commands(Instant::now());
+        state.process_pending_requests(Instant::now());
+        state.process_pending_requests(Instant::now());
         let replies = responses(&receiver);
         assert_eq!(replies.len(), 2);
         assert_eq!(
@@ -271,7 +332,7 @@ mod tests {
             replies[1].response_result.as_ref().unwrap_err().code,
             ErrorCode::InternalError as i32
         );
-        assert_eq!(state.pending_commands.bytes, 0);
+        assert_eq!(state.pending_requests.bytes, 0);
         request(&mut state, 3, 35);
         assert!(responses(&receiver).pop().unwrap().response_result.is_ok());
     }
@@ -288,8 +349,8 @@ mod tests {
             } else {
                 state.config.rejected = true;
             }
-            state.process_pending_commands(Instant::now());
-            state.process_pending_commands(Instant::now());
+            state.process_pending_requests(Instant::now());
+            state.process_pending_requests(Instant::now());
             let replies = responses(&receiver);
             assert_eq!(replies.len(), 2);
             for reply in replies {
@@ -304,7 +365,7 @@ mod tests {
                     }
                 );
             }
-            assert_eq!(state.pending_commands.bytes, 0);
+            assert_eq!(state.pending_requests.bytes, 0);
             assert!(!state.req_queue.incoming.has_pending());
         }
     }
@@ -329,17 +390,17 @@ mod tests {
         let release = hold_loader(&state);
         state.apply_base_value(&json!({"documentLink":{"url":"https://example.org/tag/{tag}"}}));
         request(&mut state, 1, 35);
-        state.process_pending_commands(Instant::now());
+        state.process_pending_requests(Instant::now());
         assert!(responses(&receiver).is_empty());
         release.send(()).unwrap();
         testing::settle(&mut state);
-        state.process_pending_commands(Instant::now());
+        state.process_pending_requests(Instant::now());
         let result = responses(&receiver).pop().unwrap().response_result.unwrap();
         assert!(result
             .as_str()
             .unwrap()
             .contains("https://example.org/tag/35"));
-        assert_eq!(state.pending_commands.bytes, 0);
+        assert_eq!(state.pending_requests.bytes, 0);
     }
 
     #[test]
@@ -348,16 +409,15 @@ mod tests {
         state.apply_base_value(&json!({"documentLink":{"url":"https://example.org/old/{tag}"}}));
         testing::settle(&mut state);
         state.client.configuration = true;
+        state.config.initial_pull_committed = true;
         state.pull_base_config();
         let release = hold_loader(&state);
-        request(&mut state, 1, 35);
-        assert!(responses(&receiver).is_empty());
         let generation = state.config.global_generation;
         state.on_base_reply(
             generation,
             Ok(json!([{ "documentLink": {"url":"https://example.org/new/{tag}"}}])),
         );
-        state.process_pending_commands(Instant::now());
+        request(&mut state, 1, 35);
         let result = responses(&receiver).pop().unwrap().response_result.unwrap();
         assert!(result
             .as_str()

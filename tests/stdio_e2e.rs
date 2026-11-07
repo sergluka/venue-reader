@@ -541,7 +541,7 @@ fn diagnostic_codes(params: &Value) -> Vec<&str> {
 }
 
 #[test]
-fn cold_commands_survive_a_queued_second_configuration_pull_over_stdio() {
+fn commands_use_committed_configuration_during_second_pull_over_stdio() {
     let mut client = StdioClient::start("cold-command-pulls", None, None);
     client.request(
         "initialize",
@@ -561,11 +561,11 @@ fn cold_commands_survive_a_queued_second_configuration_pull_over_stdio() {
     ] {
         client.send_value(&json!({"jsonrpc":"2.0","id":request_id,"method":"workspace/executeCommand","params":params}));
     }
-    client.send_value(&json!({"jsonrpc":"2.0","id":second["id"],"result":[null]}));
     let listing = client.response(&json!("cold-list"));
     assert!(listing["result"]["dictionaries"].is_array(), "{listing}");
     let description = client.response(&json!("cold-tag"));
     assert!(description["result"].as_str().unwrap().contains("Buy"));
+    client.send_value(&json!({"jsonrpc":"2.0","id":second["id"],"result":[null]}));
     assert!(client.shutdown_and_exit().success());
     assert!(
         !client

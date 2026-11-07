@@ -115,16 +115,11 @@ struct Answer {
 impl ServerState {
     /// The viewport shape. Widened to whole lines, because a token is a whole
     /// `tag=value` and half of one would be a token the client cannot place.
-    pub(super) fn semantic_tokens_range_task(&mut self, params: &Value) -> Dispatched {
-        let params: SemanticTokensRangeParams =
-            match super::params(super::method::SEMANTIC_TOKENS_RANGE, params) {
-                Ok(params) => params,
-                Err(e) => return Dispatched::Now(Err(e)),
-            };
+    pub(super) fn semantic_tokens_range_task_prepared(
+        &mut self,
+        params: SemanticTokensRangeParams,
+    ) -> Dispatched {
         let uri = params.text_document.uri.clone();
-        if let Some(answer) = super::dispatch::configuration_not_ready(self, &uri) {
-            return answer;
-        }
         if !self
             .effective_config(&uri)
             .unwrap_or(&self.config.base)
@@ -196,16 +191,11 @@ impl ServerState {
     }
 
     /// The whole-document shape, capped from the top.
-    pub(super) fn semantic_tokens_full(&mut self, params: &Value) -> Dispatched {
-        let params: SemanticTokensParams =
-            match super::params(super::method::SEMANTIC_TOKENS_FULL, params) {
-                Ok(params) => params,
-                Err(e) => return Dispatched::Now(Err(e)),
-            };
+    pub(super) fn semantic_tokens_full_prepared(
+        &mut self,
+        params: SemanticTokensParams,
+    ) -> Dispatched {
         let uri = params.text_document.uri.clone();
-        if let Some(answer) = super::dispatch::configuration_not_ready(self, &uri) {
-            return answer;
-        }
         let Some(snapshot) = self.coloured(&uri) else {
             return Dispatched::Now(Ok(Value::Null));
         };
@@ -213,16 +203,11 @@ impl ServerState {
     }
 
     /// An edit to the last answer, or a whole one when nothing can be spliced.
-    pub(super) fn semantic_tokens_delta(&mut self, params: &Value) -> Dispatched {
-        let params: SemanticTokensDeltaParams =
-            match super::params(super::method::SEMANTIC_TOKENS_DELTA, params) {
-                Ok(params) => params,
-                Err(e) => return Dispatched::Now(Err(e)),
-            };
+    pub(super) fn semantic_tokens_delta_prepared(
+        &mut self,
+        params: SemanticTokensDeltaParams,
+    ) -> Dispatched {
         let uri = params.text_document.uri.clone();
-        if let Some(answer) = super::dispatch::configuration_not_ready(self, &uri) {
-            return answer;
-        }
         let Some(snapshot) = self.coloured(&uri) else {
             return Dispatched::Now(Ok(Value::Null));
         };
@@ -586,7 +571,10 @@ mod tests {
 
     fn ask_full(state: &mut ServerState, uri: &Uri) -> (String, Vec<u32>) {
         let answer = super::super::testing::answered(
-            state.semantic_tokens_full(&json!({ "textDocument": { "uri": uri.as_str() } })),
+            state.semantic_tokens_full_prepared(
+                serde_json::from_value(json!({ "textDocument": { "uri": uri.as_str() } }))
+                    .expect("valid token parameters"),
+            ),
         );
         (
             answer["resultId"].as_str().expect("an id").to_owned(),
@@ -595,20 +583,30 @@ mod tests {
     }
 
     fn ask_range(state: &mut ServerState, uri: &Uri, first: u32, last: u32) -> Value {
-        super::super::testing::answered(state.semantic_tokens_range_task(&json!({
-            "textDocument": { "uri": uri.as_str() },
-            "range": {
-                "start": { "line": first, "character": 0 },
-                "end": { "line": last, "character": 0 },
-            },
-        })))
+        super::super::testing::answered(
+            state.semantic_tokens_range_task_prepared(
+                serde_json::from_value(json!({
+                    "textDocument": { "uri": uri.as_str() },
+                    "range": {
+                        "start": { "line": first, "character": 0 },
+                        "end": { "line": last, "character": 0 },
+                    },
+                }))
+                .expect("valid token range parameters"),
+            ),
+        )
     }
 
     fn ask_delta(state: &mut ServerState, uri: &Uri, previous: &str) -> Value {
-        super::super::testing::answered(state.semantic_tokens_delta(&json!({
-            "textDocument": { "uri": uri.as_str() },
-            "previousResultId": previous,
-        })))
+        super::super::testing::answered(
+            state.semantic_tokens_delta_prepared(
+                serde_json::from_value(json!({
+                    "textDocument": { "uri": uri.as_str() },
+                    "previousResultId": previous,
+                }))
+                .expect("valid token delta parameters"),
+            ),
+        )
     }
 
     fn integers(value: &Value) -> Vec<u32> {
@@ -746,9 +744,12 @@ mod tests {
     #[test]
     fn a_delta_without_an_id_is_refused() {
         let (mut state, uri) = coloured(THREE, 100);
-        let dispatched =
-            state.semantic_tokens_delta(&json!({ "textDocument": { "uri": uri.as_str() } }));
-        let Dispatched::Now(Err(e)) = dispatched else {
+        let result = state.prepare_request(&lsp_server::Request {
+            id: 1.into(),
+            method: super::super::method::SEMANTIC_TOKENS_DELTA.into(),
+            params: json!({ "textDocument": { "uri": uri.as_str() } }),
+        });
+        let Err(e) = result else {
             panic!("an error");
         };
         assert_eq!(e.code, lsp_server::ErrorCode::InvalidParams as i32);

@@ -12,7 +12,7 @@
 //! the newest bundled edition that defines the tag. The tag's own lifespan says
 //! when it arrived and when it left. Neither the
 //! session selection nor `defaultApplVerID` is consulted; only `tagUrl` is, for
-//! the reference link, which is what the readiness check below protects.
+//! the reference link. The initial configuration must be ready before lookup.
 
 use lsp_server::ResponseError;
 use lsp_types::{
@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 
 use super::dispatch::{Dispatched, HandlerResult, Snapshot};
-use super::pending_commands::{BaseCommand, REJECTED};
+use super::pending_requests::{PendingRequest, REJECTED};
 use super::ServerState;
 use crate::codec::{ByteOffset, Field};
 use crate::dictionary::{DictionaryChoice, Registry, Version};
@@ -189,12 +189,48 @@ fn dictionary_list(registry: &Registry, cap: usize) -> HandlerResult {
 }
 
 impl ServerState {
-    pub(super) fn execute_command_task(&mut self, params: &Value) -> Dispatched {
-        let mut params: ExecuteCommandParams =
-            match super::params(super::method::EXECUTE_COMMAND, params) {
-                Ok(params) => params,
-                Err(e) => return Dispatched::Now(Err(e)),
-            };
+    pub(super) fn prepare_configuration_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<super::prepared_request::PreparedRequest, ResponseError> {
+        use super::prepared_request::PreparedRequest;
+        let prepared = match params.command.as_str() {
+            USE_DICTIONARY => {
+                let [name] = params.arguments.as_deref().unwrap_or_default() else {
+                    return Err(invalid("fix.useDictionary takes [dictionaryName]".into()));
+                };
+                let name = name
+                    .as_str()
+                    .filter(|name| !name.trim().is_empty())
+                    .ok_or_else(|| invalid("dictionary name must be a nonempty string".into()))?;
+                PreparedRequest::Dictionary(name.to_owned())
+            }
+            DESCRIBE_OVERRIDES => {
+                let [uri] = params.arguments.as_deref().unwrap_or_default() else {
+                    return Err(invalid("fix.describeOverrides takes [uri]".into()));
+                };
+                PreparedRequest::Overrides(
+                    serde_json::from_value(uri.clone())
+                        .map_err(|error| invalid(error.to_string()))?,
+                )
+            }
+            DECODE => {
+                let input = arguments(&params)?;
+                let ranges = input.parsed_ranges()?;
+                PreparedRequest::Decode {
+                    uri: input.uri,
+                    ranges,
+                }
+            }
+            _ => PreparedRequest::Command(params),
+        };
+        Ok(prepared)
+    }
+
+    pub(super) fn execute_command_prepared(
+        &mut self,
+        mut params: ExecuteCommandParams,
+    ) -> Dispatched {
         if params.command == DESCRIBE_OVERRIDES {
             return Dispatched::Now(self.describe_overrides(&params));
         }
@@ -226,7 +262,7 @@ impl ServerState {
                     };
                     value
                 });
-            return self.base_command(BaseCommand::DescribeTag { tag, value });
+            return self.base_command(PendingRequest::DescribeTag { tag, value });
         }
         if params.command == LIST_DICTIONARIES {
             if !params.arguments.as_deref().unwrap_or_default().is_empty() {
@@ -234,7 +270,7 @@ impl ServerState {
                     "{LIST_DICTIONARIES} takes no arguments"
                 ))));
             }
-            return self.base_command(BaseCommand::ListDictionaries);
+            return self.base_command(PendingRequest::ListDictionaries);
         }
         if params.command != DECODE {
             return Dispatched::Now(Err(invalid(format!(
@@ -247,34 +283,31 @@ impl ServerState {
             Ok(input) => input,
             Err(e) => return Dispatched::Now(Err(e)),
         };
-        if let Some(not_ready) = super::dispatch::configuration_not_ready(self, &input.uri) {
-            return not_ready;
-        }
 
-        let Some(snapshot) = self.snapshot_for(&input.uri) else {
+        let ranges = match input.parsed_ranges() {
+            Ok(ranges) => ranges,
+            Err(error) => return Dispatched::Now(Err(error)),
+        };
+        self.decode_prepared(input.uri, ranges)
+    }
+
+    pub(super) fn decode_prepared(&mut self, uri: Uri, ranges: Vec<Range>) -> Dispatched {
+        let Some(snapshot) = self.snapshot_for(&uri) else {
             return Dispatched::Now(Err(ResponseError {
                 code: lsp_server::ErrorCode::RequestFailed as i32,
-                message: format!(
-                    "{}: no open document at {}",
-                    params.command,
-                    input.uri.as_str()
-                ),
+                message: format!("{}: no open document at {}", DECODE, uri.as_str()),
                 data: None,
             }));
         };
 
         let limits = &self
-            .effective_config(&input.uri)
+            .effective_config(&uri)
             .expect("configured snapshot")
             .limits;
         let cap = limits.range_lines;
-        if input.ranges.len() > cap {
+        if ranges.len() > cap {
             return Dispatched::Now(Err(selection_too_large(cap)));
         }
-        let ranges = match input.parsed_ranges() {
-            Ok(ranges) => ranges,
-            Err(e) => return Dispatched::Now(Err(e)),
-        };
         if ranges
             .iter()
             .any(|range| range.start.line >= snapshot.line_count())
@@ -300,7 +333,7 @@ impl ServerState {
         let result_limit = limits.decode_result_bytes;
         Dispatched::Task(
             snapshot,
-            Box::new(move |snapshot, _| answer(&input.uri, &ranges, snapshot, result_limit)),
+            Box::new(move |snapshot, _| answer(&uri, &ranges, snapshot, result_limit)),
         )
     }
 
@@ -310,6 +343,10 @@ impl ServerState {
         };
         let uri: Uri =
             serde_json::from_value(uri.clone()).map_err(|error| invalid(error.to_string()))?;
+        self.describe_overrides_prepared(uri)
+    }
+
+    pub(super) fn describe_overrides_prepared(&self, uri: Uri) -> HandlerResult {
         let Some(document) = self.config.documents.get(&uri) else {
             return Err(super::config_pull::request_failed(
                 "document is not open or its configuration is not ready",
@@ -351,24 +388,27 @@ impl ServerState {
         )
     }
 
-    fn base_command(&self, command: BaseCommand) -> Dispatched {
+    fn base_command(&self, command: PendingRequest) -> Dispatched {
         if self.config.rejected {
             return Dispatched::Now(Err(super::config_pull::request_failed(REJECTED)));
         }
         if !self.base_configuration_ready() {
-            return Dispatched::WaitingForBase(command);
+            return Dispatched::WaitingForConfiguration(command);
         }
         Dispatched::Now(self.run_base_command(command))
     }
 
-    pub(super) fn run_base_command(&self, command: BaseCommand) -> HandlerResult {
+    pub(super) fn run_base_command(&self, command: PendingRequest) -> HandlerResult {
         match command {
+            PendingRequest::Request(_) => {
+                unreachable!("prepared requests execute through dispatch")
+            }
             #[cfg(test)]
-            BaseCommand::Panic => panic!("deferred command panicked"),
-            BaseCommand::ListDictionaries => {
+            PendingRequest::Panic => panic!("deferred command panicked"),
+            PendingRequest::ListDictionaries => {
                 dictionary_list(&self.registry, DICTIONARY_RESULT_BYTES)
             }
-            BaseCommand::DescribeTag { tag, value } => {
+            PendingRequest::DescribeTag { tag, value } => {
                 match hover::describe(tag, value.as_deref(), &self.render) {
                     Some(text) => Ok(json!(text)),
                     None => Err(super::config_pull::request_failed(&format!(
@@ -713,10 +753,20 @@ mod tests {
     }
 
     fn ask(state: &mut ServerState, uri: &Uri, ranges: Value) -> Value {
-        selected_text(answered(state.execute_command_task(&json!({
-            "command": DECODE,
-            "arguments": [{"textDocument": {"uri": uri.as_str()}, "ranges": ranges}],
-        }))))
+        let request = lsp_server::Request::new(
+            1.into(),
+            super::super::method::EXECUTE_COMMAND.into(),
+            json!({
+                "command": DECODE,
+                "arguments": [{"textDocument": {"uri": uri}, "ranges": ranges}],
+            }),
+        );
+        selected_text(answered(
+            state
+                .prepare_request(&request)
+                .unwrap()
+                .expect("prepared decode"),
+        ))
     }
 
     fn range(sl: u32, sc: u32, el: u32, ec: u32) -> Value {
@@ -727,11 +777,16 @@ mod tests {
     }
 
     fn refused(state: &mut ServerState, uri: &Uri, ranges: Value) -> ResponseError {
-        match state.execute_command_task(&json!({
-            "command": DECODE,
-            "arguments": [{"textDocument": {"uri": uri.as_str()}, "ranges": ranges}],
-        })) {
-            Dispatched::Now(Err(e)) => e,
+        let request = lsp_server::Request::new(
+            1.into(),
+            super::super::method::EXECUTE_COMMAND.into(),
+            json!({
+                "command": DECODE,
+                "arguments": [{"textDocument": {"uri": uri.as_str()}, "ranges": ranges}],
+            }),
+        );
+        match state.prepare_request(&request) {
+            Err(error) | Ok(Some(Dispatched::Now(Err(error)))) => error,
             _ => panic!("refused"),
         }
     }
@@ -875,10 +930,13 @@ mod tests {
     #[test]
     fn an_unknown_command_and_a_malformed_argument_list_are_invalid_params() {
         let (mut state, uri) = state_with(HEARTBEAT);
-        let unknown = match state.execute_command_task(&json!({
-            "command": "fix.somethingElse",
-            "arguments": [uri.as_str(), [range(0, 0, 0, 1)]],
-        })) {
+        let unknown = match state.execute_command_prepared(
+            serde_json::from_value(json!({
+                "command": "fix.somethingElse",
+                "arguments": [uri.as_str(), [range(0, 0, 0, 1)]],
+            }))
+            .unwrap(),
+        ) {
             Dispatched::Now(Err(e)) => e,
             _ => panic!("refused"),
         };
@@ -894,10 +952,13 @@ mod tests {
             assert!(unknown.message.contains(offered), "{unknown:?}");
         }
 
-        let short = match state.execute_command_task(&json!({
-            "command": DECODE,
-            "arguments": [uri.as_str()],
-        })) {
+        let short = match state.execute_command_prepared(
+            serde_json::from_value(json!({
+                "command": DECODE,
+                "arguments": [uri.as_str()],
+            }))
+            .unwrap(),
+        ) {
             Dispatched::Now(Err(e)) => e,
             _ => panic!("refused"),
         };
@@ -908,12 +969,17 @@ mod tests {
     }
 
     fn describe(state: &mut ServerState, arguments: Value) -> Result<Value, ResponseError> {
-        match state.execute_command_task(&json!({
-            "command": DESCRIBE_TAG,
-            "arguments": arguments,
-        })) {
+        match state.execute_command_prepared(
+            serde_json::from_value(json!({
+                "command": DESCRIBE_TAG,
+                "arguments": arguments,
+            }))
+            .unwrap(),
+        ) {
             Dispatched::Now(result) => result,
-            Dispatched::Task(..) | Dispatched::Lazy(..) | Dispatched::WaitingForBase(..) => {
+            Dispatched::Task(..)
+            | Dispatched::Lazy(..)
+            | Dispatched::WaitingForConfiguration(..) => {
                 panic!("a description needs no document")
             }
         }
@@ -989,8 +1055,11 @@ mod tests {
         let (sender, _receiver) = crossbeam_channel::unbounded::<lsp_server::Message>();
         let mut state = ServerState::new(sender);
         assert!(matches!(
-            state.execute_command_task(&json!({"command": DESCRIBE_TAG, "arguments": [49]})),
-            Dispatched::WaitingForBase(_)
+            state.execute_command_prepared(
+                serde_json::from_value(json!({"command": DESCRIBE_TAG, "arguments": [49]}))
+                    .unwrap()
+            ),
+            Dispatched::WaitingForConfiguration(_)
         ));
     }
 
@@ -1023,8 +1092,11 @@ mod tests {
         state.pull_base_config();
 
         assert!(matches!(
-            state.execute_command_task(&json!({"command": DESCRIBE_TAG, "arguments": [49]})),
-            Dispatched::WaitingForBase(_)
+            state.execute_command_prepared(
+                serde_json::from_value(json!({"command": DESCRIBE_TAG, "arguments": [49]}))
+                    .unwrap()
+            ),
+            Dispatched::WaitingForConfiguration(_)
         ));
 
         let generation = state.config.global_generation;

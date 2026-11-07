@@ -24,7 +24,8 @@ pub mod hover;
 mod inlay_hint;
 pub mod lifecycle;
 mod method;
-mod pending_commands;
+mod pending_requests;
+mod prepared_request;
 mod selection_range;
 mod semantic_tokens;
 #[cfg(test)]
@@ -133,7 +134,7 @@ pub fn serve_started(link: Link, startup: Startup) -> ServerExit {
     let configuration_rx = state.loader.reports.clone();
     loop {
         state.check_config_deadline();
-        state.process_pending_commands(Instant::now());
+        state.process_pending_requests(Instant::now());
         if let Some(error) = state.fatal.take() {
             state.diagnostics.abandon();
             return ServerExit::Fatal(error);
@@ -162,7 +163,7 @@ pub fn serve_started(link: Link, startup: Startup) -> ServerExit {
                     Err(_) => state.fail_configuration("configuration worker disconnected".into()),
                 }
             }
-            default(state.diagnostics.tick_in().min(state.config_tick_in()).min(state.pending_commands.tick_in(Instant::now()))) => state.dispatch_due_diagnostics(),
+            default(state.diagnostics.tick_in().min(state.config_tick_in()).min(state.pending_requests.tick_in(Instant::now()))) => state.dispatch_due_diagnostics(),
         }
     }
     ServerExit::Normal
@@ -177,7 +178,7 @@ pub(crate) struct ServerState {
     pub(super) docs: HashMap<Uri, Document>,
     pub(super) encoding: PositionEncoding,
     pub(super) req_queue: ReqQueue<(), OutgoingRequest>,
-    pending_commands: pending_commands::PendingCommands,
+    pending_requests: pending_requests::PendingRequests,
     pub(super) shutdown_requested: bool,
     pub(super) config: ConfigState,
     pub(super) client: ClientSupport,
@@ -270,7 +271,7 @@ impl ServerState {
             docs: HashMap::new(),
             encoding: PositionEncoding::Utf16, // until initialize negotiates
             req_queue: ReqQueue::default(),
-            pending_commands: pending_commands::PendingCommands::default(),
+            pending_requests: pending_requests::PendingRequests::default(),
             shutdown_requested: false,
             config: ConfigState::default(),
             client: ClientSupport::default(),
@@ -294,14 +295,14 @@ impl ServerState {
 
     fn on_request(&mut self, req: Request) {
         // Preserve the original request even when a duplicate ID names shutdown.
-        if self.pending_commands.contains(&req.id) {
+        if self.pending_requests.contains(&req.id) {
             log::warn!("ignoring duplicate pending command ID {}", req.id);
             return;
         }
         if req.method == method::SHUTDOWN {
             self.shutdown_requested = true;
             self.stop_configuration();
-            self.fail_pending_commands("server is shutting down");
+            self.fail_pending_requests("server is shutting down");
             self.respond(Response::new_ok(req.id, Value::Null));
             return;
         }
@@ -316,27 +317,35 @@ impl ServerState {
 
         let id = req.id.clone();
         self.req_queue.incoming.register(id.clone(), ());
-        // `handle_request` is called *inside* the guard, not before it: it
-        // parses params, takes snapshots and rebuilds line caches, and a panic
-        // in any of those has to become an InternalError rather than kill the
-        // loop. A test against `catch_handler_panic` alone cannot hold this —
-        // when it regressed, the helper was fine and the call site was not.
-        let outcome = catch_handler_panic(&req.method, || match self.handle_request(&req) {
+        // Preparation and execution both stay inside the panic boundary so a
+        // malformed request or failing handler cannot terminate the loop.
+        let outcome = catch_handler_panic(&req.method, || {
+            let dispatched = match self.prepare_request(&req)? {
+                Some(dispatched) => dispatched,
+                None => self.handle_request(&req),
+            };
+            self.execute_dispatched(id.clone(), dispatched)
+        });
+        self.complete_request(id, outcome);
+    }
+
+    fn execute_dispatched(
+        &mut self,
+        id: RequestId,
+        dispatched: Dispatched,
+    ) -> Result<Option<Answer>, ResponseError> {
+        match dispatched {
             Dispatched::Now(result) => result.map(|value| Some(Answer::Json(value))),
-            // The one place a task is executed. Stage 3/4 submits it to the
-            // bounded executor here and completes the response from the
-            // executor's channel; no handler changes.
             Dispatched::Task(snapshot, task) => {
                 task(&snapshot, &mut Notices::to(self.sender.clone()))
                     .map(|value| Some(Answer::Json(value)))
             }
             Dispatched::Lazy(result) => result.map(|value| Some(Answer::Lazy(value))),
-            Dispatched::WaitingForBase(command) => self
-                .pending_commands
-                .push(id.clone(), command, Instant::now())
+            Dispatched::WaitingForConfiguration(command) => self
+                .pending_requests
+                .push(id, command, Instant::now())
                 .map(|()| None),
-        });
-        self.complete_request(id, outcome);
+        }
     }
 
     fn complete_request(
@@ -378,46 +387,57 @@ impl ServerState {
         self.sweep_caches();
     }
 
-    fn fail_pending_commands(&mut self, message: &str) {
-        while let Some(entry) = self.pending_commands.pop() {
+    fn fail_pending_requests(&mut self, message: &str) {
+        while let Some(entry) = self.pending_requests.pop() {
             self.complete_request(entry.id, Ok(Err(config_pull::request_failed(message))));
         }
     }
 
-    fn process_pending_commands(&mut self, now: Instant) {
+    fn process_pending_requests(&mut self, now: Instant) {
         if self.fatal.is_some() {
-            self.fail_pending_commands("configuration failed; server is exiting");
+            self.fail_pending_requests("configuration failed; server is exiting");
             return;
         }
         if self.shutdown_requested {
             return;
         }
         if self.config.rejected {
-            self.fail_pending_commands(pending_commands::REJECTED);
+            self.fail_pending_requests(pending_requests::REJECTED);
             return;
         }
-        while self.pending_commands.expired(now) {
-            let entry = self.pending_commands.pop().expect("expired entry");
-            self.complete_request(
-                entry.id,
-                Ok(Err(config_pull::request_failed(pending_commands::EXPIRED))),
-            );
-        }
-        if self.base_configuration_ready() {
-            while let Some(entry) = self.pending_commands.pop() {
-                if entry.expired(now.max(Instant::now())) {
-                    self.complete_request(
-                        entry.id,
-                        Ok(Err(config_pull::request_failed(pending_commands::EXPIRED))),
-                    );
-                    continue;
-                }
-                let outcome = catch_handler_panic(method::EXECUTE_COMMAND, || {
-                    self.run_base_command(entry.command)
-                        .map(|value| Some(Answer::Json(value)))
-                });
-                self.complete_request(entry.id, outcome);
+        let count = self.pending_requests.len();
+        for _ in 0..count {
+            let entry = self.pending_requests.pop().expect("pending entry");
+            if entry.expired(now.max(Instant::now())) {
+                self.complete_request(
+                    entry.id,
+                    Ok(Err(config_pull::request_failed(pending_requests::EXPIRED))),
+                );
+                continue;
             }
+            let ready = match &entry.command {
+                pending_requests::PendingRequest::Request(request) => request.ready(self),
+                _ => self.base_configuration_ready(),
+            };
+            if !ready {
+                self.pending_requests.retain_waiting(entry);
+                continue;
+            }
+            let id = entry.id;
+            let method = match &entry.command {
+                pending_requests::PendingRequest::Request(request) => request.request.method(),
+                _ => method::EXECUTE_COMMAND,
+            };
+            let outcome = catch_handler_panic(method, || match entry.command {
+                pending_requests::PendingRequest::Request(request) => {
+                    let dispatched = request.execute(self);
+                    self.execute_dispatched(id.clone(), dispatched)
+                }
+                command => self
+                    .run_base_command(command)
+                    .map(|value| Some(Answer::Json(value))),
+            });
+            self.complete_request(id, outcome);
         }
     }
 
@@ -438,22 +458,9 @@ impl ServerState {
             // exists.
             #[cfg(test)]
             method::TEST_PANIC_IN_DISPATCH => panic!("dispatch exploded"),
-            // `params` is a `Value` because `lsp_server` is transport only: the
-            // method string is what selects the payload shape, so the type is not
-            // known until here. Each handler types its own.
             method::INITIALIZE => Dispatched::Now(Ok(self.on_initialize(&req.params))),
-            method::HOVER => self.hover_task(&req.params),
-            method::CODE_ACTION => self.code_action_task(&req.params),
-            method::CODE_LENS => self.code_lens_task(&req.params),
-            method::INLAY_HINT => self.inlay_hint_task(&req.params),
             method::INLAY_HINT_RESOLVE => self.inlay_hint_resolve_task(&req.params),
             method::CODE_LENS_RESOLVE => self.code_lens_resolve_task(&req.params),
-            method::SELECTION_RANGE => self.selection_range_task(&req.params),
-            method::EXECUTE_COMMAND => self.execute_command_task(&req.params),
-            method::DOCUMENT_SYMBOL => self.document_symbol_task(&req.params),
-            method::SEMANTIC_TOKENS_RANGE => self.semantic_tokens_range_task(&req.params),
-            method::SEMANTIC_TOKENS_FULL => self.semantic_tokens_full(&req.params),
-            method::SEMANTIC_TOKENS_DELTA => self.semantic_tokens_delta(&req.params),
             other => Dispatched::Now(Err(lsp_server::ResponseError {
                 code: ErrorCode::MethodNotFound as i32,
                 message: format!("unhandled method: {other}"),
@@ -533,7 +540,7 @@ impl ServerState {
             return;
         };
         let id: RequestId = params.id;
-        self.pending_commands.remove(&id);
+        self.pending_requests.remove(&id);
         if let Some(resp) = self.req_queue.incoming.cancel(id) {
             self.respond(resp);
         }

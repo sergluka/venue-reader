@@ -47,28 +47,35 @@ fn base_pull_is_sent_on_initialized() {
 }
 
 #[test]
-fn only_bundled_dictionary_names_are_available_before_the_first_global_commit() {
+fn dictionary_selection_waits_for_the_first_global_commit() {
     let mut client = TestClient::start();
     client.initialize_caps(TestClient::caps_with_pull());
     let (pull_id, method, _) = client.recv_server_request();
     assert_eq!(method, "workspace/configuration");
-
-    let bundled = client
-        .request(
-            "workspace/executeCommand",
-            json!({"command":"fix.useDictionary","arguments":["FIX.4.2"]}),
-        )
-        .unwrap();
-    assert_eq!(bundled["name"], "FIX.4.2");
-    assert_eq!(
-        client.request(
-            "workspace/executeCommand",
-            json!({"command":"fix.useDictionary","arguments":["venue"]}),
-        ),
-        Err(REQUEST_FAILED)
+    let bundled = client.send_request(
+        "workspace/executeCommand",
+        json!({"command":"fix.useDictionary","arguments":["FIX.4.2"]}),
     );
-
+    let unknown = client.send_request(
+        "workspace/executeCommand",
+        json!({"command":"fix.useDictionary","arguments":["venue"]}),
+    );
+    let barrier = client.send_request("unknown/readinessBarrier", json!({}));
+    let responses = client.responses_through_barrier(&barrier);
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].id, barrier);
     client.reply(pull_id, json!([{}]));
+    let responses = client.responses_through_barrier(&unknown);
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0].id, bundled);
+    assert_eq!(
+        responses[0].response_result.as_ref().unwrap()["name"],
+        "FIX.4.2"
+    );
+    assert_eq!(
+        responses[1].response_result.as_ref().unwrap_err().code,
+        REQUEST_FAILED
+    );
     client.shutdown();
 }
 

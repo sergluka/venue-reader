@@ -803,8 +803,17 @@ fn an_open_during_a_rejected_pull_waits_for_a_later_valid_update() {
     assert_eq!(params, json!({"items":[{"section":"fix"}]}));
     let document = fixture.uri("orders.fix");
     client.did_open_unready(&document, MESSAGE, 1);
-    assert_eq!(client.describe(&document), Err(REQUEST_FAILED));
+    let waiting = client.send_request(
+        "workspace/executeCommand",
+        json!({"command":"fix.describeOverrides","arguments":[document]}),
+    );
     client.reply(request, json!([{"hover":{"enabled":12}}]));
+    let responses = client.responses_through_barrier(&waiting);
+    assert_eq!(responses.len(), 1);
+    assert_eq!(
+        responses[0].response_result.as_ref().unwrap_err().code,
+        REQUEST_FAILED
+    );
     client.wait_for_log("configuration rejected");
     assert_eq!(client.describe(&document), Err(REQUEST_FAILED));
     client.did_change_full(
