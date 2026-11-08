@@ -834,7 +834,7 @@ fn fixt_value_hints_and_summary_use_the_application_message() {
         let mut client = open_with(
             json!({
                 "inlayHints": { "enumValues": { "enabled": true } },
-                "messageSummary": { "channels": { "inlayHints": true }, "template": "{35:name} ({35})" },
+                "messageSummary": { "channels": { "inlayHints": true }, "template": "{35.valueName} ({35})" },
             }),
             plain_caps(),
             &line,
@@ -860,7 +860,7 @@ fn unresolved_application_does_not_inherit_a_transport_msg_type_enum() {
                 "tagNames": { "enabled": false },
                 "enumValues": { "enabled": true },
             },
-            "messageSummary": {"channels": {"inlayHints": true}, "template": "{35:name|unresolved}"},
+            "messageSummary": {"channels": {"inlayHints": true}, "template": "{35.valueName?:\"unresolved\"}"},
         }),
         plain_caps(),
         LINE,
@@ -875,4 +875,53 @@ fn unresolved_application_does_not_inherit_a_transport_msg_type_enum() {
     );
     assert_eq!(names, ["D"]);
     client.shutdown();
+}
+
+#[test]
+fn summary_metadata_requires_both_capability_and_configuration() {
+    for support in [false, true] {
+        for enabled in [false, true] {
+            let mut caps = plain_caps();
+            if support {
+                caps["experimental"] = json!({"venueReader":{"summaryTokens":1}});
+            }
+            let mut client = open_with(
+                json!({
+                    "messageSummary": {"channels":{"inlayHints":true}, "semanticTokens": enabled,
+                        "details":false, "template":"{34} | {49}=>{56} {35.valueName}"}
+                }),
+                caps,
+                HEARTBEAT,
+            );
+            let hints = over(&mut client, (0, 0), (0, 400));
+            let hint = hints
+                .iter()
+                .find(|hint| hint["data"]["kind"] == "summary")
+                .unwrap();
+            assert!(hint["data"].get("uri").is_none());
+            assert!(hint["data"].get("version").is_none());
+            assert!(hint["data"].get("line").is_none());
+            if support && enabled {
+                let labels = hint["label"].as_array().unwrap();
+                let tokens = hint["data"]["tokens"].as_array().unwrap();
+                assert_eq!(labels.len(), tokens.len());
+                assert_eq!(tokens[0][0], "N");
+                assert!(tokens[1].is_null());
+                for (label, token) in labels.iter().zip(tokens) {
+                    if label["value"] == "CLIENT1" {
+                        assert_ne!(token[1].as_u64().unwrap() & (1 << 14), 0);
+                    }
+                    if label["value"] == "BROKER1" {
+                        assert_ne!(token[1].as_u64().unwrap() & (1 << 13), 0);
+                    }
+                }
+            } else {
+                assert!(hint["data"].get("tokens").is_none());
+            }
+            assert!(hints
+                .iter()
+                .any(|hint| hint["data"]["kind"] == "tag" && hint["data"].get("uri").is_some()));
+            client.shutdown();
+        }
+    }
 }

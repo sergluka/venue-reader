@@ -176,6 +176,59 @@ fn resolve_as(
     }
 }
 
+/// Source ownership for fields outside a declared scope.
+fn undeclared_source(
+    sources: &DictionarySources,
+    known_owner: Option<SourceRole>,
+    tag: u32,
+) -> Option<(SourceRole, &Dict, Option<FieldIdx>)> {
+    let resolved = match (sources.transport.as_ref(), sources.application.as_ref()) {
+        (Some(transport), Some(application)) if transport.ptr_eq(application) => (
+            SourceRole::Application,
+            application,
+            application.field_idx(tag),
+        ),
+        (Some(transport), Some(application)) => match application.field_idx(tag) {
+            Some(def) => (SourceRole::Application, application, Some(def)),
+            None => match transport.field_idx(tag) {
+                Some(def) => (SourceRole::Transport, transport, Some(def)),
+                None => (SourceRole::Application, application, None),
+            },
+        },
+        (Some(transport), None) if known_owner == Some(SourceRole::Transport) => {
+            (SourceRole::Transport, transport, transport.field_idx(tag))
+        }
+        _ => return None,
+    };
+    Some(resolved)
+}
+
+pub(super) fn name_source(message: &MessageAnalysis, tag: u32) -> Option<&Dict> {
+    if let Some(transport) = message.sources.transport.as_ref() {
+        let schema = transport.schema();
+        if schema.header().find(tag).is_some() || schema.trailer().find(tag).is_some() {
+            return Some(transport);
+        }
+    }
+    if let Some(identity) = message.msg_type {
+        let source = message.sources.source(identity.owner)?;
+        if source
+            .schema()
+            .message(identity.index.0)
+            .find(tag)
+            .is_some()
+        {
+            return Some(source);
+        }
+    }
+    undeclared_source(
+        &message.sources,
+        message.msg_type.map(|identity| identity.owner),
+        tag,
+    )
+    .map(|(_, source, _)| source)
+}
+
 struct Annotator<'a> {
     bytes: &'a [u8],
     sources: &'a DictionarySources,
@@ -220,26 +273,9 @@ impl Annotator<'_> {
     /// declare. The application owns it unless only the transport defines it.
     fn undeclared(&mut self, at: usize) {
         let tag = self.fields[at].tag;
-        let (owner, source, def) = match (
-            self.sources.transport.as_ref(),
-            self.sources.application.as_ref(),
-        ) {
-            (Some(transport), Some(application)) if transport.ptr_eq(application) => (
-                SourceRole::Application,
-                application,
-                application.field_idx(tag),
-            ),
-            (Some(transport), Some(application)) => match application.field_idx(tag) {
-                Some(def) => (SourceRole::Application, application, Some(def)),
-                None => match transport.field_idx(tag) {
-                    Some(def) => (SourceRole::Transport, transport, Some(def)),
-                    None => (SourceRole::Application, application, None),
-                },
-            },
-            (Some(transport), None) if self.known_owner == Some(SourceRole::Transport) => {
-                (SourceRole::Transport, transport, transport.field_idx(tag))
-            }
-            _ => return,
+        let Some((owner, source, def)) = undeclared_source(self.sources, self.known_owner, tag)
+        else {
+            return;
         };
         resolve_as(self.bytes, &mut self.fields[at], source, owner, 0, def);
     }

@@ -62,7 +62,7 @@ fn main() {
         ("default", json!({}), AT_CAP),
         (
             "conditional",
-            json!({"template":"{35:name}", "details":false}),
+            json!({"template":"{35.valueName}", "details":false}),
             AT_CAP,
         ),
         ("empty", json!({"template":"", "details":false}), 0),

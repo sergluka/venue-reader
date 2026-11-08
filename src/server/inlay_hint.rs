@@ -14,6 +14,7 @@ use crate::codec::ByteOffset;
 use crate::config::InlayHints;
 use crate::document::{Column, Columns, LineNo, LineRange};
 use crate::render::hint;
+use crate::render::summary::{structured, SummaryPart};
 
 /// What a hint needs from configuration, gathered where the config lives so the
 /// task carries a value rather than a borrow.
@@ -21,6 +22,7 @@ use crate::render::hint;
 pub(super) struct Wanted {
     hints: InlayHints,
     summary: bool,
+    summary_tokens: bool,
     cap: usize,
     /// Whether the client resolves tooltips. When it does not, they are filled
     /// in the first response instead — the adaptation §4 prescribes.
@@ -44,6 +46,7 @@ impl ServerState {
             hints: base.inlay_hints.clone(),
             // The master switch and the channel, not the channel alone.
             summary: base.message_summary.enabled && base.message_summary.channels.inlay_hints,
+            summary_tokens: base.message_summary.semantic_tokens && self.client.summary_tokens,
             cap: base.limits.range_lines,
             defer_tooltips: self.client.defers_tooltips,
             format: self.client.hover_format.clone(),
@@ -124,21 +127,20 @@ fn answer(params: &InlayHintParams, wanted: &Wanted, snapshot: &Snapshot) -> Han
             continue;
         };
 
-        // Every offset this line needs, converted in one walk. They arrive
-        // interleaved — a tag end precedes its own value end but follows the
-        // previous field's — so `Columns` sorts rather than trusting the order.
-        //
-        // **A field label is rendered here and carried**, not recomputed
-        // below: whether a hint exists and what it says are one question once
-        // the shape is a user's to write, and asking it twice would render
-        // every custom label twice. The summary's parts are still rendered
-        // twice, which is worse and older — see `What::Summary`.
         let mut wants: Vec<Want> = Vec::new();
-        if wanted.summary && hint::summary_parts(&line.bytes, message, &snapshot.render).is_some() {
-            wants.push(Want {
-                byte: ByteOffset::new(0),
-                what: What::Summary,
-            });
+        if wanted.summary {
+            let parts = structured(
+                &line.bytes,
+                message,
+                &snapshot.render,
+                wanted.summary_tokens,
+            );
+            if !parts.is_empty() {
+                wants.push(Want {
+                    byte: ByteOffset::new(0),
+                    what: What::Summary(parts),
+                });
+            }
         }
         for (at, field) in message.fields.iter().enumerate() {
             let render = &snapshot.render;
@@ -182,7 +184,7 @@ fn answer(params: &InlayHintParams, wanted: &Wanted, snapshot: &Snapshot) -> Han
                 continue;
             }
             out.push(match what {
-                What::Summary => summary_hint(line, message, snapshot, number, uri),
+                What::Summary(parts) => summary_hint(parts, number, wanted.summary_tokens),
                 What::Field { kind, at, label } => field_hint(
                     line,
                     message,
@@ -213,10 +215,7 @@ struct Want {
 /// `usize::MAX` and an empty string that were safe only as long as the
 /// dispatch never handed a summary to the field builder.
 enum What {
-    /// Rendered twice — once to know it exists, once in `summary_hint`. Older
-    /// than the field path and the more expensive of the two, since it walks
-    /// the template and the details; carrying the parts here would fix it.
-    Summary,
+    Summary(Vec<SummaryPart>),
     Field {
         kind: Kind,
         at: usize,
@@ -302,30 +301,28 @@ fn field_hint(
     out
 }
 
-fn summary_hint(
-    line_text: &crate::document::Line,
-    message: &crate::codec::MessageAnalysis,
-    snapshot: &Snapshot,
-    line: LineNo,
-    uri: &str,
-) -> Value {
-    let parts = hint::summary_parts(&line_text.bytes, message, &snapshot.render)
-        .expect("only collected when there is one");
+fn summary_hint(parts: Vec<SummaryPart>, line: LineNo, metadata: bool) -> Value {
+    let mut data = json!({ "kind": "summary" });
+    if metadata {
+        // `tokens[i]` describes `label[i]`; `null` is base styling.
+        let tokens = parts
+            .iter()
+            .map(|part| match part.style {
+                Some(style) => json!([style.kind.code(), style.mods]),
+                None => Value::Null,
+            })
+            .collect();
+        data["tokens"] = Value::Array(tokens);
+    }
+    let label = parts
+        .into_iter()
+        .map(|part| json!({ "value": part.value }))
+        .collect();
     json!({
         "position": { "line": line, "character": 0 },
-        // Parts rather than one string: this is the channel that can keep the
-        // summary's halves apart, and `codeLens` is the one that cannot.
-        "label": parts
-            .into_iter()
-            .map(|value| json!({ "value": value }))
-            .collect::<Vec<_>>(),
+        "label": Value::Array(label),
         "paddingRight": true,
-        "data": {
-            "uri": uri,
-            "version": snapshot.version,
-            "line": line,
-            "kind": "summary",
-        },
+        "data": data,
     })
 }
 

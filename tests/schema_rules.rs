@@ -117,3 +117,65 @@ fn begin_string_is_an_unknown_rule_in_every_configuration_source() {
         assert_eq!(integrity.severity(), Some(Severity::Hint));
     }
 }
+
+/// The property a dotted setting path names, following a shared `$defs` entry
+/// where the schema reuses one.
+fn property<'a>(schema: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.').try_fold(schema, |node, segment| {
+        let node = node
+            .get("allOf")
+            .and_then(|all| all[0]["$ref"].as_str())
+            .map_or(node, |reference| {
+                schema
+                    .pointer(reference.trim_start_matches('#'))
+                    .expect("a local $ref")
+            });
+        node.get("properties")?.get(segment)
+    })
+}
+
+#[test]
+fn every_schema_spells_the_catalog_and_the_template_defaults() {
+    use venue_reader::config::DEFAULT_SYMBOL_TEMPLATE;
+    use venue_reader::overrides::catalog::{Scope, SETTINGS};
+    use venue_reader::render::DEFAULT_TEMPLATE;
+
+    for file in [
+        "schema/venue-reader.schema.json",
+        "schema/venue-reader-user.schema.json",
+        "schema/venue-reader-project.schema.json",
+    ] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+        let schema: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        for setting in SETTINGS {
+            let Some(property) = property(&schema, setting.path) else {
+                // Each schema lists the sections its source may set; the
+                // summary section is in every one of them.
+                assert!(
+                    !setting.path.starts_with("messageSummary."),
+                    "{file}: {} is missing",
+                    setting.path
+                );
+                continue;
+            };
+            // Only a document setting a modeline may not assign carries the mark.
+            let marked = property.get("x-venue-reader-modeline") == Some(&json!(false));
+            assert_eq!(
+                marked,
+                setting.scope == Scope::Document && !setting.modeline,
+                "{file}: {}",
+                setting.path
+            );
+        }
+        assert_eq!(
+            property(&schema, "messageSummary.template").unwrap()["default"],
+            DEFAULT_TEMPLATE,
+            "{file}"
+        );
+        assert_eq!(
+            property(&schema, "documentSymbol.template").unwrap()["default"],
+            DEFAULT_SYMBOL_TEMPLATE,
+            "{file}"
+        );
+    }
+}

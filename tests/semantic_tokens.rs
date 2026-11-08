@@ -87,6 +87,7 @@ fn the_legend_goes_out_in_wire_order() {
             "comment",
             "timestamp",
             "group",
+            "flag",
         ])
     );
     assert_eq!(
@@ -105,6 +106,8 @@ fn the_legend_goes_out_in_wire_order() {
             "group2b",
             "group3a",
             "group3b",
+            "peer1",
+            "peer2",
         ])
     );
     client.shutdown();

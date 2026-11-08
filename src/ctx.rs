@@ -747,12 +747,12 @@ mod tests {
         let registry = Arc::new(Registry::bundled_only());
         let plain = Config::default();
         let mut decorated = plain.clone();
-        decorated.message_summary.template = "{35:name}".into();
+        decorated.message_summary.template = "{35.valueName}".into();
         decorated.message_summary.channels.code_lens = false;
         decorated.hover.enabled = false;
         decorated.semantic_tokens.enabled = false;
         decorated.document_link.url = "https://example.com/{version}/{tag}".into();
-        decorated.document_symbol.template = "{35:name}".into();
+        decorated.document_symbol.template = "{35.valueName}".into();
         decorated.inlay_hints = serde_json::from_value(serde_json::json!({
             "tagNames": {"enabled": true, "format": "[{}]"},
             "enumValues": {"enabled": true},

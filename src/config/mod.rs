@@ -230,7 +230,7 @@ impl Default for DocumentSymbol {
 
 /// Self-contained on purpose: a client may show only `name`, so a row that
 /// needs its `detail` to be identifiable is not identifiable everywhere.
-pub const DEFAULT_SYMBOL_TEMPLATE: &str = "#{34} {49}→{56} {35:name} ({35})";
+pub const DEFAULT_SYMBOL_TEMPLATE: &str = "#{34} {49}→{56} {35.valueName} ({35})";
 
 /// `fix.documentLink` — where a tag's reference page lives.
 ///
@@ -276,6 +276,8 @@ pub struct MessageSummary {
     pub template: String,
     /// Append the per-MsgType detail as a second part.
     pub details: bool,
+    /// Include summary style metadata when the client supports it.
+    pub semantic_tokens: bool,
 }
 
 impl Default for MessageSummary {
@@ -286,6 +288,7 @@ impl Default for MessageSummary {
             channels: SummaryChannels::default(),
             template: crate::render::DEFAULT_TEMPLATE.to_owned(),
             details: true,
+            semantic_tokens: false,
         }
     }
 }

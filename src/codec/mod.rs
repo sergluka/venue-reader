@@ -646,6 +646,12 @@ impl MessageAnalysis {
         Some(self.field_definition(field)?.name())
     }
 
+    /// Name lookup for an absent tag follows the decoder's source ownership.
+    pub fn absent_field_name(&self, tag: u32) -> Option<&str> {
+        let source = decode::name_source(self, tag)?;
+        Some(source.field(source.field_idx(tag)?).name())
+    }
+
     /// Enum label for a field's value, `None` when it matches none.
     pub fn enum_label(&self, field: &Field) -> Option<&str> {
         if field.tag == crate::tag::MSG_TYPE {
@@ -658,10 +664,15 @@ impl MessageAnalysis {
         )
     }
 
-    /// Enum label of a tag's first occurrence — what a renderer wants when it
-    /// names a tag rather than holding a field.
-    pub fn label(&self, tag: u32) -> Option<&str> {
-        self.enum_label(self.first(tag)?)
+    /// Whether the dictionary lists every value the field may take. MsgType(35)
+    /// is closed by the application definitions, not by an enum table.
+    pub fn enum_closed(&self, field: &Field) -> bool {
+        if field.tag == crate::tag::MSG_TYPE {
+            return self.application_known();
+        }
+        self.field_definition(field).is_some_and(|definition| {
+            !definition.allows_other_values() && definition.enums().next().is_some()
+        })
     }
 
     /// `NoMDEntries/2/MDEntryPx`; `None` outside a group. The leaf falls back to

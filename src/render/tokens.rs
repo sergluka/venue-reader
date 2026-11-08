@@ -10,6 +10,7 @@ use std::ops::Range;
 
 use crate::codec::{ByteOffset, Field, LineAnalysis, MessageAnalysis};
 use crate::dictionary::Datatype;
+use crate::tag;
 
 /// The names of an enum's `ALL`, and the proof that it is in discriminant order
 /// — which is what a token's index on the wire means. A variant listed out of
@@ -49,11 +50,12 @@ pub enum Kind {
     Timestamp,
     /// Custom: the overlay covering a whole group entry.
     Group,
+    Flag,
 }
 
 impl Kind {
     /// In discriminant order, which `TYPES` asserts.
-    const ALL: [Kind; 12] = [
+    const ALL: [Kind; 13] = [
         Kind::Property,
         Kind::EnumMember,
         Kind::Number,
@@ -66,6 +68,7 @@ impl Kind {
         Kind::Comment,
         Kind::Timestamp,
         Kind::Group,
+        Kind::Flag,
     ];
 
     /// The name a client maps to a colour. Exhaustive, so a new variant does
@@ -84,6 +87,27 @@ impl Kind {
             Kind::Comment => "comment",
             Kind::Timestamp => "timestamp",
             Kind::Group => "group",
+            Kind::Flag => "flag",
+        }
+    }
+
+    /// The letter a summary part names its type by. Fixed like the legend:
+    /// a client maps it without the legend, so a change recolours every client.
+    pub const fn code(self) -> char {
+        match self {
+            Kind::Property => 'F',
+            Kind::EnumMember => 'E',
+            Kind::Number => 'N',
+            Kind::Price => 'P',
+            Kind::Quantity => 'Q',
+            Kind::Money => 'M',
+            Kind::String => 'S',
+            Kind::Keyword => 'K',
+            Kind::Namespace => 'U',
+            Kind::Comment => 'C',
+            Kind::Timestamp => 'T',
+            Kind::Group => 'G',
+            Kind::Flag => 'B',
         }
     }
 }
@@ -111,11 +135,13 @@ pub enum Mod {
     Group2b,
     Group3a,
     Group3b,
+    Peer1,
+    Peer2,
 }
 
 impl Mod {
     /// In discriminant order, which `MODIFIERS` asserts.
-    const ALL: [Mod; 13] = [
+    const ALL: [Mod; 15] = [
         Mod::Deprecated,
         Mod::Header,
         Mod::Trailer,
@@ -129,6 +155,8 @@ impl Mod {
         Mod::Group2b,
         Mod::Group3a,
         Mod::Group3b,
+        Mod::Peer1,
+        Mod::Peer2,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -146,6 +174,8 @@ impl Mod {
             Mod::Group2b => "group2b",
             Mod::Group3a => "group3a",
             Mod::Group3b => "group3b",
+            Mod::Peer1 => "peer1",
+            Mod::Peer2 => "peer2",
         }
     }
 
@@ -183,6 +213,24 @@ pub struct Token {
     pub mods: u32,
 }
 
+/// What a summary part shares with a source token: its type and modifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Style {
+    pub kind: Kind,
+    /// Bit set of [`Mod`].
+    pub mods: u32,
+}
+
+/// The facts about a whole line that every field's modifiers inherit, read
+/// once rather than asked per field.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LineMods {
+    shared: u32,
+    /// The peer bit of SenderCompID(49), zero when the pair is incomplete.
+    sender: u32,
+    target: u32,
+}
+
 /// Tokens of one line, appended in wire order.
 ///
 /// `overlays` adds one token per group entry covering the whole entry, which is
@@ -212,18 +260,7 @@ fn message_tokens(line: &[u8], message: &MessageAnalysis, overlays: bool, out: &
         });
     }
 
-    // Two facts about the whole line, so they are read once and OR'd into
-    // everything rather than asked per field.
-    let mut line_mods = 0;
-    if message
-        .message_definition()
-        .is_some_and(|message| message.is_session())
-    {
-        line_mods |= Mod::Session.bit();
-    }
-    if message.is_poss_dup(line) {
-        line_mods |= Mod::PossDup.bit();
-    }
+    let line_mods = line_modifiers(line, message);
 
     // Only for the overlay, and only when one is wanted: the spans cost a
     // vector and a map per line, while "which field opens a group" is a cheaper
@@ -235,28 +272,8 @@ fn message_tokens(line: &[u8], message: &MessageAnalysis, overlays: bool, out: &
     let mut deepest_seen: Option<u32> = None;
 
     for field in &message.fields {
-        let mut mods = line_mods;
-        match message.field_definition(field) {
-            Some(definition) => {
-                if !definition.deprecated().is_empty() {
-                    mods |= Mod::Deprecated.bit();
-                }
-            }
-            None if !field.unresolved() => mods |= Mod::Unknown.bit(),
-            None => {}
-        }
-        if field.is_header() {
-            mods |= Mod::Header.bit();
-        } else if field.is_trailer() {
-            mods |= Mod::Trailer.bit();
-        }
-        if field.is_counter() {
-            mods |= Mod::Count.bit();
-        }
+        let mods = field_modifiers(message, field, &line_mods);
         let instance = field.group_idx();
-        if let Some(entry) = instance.map(|idx| &message.groups[idx as usize]) {
-            mods |= Mod::of_entry(entry.depth, entry.entry).bit();
-        }
 
         out.push(Token {
             range: field.tag_start..field.tag_end(),
@@ -282,20 +299,101 @@ fn message_tokens(line: &[u8], message: &MessageAnalysis, overlays: bool, out: &
         if field.value_start() < field.value_end() {
             out.push(Token {
                 range: field.value_start()..field.value_end(),
-                kind: value_kind(message, field),
+                kind: value_kind(line, message, field),
                 mods,
             });
         }
     }
 }
 
+pub(super) fn line_modifiers(line: &[u8], message: &MessageAnalysis) -> LineMods {
+    let mut shared = 0;
+    if message
+        .message_definition()
+        .is_some_and(|message| message.is_session())
+    {
+        shared |= Mod::Session.bit();
+    }
+    if message.is_poss_dup(line) {
+        shared |= Mod::PossDup.bit();
+    }
+    // Peers are pair-local: the lexicographically smaller of two distinct,
+    // nonempty CompIDs is peer1, whichever end sent the message.
+    let (mut sender, mut target) = (0, 0);
+    if let (Some(from), Some(to)) = (
+        message.first(tag::SENDER_COMP_ID),
+        message.first(tag::TARGET_COMP_ID),
+    ) {
+        let (from, to) = (from.value(line), to.value(line));
+        if !from.is_empty() && !to.is_empty() && from != to {
+            let (first, second) = (Mod::Peer1.bit(), Mod::Peer2.bit());
+            (sender, target) = if from < to {
+                (first, second)
+            } else {
+                (second, first)
+            };
+        }
+    }
+    LineMods {
+        shared,
+        sender,
+        target,
+    }
+}
+
+pub(super) fn field_modifiers(message: &MessageAnalysis, field: &Field, line: &LineMods) -> u32 {
+    let mut mods = line.shared;
+    match message.field_definition(field) {
+        Some(definition) => {
+            if !definition.deprecated().is_empty() {
+                mods |= Mod::Deprecated.bit();
+            }
+        }
+        None if !field.unresolved() => mods |= Mod::Unknown.bit(),
+        None => {}
+    }
+    if field.is_header() {
+        mods |= Mod::Header.bit();
+    } else if field.is_trailer() {
+        mods |= Mod::Trailer.bit();
+    }
+    if field.is_counter() {
+        mods |= Mod::Count.bit();
+    }
+    if let Some(entry) = field.group_idx().map(|idx| &message.groups[idx as usize]) {
+        mods |= Mod::of_entry(entry.depth, entry.entry).bit();
+    }
+    match field.tag {
+        tag::SENDER_COMP_ID => mods |= line.sender,
+        tag::TARGET_COMP_ID => mods |= line.target,
+        _ => {}
+    }
+    mods
+}
+
+/// A field's value as a summary part would style it.
+pub(super) fn value_style(
+    line: &[u8],
+    message: &MessageAnalysis,
+    field: &Field,
+    mods: &LineMods,
+) -> Style {
+    Style {
+        kind: value_kind(line, message, field),
+        mods: field_modifiers(message, field, mods),
+    }
+}
+
 /// The special tags come first on purpose: a QuickFIX dictionary synthesises an
 /// enum for every message type, so resolving enums first would leave nothing
 /// spelled as a keyword.
-fn value_kind(message: &MessageAnalysis, field: &Field) -> Kind {
+fn value_kind(line: &[u8], message: &MessageAnalysis, field: &Field) -> Kind {
+    if field.tag == tag::POSS_DUP_FLAG && field.value(line) == tag::YES.as_bytes() {
+        return Kind::Flag;
+    }
     match field.tag {
-        35 => return Kind::Keyword,
-        8 => return Kind::Namespace,
+        tag::MSG_TYPE => return Kind::Keyword,
+        tag::BEGIN_STRING => return Kind::Namespace,
         _ => {}
     }
     if field.enum_value().is_some() {
@@ -331,6 +429,67 @@ mod tests {
     use super::*;
     use crate::ctx::{analyze, Ctx};
 
+    #[test]
+    fn peers_are_pair_relative_and_stable_when_sender_reverses() {
+        for line in [
+            "8=FIX.4.4|35=D|49=ALPHA|56=BETA|",
+            "8=FIX.4.4|35=D|49=BETA|56=ALPHA|",
+        ] {
+            let (bytes, values) = tokens(line, false, &Ctx::for_test("FIX.4.4"));
+            for token in values.iter().filter(|token| token.kind == Kind::String) {
+                let text = &bytes[token.range.start.index()..token.range.end.index()];
+                if text == b"ALPHA" {
+                    assert_ne!(token.mods & Mod::Peer1.bit(), 0);
+                }
+                if text == b"BETA" {
+                    assert_ne!(token.mods & Mod::Peer2.bit(), 0);
+                }
+            }
+        }
+        for line in [
+            "8=FIX.4.4|35=D|49=ALPHA|",
+            "8=FIX.4.4|35=D|49=ALPHA|56=ALPHA|",
+            "8=FIX.4.4|35=D|49=|56=BETA|",
+        ] {
+            let (_, values) = tokens(line, false, &Ctx::for_test("FIX.4.4"));
+            assert!(values
+                .iter()
+                .all(|token| token.mods & (Mod::Peer1.bit() | Mod::Peer2.bit()) == 0));
+        }
+    }
+
+    #[test]
+    fn only_active_poss_dup_values_are_flags() {
+        for (value, expected) in [("Y", Kind::Flag), ("N", Kind::EnumMember)] {
+            let line = format!("8=FIX.4.4|35=D|43={value}|141=Y|");
+            let (bytes, values) = tokens(&line, false, &Ctx::for_test("FIX.4.4"));
+            let analysis = analyze(&bytes, &Ctx::for_test("FIX.4.4"));
+            let message = analysis.message().unwrap();
+            let field = message.first(43).unwrap();
+            assert_eq!(
+                values
+                    .iter()
+                    .find(|token| token.range.start == field.value_start())
+                    .unwrap()
+                    .kind,
+                expected
+            );
+            assert_eq!(
+                value_style(&bytes, message, field, &line_modifiers(&bytes, message))
+                    .kind
+                    .code(),
+                if value == "Y" { 'B' } else { 'E' }
+            );
+            assert!(
+                values
+                    .iter()
+                    .filter(|token| token.kind == Kind::Flag)
+                    .count()
+                    <= 1
+            );
+        }
+    }
+
     /// The wire says "type 4", not "keyword", so a reordering here silently
     /// recolours every client. Written out rather than derived from the enums.
     #[test]
@@ -350,6 +509,7 @@ mod tests {
                 "comment",
                 "timestamp",
                 "group",
+                "flag",
             ]
         );
         assert_eq!(
@@ -368,13 +528,19 @@ mod tests {
                 "group2b",
                 "group3a",
                 "group3b",
+                "peer1",
+                "peer2",
             ]
         );
+        assert_eq!(
+            Kind::ALL.iter().map(|kind| kind.code()).collect::<String>(),
+            "FENPQMSKUCTGB"
+        );
         assert_eq!(Kind::Property as u32, 0);
-        assert_eq!(Kind::Group as u32, TYPES.len() as u32 - 1);
+        assert_eq!(Kind::Flag as u32, TYPES.len() as u32 - 1);
         assert_eq!(TYPES[Kind::Price as usize], "price");
         assert_eq!(Mod::Deprecated.bit(), 1);
-        assert_eq!(Mod::Group3b.bit(), 1 << (MODIFIERS.len() - 1));
+        assert_eq!(Mod::Peer2.bit(), 1 << (MODIFIERS.len() - 1));
     }
 
     fn tokens(line: &str, overlays: bool, ctx: &Ctx) -> (Vec<u8>, Vec<Token>) {

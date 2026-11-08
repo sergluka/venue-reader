@@ -75,8 +75,8 @@ fn only_lines_with_effective_summary_text_have_lenses() {
         ("", true, vec![1]),
         ("{details}", false, vec![1]),
         ("{58}", false, vec![2]),
-        ("{58|missing}", false, vec![0, 1, 2, 3, 4]),
-        ("{possDup|unused}", false, vec![4]),
+        (r#"{58?:"missing"}"#, false, vec![0, 1, 2, 3, 4]),
+        (r#"{43="Y"?" [POSS DUP]"}"#, false, vec![4]),
     ] {
         let mut client = TestClient::start();
         client.initialize_with(json!({
@@ -102,8 +102,10 @@ fn only_lines_with_effective_summary_text_have_lenses() {
             let title = resolved["command"]["title"].as_str().expect("a title");
             match template {
                 "{58}" => assert_eq!(title, "hello"),
-                "{58|missing}" => assert_eq!(title, if line == 2 { "hello" } else { "missing" }),
-                "{possDup|unused}" => assert_eq!(title, " [POSS DUP]"),
+                r#"{58?:"missing"}"# => {
+                    assert_eq!(title, if line == 2 { "hello" } else { "missing" })
+                }
+                r#"{43="Y"?" [POSS DUP]"}"# => assert_eq!(title, " [POSS DUP]"),
                 _ => assert!(!title.is_empty(), "{resolved}"),
             }
         }

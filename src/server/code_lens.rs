@@ -157,7 +157,7 @@ mod tests {
             (json!({}), 3),
             (json!({"template":"", "details":false}), 0),
             (json!({"template":"", "details":true}), 0),
-            (json!({"template":"{35:name}", "details":false}), 3),
+            (json!({"template":"{35.valueName}", "details":false}), 3),
             (json!({"template":"{58}", "details":false}), 0),
         ] {
             let (mut state, uri) = state_with(&heartbeats(3));

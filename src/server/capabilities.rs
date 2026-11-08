@@ -13,6 +13,10 @@ use crate::document::PositionEncoding;
 use crate::render::tokens;
 use crate::{SERVER_NAME, SERVER_VERSION};
 
+/// JSON pointer in the client initialize parameters.
+pub const SUMMARY_TOKENS_PATH: &str = "/capabilities/experimental/venueReader/summaryTokens";
+pub const SUMMARY_TOKENS_VERSION: u64 = 1;
+
 /// utf-8 if the client advertises it in `general.positionEncodings`, else
 /// utf-16 — the protocol's default, and the main path rather than a fallback.
 pub fn negotiate_encoding(caps: &ClientCapabilities) -> PositionEncoding {

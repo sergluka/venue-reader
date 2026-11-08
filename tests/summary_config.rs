@@ -48,3 +48,53 @@ fn a_bad_summary_template_warns_once_and_the_server_keeps_working() {
         "an unchanged problem is not reported twice: {notes:?}"
     );
 }
+
+#[test]
+fn project_and_client_templates_roundtrip_while_modelines_cannot_replace_them() {
+    for template in [
+        r#"{54="1"?"{54.valueName?:\"UNKNOWN\"}":"other"}"#,
+        "{54=1?{54.valueName?:UNKNOWN}:other}",
+    ] {
+        for project in [false, true] {
+            for attempted in ["unset", "invalid", "'{35.valueName}'"] {
+                let fixture = harness::Workspace::new("summary-template-sources");
+                if project {
+                    fixture.write(
+                        ".venue-reader.toml",
+                        &format!("[messageSummary]\ntemplate = '{template}'\n"),
+                    );
+                }
+                let mut client = harness::TestClient::start();
+                let mut settings =
+                    json!({"messageSummary":{"details":true,"channels":{"inlayHints":true}}});
+                if !project {
+                    settings["messageSummary"]["template"] = json!(template);
+                }
+                fixture.initialize(&mut client, settings);
+                let uri = fixture.uri("sample.fix");
+                let text = format!("# fix: messageSummary.template={attempted} messageSummary.details=false\n8=FIX.4.4|35=D|54=1|\n");
+                let report = client.did_open(&uri, &text, 1);
+                assert_eq!(report["effective"]["messageSummary.template"], template);
+                assert_eq!(report["effective"]["messageSummary.details"], false);
+                assert!(report["warnings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|warning| warning["key"] == "messageSummary.template"
+                        && warning["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("not allowed in modelines")));
+                let hints = client.request("textDocument/inlayHint", json!({"textDocument":{"uri":uri},"range":{"start":{"line":1,"character":0},"end":{"line":2,"character":0}}})).unwrap();
+                let summary = hints
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|hint| hint["data"]["kind"] == "summary")
+                    .unwrap();
+                assert_eq!(harness::hint_labels(std::slice::from_ref(summary)), ["Buy"]);
+                client.shutdown();
+            }
+        }
+    }
+}

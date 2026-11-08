@@ -112,6 +112,15 @@ pub fn parse_numbered<'a>(
                 );
                 continue;
             }
+            if setting.is_some_and(|entry| !entry.modeline) {
+                layer.warn(
+                    &key,
+                    format!("{key} is not allowed in modelines"),
+                    origin,
+                    Severity::Warning,
+                );
+                continue;
+            }
             if raw == "unset" {
                 continue;
             }
@@ -216,6 +225,23 @@ mod tests {
     }
 
     #[test]
+    fn summary_template_modelines_reject_assignments_and_unset() {
+        for value in ["unset", "invalid", "'{35.valueName}'"] {
+            let layer = scan(&format!("# fix: messageSummary.template={value} messageSummary.details=false messageSummary.semanticTokens=true"));
+            assert!(!layer.contains_key("messageSummary.template"));
+            assert_eq!(layer.get("messageSummary.details"), Some(&json!(false)));
+            assert_eq!(
+                layer.get("messageSummary.semanticTokens"),
+                Some(&json!(true))
+            );
+            assert_eq!(layer.warnings.len(), 1);
+            assert!(layer.warnings[0]
+                .message
+                .contains("not allowed in modelines"));
+        }
+    }
+
+    #[test]
     fn only_comment_markers_with_whitespace_are_configuration() {
         let layer = scan("8=FIX.4.4|58=# fix: hover.enabled=false\n# prefix:fix:hover.enabled=false\n#fix: hover.enabled=false:");
         assert_eq!(layer.get("hover.enabled"), Some(&json!(false)));
@@ -234,10 +260,10 @@ mod tests {
     #[test]
     fn quoted_values_keep_colons_spaces_and_escaped_colons() {
         let layer =
-            scan(r#"# fix: messageSummary.template="{35\:name}: a, b":dictionary=venue\:a:"#);
+            scan(r#"# fix: documentSymbol.template="{35.valueName}: a, b":dictionary=venue\:a:"#);
         assert_eq!(
-            layer.get("messageSummary.template"),
-            Some(&json!("{35:name}: a, b"))
+            layer.get("documentSymbol.template"),
+            Some(&json!("{35.valueName}: a, b"))
         );
         assert_eq!(layer.get("dictionary"), Some(&json!("venue:a")));
     }

@@ -1,166 +1,320 @@
-//! The one-line message summary.
+//! Render summaries from source-owned analysis without retaining rendered text.
 //!
-//! Two properties worth stating, because both were decided against a working
-//! alternative. `Summary` carries `main` and `details` clean and lets the
-//! client join them, because a separator baked into the text is one a client
-//! cannot choose. And a missing enum label renders the template's fallback
-//! rather than any spelling of "nothing".
+//! One renderer, two outputs: a plain string for CodeLens and the outline, and
+//! typed parts for inlay hints. Only the parts output pays for styles.
 
-use crate::codec::MessageAnalysis;
-use crate::tag::{self, exec_type};
+use std::borrow::Cow;
+use std::sync::LazyLock;
 
-use super::template::{Fmt, Piece, Ref, Template};
+use super::template::{Fmt, Piece, Template};
+use super::tokens::{self, Kind, LineMods, Style};
 use super::Options;
+use crate::codec::{Field, MessageAnalysis};
+use crate::dictionary::{Standard, Version};
 
-const UNKNOWN: &str = "???";
+/// Between the main template and the appended detail, when both are nonempty.
+pub const SEPARATOR: &str = " | ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Summary {
-    pub main: String,
-    pub details: Option<String>,
+pub struct SummaryPart {
+    pub value: String,
+    /// `None` is base styling: literals, fallbacks, and every part when
+    /// metadata was not requested.
+    pub style: Option<Style>,
 }
 
-/// `line` is the raw bytes the analysis was produced from: `MessageAnalysis`
-/// stores spans, not text, so the caller that holds the line supplies it rather
-/// than every field carrying a copy. Whether a line is a message at all is the
-/// caller's `match`.
-pub fn summary(line: &[u8], analysis: &MessageAnalysis, options: &Options) -> Summary {
-    let template = &options.template;
-    let main = render(line, analysis, template);
-    // `details: true` appends the detail as its own part; a template that names
-    // `{details}` has already placed it.
-    let details = (options.details && !template.mentions_details())
-        .then(|| self::details(line, analysis))
-        .flatten();
-    Summary { main, details }
+/// Where rendered text goes. The style is a closure so that the plain string
+/// never computes one.
+trait Output {
+    fn write(&mut self, text: &str, style: impl FnOnce() -> Option<Style>);
+    fn len(&self) -> usize;
+    fn truncate(&mut self, len: usize);
 }
 
-/// One template rendered against one message.
-///
-/// Shared with the outline, which renders a different template against the same
-/// slots: a message's identity is a message's identity wherever it is drawn.
-pub fn render(line: &[u8], analysis: &MessageAnalysis, template: &Template) -> String {
-    // Rendered on every visible line on every scroll, so the slots write into
-    // one buffer rather than each returning a String to be copied and dropped.
-    let mut out = String::with_capacity(96);
-    for piece in &template.pieces {
-        match piece {
-            Piece::Literal(text) => out.push_str(text),
-            Piece::Placeholder {
-                reference,
-                fmt,
-                fallback,
-            } => render_placeholder(&mut out, line, analysis, reference, *fmt, fallback),
+impl Output for String {
+    fn write(&mut self, text: &str, _: impl FnOnce() -> Option<Style>) {
+        self.push_str(text);
+    }
+    fn len(&self) -> usize {
+        String::len(self)
+    }
+    fn truncate(&mut self, len: usize) {
+        String::truncate(self, len);
+    }
+}
+
+impl Output for Vec<SummaryPart> {
+    fn write(&mut self, text: &str, style: impl FnOnce() -> Option<Style>) {
+        // LSP forbids an empty label part.
+        if !text.is_empty() {
+            self.push(SummaryPart {
+                value: text.to_owned(),
+                style: style(),
+            });
         }
     }
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+    fn truncate(&mut self, len: usize) {
+        Vec::truncate(self, len);
+    }
+}
+
+/// The summary as one string, for the channel that cannot keep parts apart.
+/// `None` when there is nothing to say.
+pub fn summary_joined(
+    line: &[u8],
+    analysis: &MessageAnalysis,
+    options: &Options,
+) -> Option<String> {
+    let mut out = String::with_capacity(96);
+    Scene::new(line, analysis, false).summary(&mut out, options);
+    (!out.is_empty()).then_some(out)
+}
+
+/// The summary as label parts, carrying styles when `styled`.
+pub fn structured(
+    line: &[u8],
+    analysis: &MessageAnalysis,
+    options: &Options,
+    styled: bool,
+) -> Vec<SummaryPart> {
+    let mut out = Vec::with_capacity(16);
+    Scene::new(line, analysis, styled).summary(&mut out, options);
     out
 }
 
-fn render_placeholder(
-    out: &mut String,
-    line: &[u8],
-    analysis: &MessageAnalysis,
-    reference: &Ref,
-    fmt: Fmt,
-    fallback: &str,
-) {
-    // `{msgName}` is `{35:name}`, so the alias settles the format here rather
-    // than in a second match on the same value.
-    let (tag, fmt) = match reference {
-        Ref::Tag(tag) => (*tag, fmt),
-        Ref::MsgName => (35, Fmt::Name),
-        Ref::Sender => (49, fmt),
-        Ref::Target => (56, fmt),
-        Ref::PossDup => {
-            if analysis.is_poss_dup(line) {
-                out.push_str(" [POSS DUP]");
-            }
-            return;
-        }
-        Ref::Details => {
-            if let Some(detail) = details(line, analysis) {
-                out.push_str(&detail);
-            }
-            return;
-        }
-    };
+/// One template against one message. Shared with the outline, which renders a
+/// different template against the same slots.
+pub fn render(line: &[u8], analysis: &MessageAnalysis, template: &Template) -> String {
+    let mut out = String::with_capacity(96);
+    Scene::new(line, analysis, false).render(&mut out, template, None);
+    out
+}
 
-    let Some(field) = analysis.first(tag) else {
-        out.push_str(fallback);
-        return;
-    };
-    if fmt == Fmt::Name {
-        if let Some(label) = super::value_name(analysis, field) {
-            out.push_str(label);
-            return;
+/// One message, and what every slot rendered against it shares.
+struct Scene<'a> {
+    line: &'a [u8],
+    analysis: &'a MessageAnalysis,
+    /// `Some` when parts carry styles; the plain output never asks.
+    mods: Option<LineMods>,
+}
+
+impl<'a> Scene<'a> {
+    fn new(line: &'a [u8], analysis: &'a MessageAnalysis, styled: bool) -> Self {
+        Self {
+            line,
+            analysis,
+            mods: styled.then(|| tokens::line_modifiers(line, analysis)),
         }
     }
-    // The field is already in hand; going back through `raw` would scan the
-    // field vector for the same tag a second time.
-    match field.text(line) {
-        Some("") | None => out.push_str(fallback),
-        Some(value) => out.push_str(value),
+
+    /// The main template, then the built-in detail behind a separator when
+    /// both say something.
+    fn summary(&self, out: &mut impl Output, options: &Options) {
+        self.render(out, &options.template, None);
+        if !options.details || options.template.mentions_details() {
+            return;
+        }
+        let Some(template) = detail_template(self.analysis) else {
+            return;
+        };
+        let main = out.len();
+        if main > 0 {
+            out.write(SEPARATOR, || None);
+        }
+        let before = out.len();
+        self.render(out, template, None);
+        if out.len() == before {
+            out.truncate(main);
+        }
+    }
+
+    /// `literal` is the style of the literals in this template: the marker
+    /// style of a selected flag branch, else none.
+    fn render(&self, out: &mut impl Output, template: &Template, literal: Option<Style>) {
+        for piece in &template.pieces {
+            match piece {
+                Piece::Literal(text) => out.write(text, || literal),
+                Piece::Details => {
+                    if let Some(template) = detail_template(self.analysis) {
+                        self.render(out, template, None);
+                    }
+                }
+                Piece::Placeholder { tag, fmt, fallback } => {
+                    self.placeholder(out, *tag, *fmt, fallback.as_deref(), literal)
+                }
+                Piece::Condition {
+                    tag,
+                    values,
+                    then,
+                    otherwise,
+                } => {
+                    let field = self.analysis.first(*tag);
+                    let selected = match values {
+                        None => field.is_some(),
+                        Some(values) => field.is_some_and(|field| {
+                            values
+                                .iter()
+                                .any(|value| value.as_bytes() == field.value(self.line))
+                        }),
+                    };
+                    // A selected singleton equality names the value exactly, so
+                    // the classifier can say whether it is a marker. Presence
+                    // and lists with alternatives do not.
+                    let marker =
+                        selected && values.as_ref().is_some_and(|values| values.len() == 1);
+                    let style = marker
+                        .then(|| field.and_then(|field| self.value_style(field)))
+                        .flatten()
+                        .filter(|style| style.kind == Kind::Flag)
+                        .or(literal);
+                    self.render(out, if selected { then } else { otherwise }, style);
+                }
+            }
+        }
+    }
+
+    fn placeholder(
+        &self,
+        out: &mut impl Output,
+        tag: u32,
+        fmt: Fmt,
+        fallback: Option<&Template>,
+        literal: Option<Style>,
+    ) {
+        let field = self.analysis.first(tag);
+        match fmt {
+            Fmt::Tag => out.write(&tag.to_string(), || self.property_style(field)),
+            Fmt::TagName => match self.tag_name(field, tag) {
+                Some(name) => out.write(&name, || self.property_style(field)),
+                None => match fallback {
+                    Some(fallback) => self.render(out, fallback, literal),
+                    None => out.write(&tag.to_string(), || self.property_style(field)),
+                },
+            },
+            Fmt::Raw | Fmt::Name => {
+                let value = field
+                    .and_then(|field| Some((field, self.value(field, fmt, fallback.is_some())?)));
+                match (value, fallback) {
+                    (Some((field, value)), _) => out.write(value, || self.value_style(field)),
+                    (None, Some(fallback)) => self.render(out, fallback, literal),
+                    (None, None) => {}
+                }
+            }
+        }
+    }
+
+    /// What a `.value` or `.valueName` slot shows; `None` hands over to the
+    /// fallback.
+    fn value(&self, field: &Field, fmt: Fmt, has_fallback: bool) -> Option<&'a str> {
+        let raw = field.text(self.line).filter(|raw| !raw.is_empty())?;
+        if fmt == Fmt::Name {
+            if let Some(label) = super::value_name(self.analysis, field) {
+                return Some(label);
+            }
+            // An unlisted value of a closed enum is the one wrong value a
+            // fallback replaces. Without a dictionary verdict the raw spelling
+            // stands, fallback or not.
+            if has_fallback && self.analysis.enum_closed(field) {
+                return None;
+            }
+        }
+        Some(raw)
+    }
+
+    /// The field's own name, else its standard name marked as foreign.
+    fn tag_name(&self, field: Option<&Field>, tag: u32) -> Option<Cow<'a, str>> {
+        let own = match field {
+            Some(field) => self.analysis.field_name(field),
+            None => self.analysis.absent_field_name(tag),
+        };
+        if let Some(own) = own {
+            return Some(Cow::Borrowed(own));
+        }
+        // Only the standard identity the line is known to have: a field in hand
+        // says which, an absent tag has only the version to go by.
+        let standing = match field {
+            Some(field) => self.analysis.standard(field),
+            None => Standard::of_tag(Version::parse(&self.analysis.version), tag),
+        };
+        super::hint::foreign_name(&standing, tag).map(Cow::Owned)
+    }
+
+    fn value_style(&self, field: &Field) -> Option<Style> {
+        self.mods
+            .as_ref()
+            .map(|mods| tokens::value_style(self.line, self.analysis, field, mods))
+    }
+
+    /// `.tag` and `.tagName` are properties even when the field is absent.
+    fn property_style(&self, field: Option<&Field>) -> Option<Style> {
+        self.mods.as_ref().map(|mods| Style {
+            kind: Kind::Property,
+            mods: field.map_or(0, |field| {
+                tokens::field_modifiers(self.analysis, field, mods)
+            }),
+        })
     }
 }
 
-/// Raw value of the first occurrence of a tag, as text.
-fn raw<'a>(line: &'a [u8], analysis: &MessageAnalysis, tag: u32) -> Option<&'a str> {
-    analysis.first(tag)?.text(line)
+/// The raw value when present, `missing` when absent, and nothing when present
+/// but empty: the distinction the old renderers drew with raw-field access.
+fn keep_empty(tag: u32, missing: &str) -> String {
+    format!(r#"{{{tag}=""?"":{{{tag}?:{missing}}}}}"#)
 }
 
-/// Per-MsgType detail line.
-pub fn details(line: &[u8], analysis: &MessageAnalysis) -> Option<String> {
-    let msg_name = analysis.message_definition()?.name();
-
-    let text_of = |tag: u32| raw(line, analysis, tag);
-    let label_of = |tag: u32| analysis.label(tag);
-    // `&str`, not `String`: every one of these goes straight into a `format!`,
-    // which takes a borrow.
-    let or = |tag: u32, missing: &'static str| text_of(tag).unwrap_or(missing);
-
-    let detail = match msg_name {
-        "ExecutionReport" => {
-            let exec_type = label_of(tag::EXEC_TYPE).unwrap_or(UNKNOWN);
-            if matches!(
-                text_of(tag::EXEC_TYPE),
-                Some(exec_type::TRADE | exec_type::TRADE_CORRECT)
-            ) {
+/// The built-in detail for the resolved message definition, selected by name.
+fn detail_template(analysis: &MessageAnalysis) -> Option<&'static Template> {
+    static BUILTIN: LazyLock<[(&str, Template); 5]> = LazyLock::new(|| {
+        let trade = format!(
+            " {}@{} ClOrdId={{11}} ExecId={}",
+            keep_empty(38, "???"),
+            keep_empty(44, "MKT"),
+            keep_empty(17, "MISSING"),
+        );
+        [
+            (
+                "ExecutionReport",
+                format!("{{150.valueName?:???}}{{150 in F,G?{trade}}}"),
+            ),
+            (
+                "NewOrderSingle",
                 format!(
-                    "{exec_type} {}@{} ClOrdId={} ExecId={}",
-                    or(tag::ORDER_QTY, UNKNOWN),
-                    or(tag::PRICE, "MKT"),
-                    text_of(tag::CL_ORD_ID).unwrap_or_default(),
-                    or(tag::EXEC_ID, "MISSING"),
-                )
-            } else {
-                exec_type.to_owned()
-            }
-        }
-        "NewOrderSingle" => format!(
-            "{} {} {} {} {} @ {}",
-            label_of(tag::SIDE).unwrap_or(UNKNOWN),
-            label_of(tag::TIME_IN_FORCE).unwrap_or(UNKNOWN),
-            label_of(tag::ORD_TYPE).unwrap_or(UNKNOWN),
-            or(tag::ORDER_QTY, UNKNOWN),
-            or(tag::SYMBOL, UNKNOWN),
-            or(tag::PRICE, "MKT"),
-        ),
-        "Logout" => text_of(tag::TEXT).unwrap_or_default().to_owned(),
-        "ResendRequest" => format!(
-            "{} - {}",
-            or(tag::BEGIN_SEQ_NO, "MISSING"),
-            or(tag::END_SEQ_NO, "MISSING")
-        ),
-        "SequenceReset" => {
-            let new_seq = or(tag::NEW_SEQ_NO, "MISSING");
-            match text_of(tag::GAP_FILL_FLAG) {
-                Some(tag::YES) => format!("Gap Fill to {new_seq}"),
-                _ => format!("Reset to {new_seq}"),
-            }
-        }
-        _ => String::new(),
-    };
-    (!detail.is_empty()).then_some(detail)
+                    "{{54.valueName?:???}} {{59.valueName?:???}} {{40.valueName?:???}} {} {} @ {}",
+                    keep_empty(38, "???"),
+                    keep_empty(55, "???"),
+                    keep_empty(44, "MKT"),
+                ),
+            ),
+            ("Logout", "{58}".to_owned()),
+            (
+                "ResendRequest",
+                format!(
+                    "{} - {}",
+                    keep_empty(7, "MISSING"),
+                    keep_empty(16, "MISSING")
+                ),
+            ),
+            (
+                "SequenceReset",
+                format!(
+                    "{{123=Y?Gap Fill to :Reset to }}{}",
+                    keep_empty(36, "MISSING")
+                ),
+            ),
+        ]
+        .map(|(name, source)| {
+            let template = Template::parse(&source).expect("built-in detail template");
+            (name, template)
+        })
+    });
+    let name = analysis.message_definition()?.name();
+    BUILTIN
+        .iter()
+        .find(|(message, _)| *message == name)
+        .map(|(_, template)| template)
 }
 
 #[cfg(test)]
@@ -168,7 +322,11 @@ mod tests {
     use super::*;
     use crate::codec::LineAnalysis;
     use crate::ctx::{analyze, Ctx};
-    use crate::render::Template;
+    use crate::render::{Template, DEFAULT_TEMPLATE};
+
+    const HEARTBEAT: &str =
+        "8=FIX.4.4|9=57|35=0|34=1|49=CLIENT1|56=BROKER1|52=20251026-09:02:00.000|10=171|";
+    const ORDER: &str = "8=FIX.4.4|35=D|54=1|59=0|40=2|38=10|55=BTCUSD|44=65000|";
 
     fn options(template: &str, details: bool) -> Options {
         Options {
@@ -176,10 +334,6 @@ mod tests {
             details,
             ..Options::default()
         }
-    }
-
-    fn default_options() -> Options {
-        Options::default()
     }
 
     /// The line's bytes and its analysis; the caller unwraps the message.
@@ -201,27 +355,35 @@ mod tests {
         (bytes, expect(analysis))
     }
 
+    /// The default template alone, without the appended detail.
     fn main_of(line: &str) -> String {
         let (bytes, message) = message_of(line);
-        summary(&bytes, &message, &default_options()).main
+        render(&bytes, &message, Template::default_template())
     }
 
     fn details_of(line: &str) -> Option<String> {
         let (bytes, message) = message_of(line);
-        details(&bytes, &message)
+        let text = render(&bytes, &message, detail_template(&message)?);
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn with_template(source: &str, line: &str) -> String {
+        let (bytes, message) = message_of(line);
+        render(&bytes, &message, &Template::parse(source).unwrap())
+    }
+
+    fn text_of(parts: &[SummaryPart]) -> String {
+        parts.iter().map(|part| part.value.as_str()).collect()
     }
 
     #[test]
     fn the_default_template_reproduces_the_lua_main_chunk() {
-        let (bytes, analysis) =
-            one("8=FIX.4.4|9=57|35=0|34=1|49=CLIENT1|56=BROKER1|52=20251026-09:02:00.000|10=171|");
-        let (bytes, message) = (bytes, expect(analysis));
-        let rendered = summary(&bytes, &message, &default_options());
+        let (bytes, message) = message_of(HEARTBEAT);
         assert_eq!(
-            rendered.main,
-            "20251026-09:02:00.000: 1: CLIENT1=>BROKER1 | Heartbeat"
+            summary_joined(&bytes, &message, &Options::default()).as_deref(),
+            Some("20251026-09:02:00.000: 1: CLIENT1=>BROKER1 | Heartbeat"),
+            "Heartbeat has no details"
         );
-        assert_eq!(rendered.details, None, "Heartbeat has no details");
     }
 
     #[test]
@@ -238,14 +400,13 @@ mod tests {
     #[test]
     fn new_order_single_details() {
         assert_eq!(
-            details_of("8=FIX.4.4|35=D|54=1|59=0|40=2|38=10|55=BTCUSD|44=65000").as_deref(),
+            details_of(ORDER).as_deref(),
             Some("Buy Day Limit 10 BTCUSD @ 65000")
         );
     }
 
     #[test]
     fn missing_enum_labels_render_as_question_marks_not_nil() {
-        // The fallback, not a spelling of "nothing"; see the module doc.
         assert_eq!(
             details_of("8=FIX.4.4|35=D|54=Z|59=Z|40=Z|55=BTCUSD").as_deref(),
             Some("??? ??? ??? ??? BTCUSD @ MKT")
@@ -261,6 +422,7 @@ mod tests {
             Some("Trade 100@100.25 ClOrdId=c1 ExecId=e1")
         );
         assert_eq!(details_of("8=FIX.4.4|35=8|150=0").as_deref(), Some("New"));
+        assert_eq!(details_of("8=FIX.4.4|35=8").as_deref(), Some("???"));
     }
 
     #[test]
@@ -291,39 +453,288 @@ mod tests {
 
     #[test]
     fn a_details_placeholder_suppresses_the_appended_part() {
-        let (bytes, analysis) = one("8=FIX.4.4|35=5|58=bye");
-        let rendered = summary(
-            &bytes,
-            &expect(analysis),
-            &options("{35:name} [{details}]", true),
-        );
-        assert_eq!(rendered.main, "Logout [bye]");
-        assert_eq!(rendered.details, None);
-    }
-
-    /// The `details` tests around this one call `details()` directly, so
-    /// nothing would notice if `summary` dropped the flag on the floor.
-    #[test]
-    fn details_off_suppresses_the_second_part() {
         let (bytes, message) = message_of("8=FIX.4.4|35=5|58=bye");
-        assert!(
-            summary(&bytes, &message, &default_options())
-                .details
-                .is_some(),
-            "the fixture has details to suppress"
+        assert_eq!(
+            summary_joined(
+                &bytes,
+                &message,
+                &options("{35.valueName} [{details}]", true)
+            )
+            .as_deref(),
+            Some("Logout [bye]")
         );
-        let quiet = Options {
-            details: false,
-            ..default_options()
-        };
-        assert_eq!(summary(&bytes, &message, &quiet).details, None);
+    }
+
+    /// LSP forbids an empty label part, and the template is the user's to
+    /// write, so every shape the summary can take is constructed here rather
+    /// than allowed for by a disjunction that any one of them satisfies.
+    #[test]
+    fn the_summary_takes_one_of_four_shapes() {
+        let empty = || options("", true);
+        let separators =
+            |parts: &[SummaryPart]| parts.iter().filter(|part| part.value == SEPARATOR).count();
+
+        // Both: an order has details to say, behind one more separator than
+        // the default template spells itself.
+        let (bytes, message) = message_of(ORDER);
+        let parts = structured(&bytes, &message, &Options::default(), false);
+        let main_only = structured(&bytes, &message, &options(DEFAULT_TEMPLATE, false), false);
+        assert_eq!(separators(&parts), separators(&main_only) + 1, "{parts:?}");
+        assert!(parts.iter().all(|part| !part.value.is_empty()));
+        assert_eq!(
+            summary_joined(&bytes, &message, &Options::default()),
+            Some(text_of(&parts))
+        );
+
+        // Details alone: nothing in the template, but an order still has them,
+        // and no separator leads them.
+        let parts = structured(&bytes, &message, &empty(), false);
+        assert_eq!(separators(&parts), 0, "{parts:?}");
+        assert_eq!(Some(text_of(&parts)), details_of(ORDER));
+
+        // Main alone: a session message has no second half to its summary.
+        let (bytes, message) = message_of(HEARTBEAT);
+        let parts = structured(&bytes, &message, &Options::default(), false);
+        assert_eq!(text_of(&parts), main_of(HEARTBEAT));
+
+        // Neither: nothing at all, rather than an empty part LSP forbids.
+        let nothing = options("", false);
+        assert!(structured(&bytes, &message, &nothing, false).is_empty());
+        assert_eq!(summary_joined(&bytes, &message, &nothing), None);
     }
 
     #[test]
-    fn non_message_lines_have_no_summary() {
-        for line in ["", "# c"] {
+    fn non_messages_have_no_summary() {
+        for line in ["", "# a comment", "not fix at all"] {
             let (_, analysis) = one(line);
             assert!(analysis.message().is_none(), "{line:?}");
         }
+    }
+
+    #[test]
+    fn selectors_and_fallbacks_distinguish_resolution_from_presence() {
+        let line = "8=FIX.4.4|35=D|54=1|38=0|43=N|58=|";
+        assert_eq!(
+            with_template("{54.tag}/{54.tagName}/{54.value}/{54.valueName}/{54}", line),
+            "54/Side/1/Buy/1"
+        );
+        assert_eq!(
+            with_template(
+                r#"{38?:"bad"}/{43?:"bad"}/{58?:"empty"}/{99999?:"absent"}"#,
+                line
+            ),
+            "0/N/empty/absent"
+        );
+        assert_eq!(
+            with_template(
+                r#"{58?"present":"absent"}/{58=""?"empty":"nonempty"}/{99999=""?"empty":"absent"}"#,
+                line
+            ),
+            "present/empty/absent"
+        );
+        assert_eq!(
+            with_template("{54.tag}/{54.tagName}", "8=FIX.4.4|35=D|"),
+            "54/Side"
+        );
+        assert_eq!(
+            with_template(
+                r#"{54.valueName?:"UNKNOWN"}/{54.valueName}"#,
+                "8=FIX.4.4|35=D|54=Z|"
+            ),
+            "UNKNOWN/Z"
+        );
+        assert_eq!(
+            with_template(r#"{35.valueName?:"UNKNOWN"}"#, "8=FIX.4.4|35=ZZZZ|"),
+            "UNKNOWN"
+        );
+        assert_eq!(
+            with_template(r#"{99999.tag}/{99999.tagName?:"custom"}"#, line),
+            "99999/custom"
+        );
+        assert_eq!(with_template(r#"{54?:""}"#, "8=FIX.4.4|35=D|"), "");
+    }
+
+    #[test]
+    fn quoted_branches_preserve_delimiters_unicode_and_nested_templates() {
+        assert_eq!(
+            with_template(
+                r#"{150 in "F","G"?"{38?:\"???\"}@{44?:\"MKT\"}":"other"}"#,
+                "8=FIX.4.4|35=8|150=F|38=10|"
+            ),
+            "10@MKT"
+        );
+        assert_eq!(
+            with_template(r#"{54="1"?"{{x}}:|?,\"✓\"":"no"}"#, "8=FIX.4.4|35=D|54=1|"),
+            "{x}:|?,\"✓\""
+        );
+        assert_eq!(
+            with_template(r#"{54?:"{38?:\"none\"}"}"#, "8=FIX.4.4|35=D|38=10|"),
+            "10"
+        );
+        assert_eq!(
+            with_template(r#"{54 in "1","2"?"yes"}"#, "8=FIX.4.4|35=D|54=3|"),
+            ""
+        );
+    }
+
+    #[test]
+    fn undecodable_values_are_present_but_do_not_equal_unicode() {
+        let line = b"8=FIX.4.4|35=D|54=\xff|";
+        let analysis = analyze(line, &Ctx::for_test("FIX.4.4"));
+        assert_eq!(
+            render(
+                line,
+                analysis.message().unwrap(),
+                &Template::parse(
+                    r#"{54?"present":"absent"}/{54="�"?"equal":"different"}/{54?:"fallback"}"#
+                )
+                .unwrap()
+            ),
+            "present/different/fallback"
+        );
+    }
+
+    #[test]
+    fn unavailable_and_extensible_enum_sets_keep_nonempty_raw_values() {
+        for field in [
+            r#"<field number="54" name="Side" type="CHAR"/>"#,
+            r#"<field number="54" name="Side" type="CHAR" allowOtherValues="true"><value enum="1" description="Buy"/></field>"#,
+        ] {
+            let dictionary = crate::dictionary::parse::fixtures::quickfix("FIX.4.4", field);
+            let context = Ctx::for_test_with_dict("FIX.4.4", dictionary);
+            let line = b"8=FIX.4.4|35=D|54=Z|";
+            let analysis = analyze(line, &context);
+            assert_eq!(
+                render(
+                    line,
+                    analysis.message().unwrap(),
+                    &Template::parse(r#"{54.valueName?:"UNKNOWN"}"#).unwrap()
+                ),
+                "Z"
+            );
+        }
+        let line = b"8=FIXT.1.1|35=D|";
+        let analysis = analyze(line, &Ctx::for_test("FIX.4.4"));
+        let message = analysis.message().unwrap();
+        assert_eq!(
+            render(
+                line,
+                message,
+                &Template::parse(r#"{35.valueName?:"UNKNOWN"}/{54.tagName}/{1128.tagName}"#)
+                    .unwrap()
+            ),
+            "D/Side?/ApplVerID",
+            "no application: the standard name is marked, the transport's is owned"
+        );
+    }
+
+    #[test]
+    fn structured_text_matches_plain_and_only_active_marker_literals_are_flags() {
+        let (bytes, message) = message_of("8=FIX.4.4|35=8|43=Y|150=F|38=10|44=5|49=ALPHA|56=BETA|");
+        let options = options(
+            r#"{sender}=>{target}{43="Y"?" [POSS DUP]{38}"}{43 in "Y"?" also"}{43?" present"}{43 in "Y","N"?" boolean"}{43="N"?"":" not N"}"#,
+            true,
+        );
+        let parts = structured(&bytes, &message, &options, true);
+        assert_eq!(
+            Some(text_of(&parts)),
+            summary_joined(&bytes, &message, &options)
+        );
+        assert!(parts.iter().all(|part| !part.value.is_empty()));
+        let code_of = |value: &str| {
+            parts
+                .iter()
+                .find(|part| part.value == value)
+                .unwrap_or_else(|| panic!("{value:?} in {parts:?}"))
+                .style
+                .map(|style| style.kind.code())
+        };
+        assert_eq!(code_of(" [POSS DUP]"), Some('B'));
+        assert_eq!(code_of(" also"), Some('B'));
+        assert_eq!(code_of("10"), Some('Q'), "a placeholder keeps its own type");
+        assert_eq!(code_of(" present"), None);
+        assert_eq!(code_of(" boolean"), None);
+        assert_eq!(code_of(" not N"), None);
+        assert_eq!(code_of("ALPHA"), Some('S'));
+        let mods_of = |value: &str| {
+            parts
+                .iter()
+                .find(|part| part.value == value)
+                .unwrap()
+                .style
+                .unwrap()
+                .mods
+        };
+        assert_ne!(mods_of("ALPHA") & tokens::Mod::Peer1.bit(), 0);
+        assert_ne!(mods_of("BETA") & tokens::Mod::Peer2.bit(), 0);
+        assert!(structured(&bytes, &message, &options, false)
+            .iter()
+            .all(|part| part.style.is_none()));
+    }
+
+    #[test]
+    fn builtin_raw_values_preserve_empty_values_and_explicit_details_once() {
+        assert_eq!(
+            details_of("8=FIX.4.4|35=8|150=F|38=|44=|17=|").as_deref(),
+            Some("Trade @ ClOrdId= ExecId=")
+        );
+        let (line, message) = message_of("8=FIX.4.4|35=5|58=bye|");
+        assert_eq!(
+            text_of(&structured(
+                &line,
+                &message,
+                &options(r#"{58?"{details}"}"#, true),
+                true
+            )),
+            "bye"
+        );
+    }
+    #[test]
+    fn optional_quotes_keep_quoted_and_bare_templates_equivalent() {
+        for (bare, quoted, expected) in [
+            (
+                "{54=1?{54.valueName?:UNKNOWN}:other}",
+                r#"{54="1"?"{54.valueName?:\"UNKNOWN\"}":"other"}"#,
+                "Buy",
+            ),
+            (
+                "{54 in 1,2?Side {54.valueName}:other}",
+                r#"{54 in "1","2"?"Side {54.valueName}":"other"}"#,
+                "Side Buy",
+            ),
+            (
+                "{99999?:{58?:missing}}",
+                r#"{99999?:"{58?:\"missing\"}"}"#,
+                "missing",
+            ),
+            (
+                r#"{54=1?"Side: {54.valueName}":other}"#,
+                r#"{54="1"?"Side: {54.valueName}":"other"}"#,
+                "Side: Buy",
+            ),
+            (
+                "{54=1? before {54.valueName} after :other}",
+                r#"{54="1"?" before {54.valueName} after ":"other"}"#,
+                " before Buy after ",
+            ),
+            (
+                "{54=2?wrong: no match }",
+                r#"{54="2"?"wrong":" no match "}"#,
+                " no match ",
+            ),
+        ] {
+            let line = "8=FIX.4.4|35=D|54=1|";
+            assert_eq!(with_template(bare, line), expected, "{bare}");
+            assert_eq!(with_template(quoted, line), expected, "{quoted}");
+        }
+        assert_eq!(with_template("{54=2?absent}", ORDER), "");
+        assert_eq!(
+            with_template(r#"{58=""?empty:nonempty}"#, "8=FIX.4.4|35=D|58=|"),
+            "empty"
+        );
+        assert_eq!(
+            with_template("{43=Y? [POSS DUP]}", "8=FIX.4.4|35=D|43=Y|"),
+            " [POSS DUP]"
+        );
     }
 }

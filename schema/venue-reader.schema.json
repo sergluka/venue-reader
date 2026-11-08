@@ -213,11 +213,17 @@
         },
         "template": {
           "type": "string",
-          "default": "{52|???}: {34|???}: {49|???}=>{56|???} | {35:name|???}{possDup}"
+          "default": "{52?:???}: {34?:???}: {sender?:???}=>{target?:???} | {msgName?:???}{43=Y? [POSS DUP]}",
+          "x-venue-reader-modeline": false
         },
         "details": {
           "type": "boolean",
           "default": true
+        },
+        "semanticTokens": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include semantic metadata in summary label parts when the client advertises support."
         }
       },
       "x-venue-reader-scope": "user-document"
@@ -334,7 +340,7 @@
         },
         "template": {
           "type": "string",
-          "default": "#{34} {49}→{56} {35:name} ({35})",
+          "default": "#{34} {49}→{56} {35.valueName} ({35})",
           "description": "The message symbol's name. Same slots as messageSummary.template; fields, groups and instances are not templated."
         }
       },
@@ -384,7 +390,7 @@
         "semanticTokensFullLines": {
           "type": "integer",
           "default": 2000,
-          "description": "How many lines from the top a whole-document colouring answers about; past it the tail is uncoloured and one log line says so. 2000 is about 255000 tokens on a dense log, which is what a client can rebuild per response without a heap it cannot afford — the server itself colours the whole file in half a second.",
+          "description": "How many lines from the top a whole-document colouring answers about; past it the tail is uncoloured and one log line says so. 2000 is about 255000 tokens on a dense log, which is what a client can rebuild per response without a heap it cannot afford \u2014 the server itself colours the whole file in half a second.",
           "minimum": 0
         },
         "codeLensLines": {

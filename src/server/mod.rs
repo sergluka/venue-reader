@@ -232,6 +232,7 @@ pub(super) struct ClientSupport {
     pub refreshes_semantic_tokens: bool,
     /// Whether overlapping semantic tokens can be rendered.
     pub overlaps_tokens: bool,
+    pub summary_tokens: bool,
     /// Whether code actions may be marked as preferred.
     pub prefers_actions: bool,
 }
@@ -249,6 +250,7 @@ impl Default for ClientSupport {
             refreshes_code_lens: false,
             refreshes_semantic_tokens: false,
             overlaps_tokens: false,
+            summary_tokens: false,
             prefers_actions: false,
         }
     }

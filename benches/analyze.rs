@@ -2,7 +2,12 @@
 //! `rss_viewport`, `rss_transient` and `cache_cost` — for the reasons `common`
 //! gives.
 
+#[path = "support/allocations.rs"]
+mod allocations;
 mod common;
+
+#[global_allocator]
+static ALLOCATOR: allocations::CountingAllocator = allocations::CountingAllocator;
 
 use common::{context, corpus};
 
@@ -91,6 +96,8 @@ fn throughput(c: &mut Criterion) {
     }
     fixt.finish();
 
+    summary_cost(c, &ctx, &lines);
+
     // Cold walk: a fresh document per iteration, or only the first is cold.
     c.bench_function("cold_walk_transient", |b| {
         b.iter_batched(
@@ -120,7 +127,7 @@ fn throughput(c: &mut Criterion) {
         b.iter(|| {
             let mut length = 0usize;
             for (line, message) in lines.iter().zip(&viewport) {
-                length += summary(line, message, &options).main.len();
+                length += summary::render(line, message, &options.template).len();
             }
             length
         })
@@ -148,3 +155,121 @@ fn throughput(c: &mut Criterion) {
 
 criterion_group!(benches, throughput);
 criterion_main!(benches);
+
+fn summary_cost(c: &mut Criterion, ctx: &venue_reader::ctx::Ctx, lines: &[&[u8]]) {
+    use std::hint::black_box;
+    use venue_reader::render::{summary::structured, summary_joined};
+    let mut group = c.benchmark_group("summary_cost");
+    for (name, pattern) in [
+        ("heartbeat", "|35=0|"),
+        ("order", "|35=D|"),
+        ("execution", "|35=8|"),
+    ] {
+        let line = lines
+            .iter()
+            .find(|line| {
+                line.windows(pattern.len())
+                    .any(|part| part == pattern.as_bytes())
+            })
+            .unwrap();
+        let analysis = analyze(line, ctx);
+        let message = analysis.message().unwrap();
+        let options = Options::default();
+        // Exclude one-time dictionary/template initialization from per-message allocations.
+        drop(structured(line, message, &options, true));
+        drop(summary_joined(line, message, &options));
+        group.bench_function(format!("{name}/analysis"), |bench| {
+            bench.iter(|| black_box(analyze(black_box(line), ctx)))
+        });
+        group.bench_function(format!("{name}/plain"), |bench| {
+            bench.iter(|| black_box(summary_joined(black_box(line), message, &options)))
+        });
+        group.bench_function(format!("{name}/combined"), |bench| {
+            bench.iter(|| {
+                let analysis = analyze(black_box(line), ctx);
+                black_box(structured(
+                    line,
+                    analysis.message().unwrap(),
+                    &options,
+                    true,
+                ))
+            })
+        });
+        for semantic in [false, true] {
+            group.bench_function(format!("{name}/parts_{semantic}"), |bench| {
+                bench.iter(|| black_box(structured(black_box(line), message, &options, semantic)))
+            });
+            let counts = allocations::measure(|| {
+                drop(structured(line, message, &options, semantic));
+            });
+            assert_eq!(
+                counts.live, 0,
+                "rendered output must release all allocations"
+            );
+            println!("summary allocations {name}, metadata={semantic}: {counts:?}");
+        }
+        let counts = allocations::measure(|| {
+            drop(summary_joined(line, message, &options));
+        });
+        assert_eq!(counts.live, 0);
+        println!("summary allocations {name}, plain: {counts:?}");
+    }
+    // Vary lookup work independently of input size, including absent references.
+    for fields in [32, 4096] {
+        let mut line = String::from("8=FIX.4.4|35=0|");
+        for index in 0..fields {
+            line.push_str(&format!("{}=value|", 100_000 + index));
+        }
+        line.push_str("58=last|");
+        let analysis = analyze(line.as_bytes(), ctx);
+        let message = analysis.message().unwrap();
+        lookup_cost(
+            &mut group,
+            &format!("large/{fields}"),
+            line.as_bytes(),
+            message,
+        );
+    }
+    for entries in [32, 4096] {
+        let mut line = format!("8=FIX.4.4|35=W|55=BTCUSD|268={entries}|");
+        for _ in 0..entries {
+            line.push_str("269=0|270=100|271=10|");
+        }
+        line.push_str("58=last|");
+        let analysis = analyze(line.as_bytes(), ctx);
+        let message = analysis.message().unwrap();
+        assert_eq!(message.groups.len(), entries);
+        assert_eq!(message.fields.len(), 5 + 3 * entries);
+        lookup_cost(
+            &mut group,
+            &format!("large_groups/{entries}"),
+            line.as_bytes(),
+            message,
+        );
+    }
+    group.finish();
+}
+
+/// One and many references to the last field and to an absent one: the linear
+/// first-occurrence lookup's cost, independent of how the line got long.
+fn lookup_cost(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    prefix: &str,
+    line: &[u8],
+    message: &venue_reader::codec::MessageAnalysis,
+) {
+    use std::hint::black_box;
+    use venue_reader::render::{summary::structured, Template};
+    for references in [1, 32] {
+        for (kind, reference) in [("late", "{58}"), ("absent", "{999999}")] {
+            let options = Options {
+                template: Template::parse(&reference.repeat(references)).unwrap(),
+                details: false,
+                ..Options::default()
+            };
+            group.bench_function(format!("{prefix}/{references}/{kind}"), |bench| {
+                bench.iter(|| black_box(structured(black_box(line), message, &options, true)))
+            });
+        }
+    }
+}

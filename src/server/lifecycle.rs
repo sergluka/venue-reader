@@ -17,6 +17,10 @@ impl ServerState {
     pub(super) fn on_initialize(&mut self, params: &Value) -> Value {
         let caps = client_capabilities(params);
         self.encoding = capabilities::negotiate_encoding(&caps);
+        self.client.summary_tokens = params
+            .pointer(capabilities::SUMMARY_TOKENS_PATH)
+            .and_then(Value::as_u64)
+            == Some(capabilities::SUMMARY_TOKENS_VERSION);
         self.client.configuration = caps
             .workspace
             .as_ref()

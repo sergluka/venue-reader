@@ -10,10 +10,9 @@ pub mod tag_url;
 pub mod template;
 pub mod tokens;
 
-pub use hint::{summary_joined, summary_parts};
 pub use hover::hover;
 pub use label_format::{LabelFormat, DEFAULT_LABEL_FORMAT};
-pub use summary::{summary, Summary};
+pub use summary::{summary_joined, SummaryPart, SEPARATOR};
 pub use tag_url::TagUrl;
 pub use template::{Template, TemplateError, DEFAULT_TEMPLATE};
 
@@ -242,7 +241,7 @@ mod tests {
     fn a_good_template_and_its_details_flag_both_arrive() {
         let config = Config {
             message_summary: MessageSummary {
-                template: "{35:name}".into(),
+                template: "{35.valueName}".into(),
                 details: false,
                 ..Default::default()
             },

@@ -24,14 +24,20 @@ pub struct Setting {
     pub path: &'static str,
     pub scope: Scope,
     pub kind: Kind,
+    /// Whether a modeline may assign it. Never for a global setting; a
+    /// document setting opts out with `NoModeline` in the table.
+    pub modeline: bool,
 }
 
 macro_rules! settings {
-    ($(($path:literal, $scope:ident, $kind:ident)),* $(,)?) => {
+    ($(($path:literal, $scope:ident, $kind:ident $(, $modeline:ident)?)),* $(,)?) => {
         pub const SETTINGS: &[Setting] = &[$(Setting {
             path: $path, scope: Scope::$scope, kind: Kind::$kind,
+            modeline: matches!(Scope::$scope, Scope::Document) && settings!(@modeline $($modeline)?),
         }),*];
-    }
+    };
+    (@modeline) => { true };
+    (@modeline NoModeline) => { false };
 }
 
 settings! {
@@ -54,8 +60,9 @@ settings! {
     ("inlayHints.enumValues.format", Document, String),
     ("inlayHints.groupPaths.enabled", Document, Boolean),
     ("messageSummary.enabled", Document, Boolean),
-    ("messageSummary.template", Document, String),
+    ("messageSummary.template", Document, String, NoModeline),
     ("messageSummary.details", Document, Boolean),
+    ("messageSummary.semanticTokens", Document, Boolean),
     ("messageSummary.channels.codeLens", Document, Boolean),
     ("messageSummary.channels.inlayHints", Document, Boolean),
     ("diagnostics.enabled", Document, Boolean),

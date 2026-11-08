@@ -49,8 +49,13 @@ const URI: &str =
     "file:///home/engineer/work/venue-connectivity/logs/2026-09-03/session-oe-prod-01.fix";
 
 fn main() {
-    let deferred = measure(true);
-    let eager = measure(false);
+    let deferred = measure(true, false);
+    let eager = measure(false, false);
+    let colored = measure(true, true);
+    println!(
+        "  metadata adds {} bytes to the same dense range",
+        colored.payload as isize - deferred.payload as isize
+    );
     println!(
         "  the tooltip is {:.0}% of an eager response — {} KB of hover markdown \
          a resolving client never receives up front",
@@ -91,7 +96,7 @@ struct Measured {
     uris: usize,
 }
 
-fn measure(defers_tooltips: bool) -> Measured {
+fn measure(defers_tooltips: bool, semantic: bool) -> Measured {
     let text = String::from_utf8(generate_lines(AT_CAP as usize)).expect("the corpus is ASCII");
     let (server_conn, client) = Connection::memory();
     let server = std::thread::spawn(move || venue_reader::server::main_loop(server_conn));
@@ -103,6 +108,7 @@ fn measure(defers_tooltips: bool) -> Measured {
         json!({
             "capabilities": {
                 "general": { "positionEncodings": ["utf-8"] },
+                "experimental": { "venueReader": { "summaryTokens": venue_reader::server::capabilities::SUMMARY_TOKENS_VERSION } },
                 "textDocument": { "inlayHint": { "resolveSupport": {
                     "properties": if defers_tooltips { vec!["tooltip"] } else { Vec::new() },
                 }}},
@@ -117,7 +123,7 @@ fn measure(defers_tooltips: bool) -> Measured {
                     "enumValues": { "enabled": true },
                     "groupPaths": { "enabled": true },
                 },
-                "messageSummary": { "channels": { "inlayHints": true } },
+                "messageSummary": { "channels": { "inlayHints": true }, "semanticTokens": semantic },
             }},
         }),
     );
@@ -145,15 +151,25 @@ fn measure(defers_tooltips: bool) -> Measured {
         }),
     );
     let elapsed = started.elapsed();
+    let serialization = Instant::now();
+    let serialized = serde_json::to_vec(&answer).expect("serialize response");
+    println!(
+        "  JSON serialization {:?}, metadata={semantic}",
+        serialization.elapsed()
+    );
 
     let hints = answer.as_array().expect("an array");
-    let payload = answer.to_string().len();
+    let payload = serialized.len();
     let data: usize = hints
         .iter()
         .map(|hint| hint["data"].to_string().len())
         .sum();
     // Every hint repeats it, so this is the whole of what a document id saves.
-    let uris = hints.len() * (URI.len() + 2);
+    let uris = hints
+        .iter()
+        .filter(|hint| hint["data"].get("uri").is_some())
+        .count()
+        * (URI.len() + 2);
 
     println!(
         "hint_payload at {AT_CAP} lines, tooltips {}: {} hints, payload {} KB \

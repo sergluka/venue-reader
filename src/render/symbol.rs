@@ -136,7 +136,7 @@ mod tests {
         let analysis = message_of(text);
         let decoded = analysis.message().expect("a message");
         let options = Options {
-            symbol_template: Template::parse("{49|}").expect("parses"),
+            symbol_template: Template::parse("{49}").expect("parses"),
             ..Options::default()
         };
         let name = message(text.as_bytes(), decoded, &options);

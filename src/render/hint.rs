@@ -49,15 +49,9 @@ pub(super) fn tag_label_bounded(
     let own = analysis.field_name(field);
     // The mark is part of the name, so the user's wrapper is kept.
     let foreign = (path.is_none() && own.is_none())
-        .then(|| standard::name_of(&analysis.standard(field), field.tag))
+        .then(|| foreign_name(&analysis.standard(field), field.tag))
         .flatten()
-        .map(|name| {
-            name.len()
-                .checked_add(FOREIGN_MARK.len())
-                .filter(|length| *length <= max_bytes)
-                .ok_or(fmt::Error)?;
-            Ok(format!("{name}{FOREIGN_MARK}"))
-        })
+        .map(|name| (name.len() <= max_bytes).then_some(name).ok_or(fmt::Error))
         .transpose()?;
     let name = match (&path, &foreign) {
         (Some(path), _) => Some(path.as_str()),
@@ -93,6 +87,11 @@ fn check_group_path(
 
 /// Appended to a standard name the bound dictionary does not have.
 const FOREIGN_MARK: &str = "?";
+
+/// The standard name of a tag the line's dictionary lacks, marked as foreign.
+pub(super) fn foreign_name(standing: &standard::Standard, tag: u32) -> Option<String> {
+    standard::name_of(standing, tag).map(|name| format!("{name}{FOREIGN_MARK}"))
+}
 
 /// How a field's value is spelled. Switch-free for the reason [`tag_label`] is.
 pub fn value_label(analysis: &MessageAnalysis, field: &Field, options: &Options) -> Option<String> {
@@ -147,35 +146,6 @@ pub fn value(
 /// `main` can be empty — the template is a user's to write — and LSP forbids an
 /// empty label part, so the four shapes are enumerated rather than assembled:
 /// both, main alone, details alone, and neither, which draws nothing at all.
-/// The separator is the caller's because `render::summary` deliberately returns
-/// the two apart; a channel that joins them must supply it.
-pub const SEPARATOR: &str = " | ";
-
-pub fn summary_parts(
-    line: &[u8],
-    analysis: &MessageAnalysis,
-    options: &Options,
-) -> Option<Vec<String>> {
-    let summary = super::summary(line, analysis, options);
-    let main = (!summary.main.is_empty()).then_some(summary.main);
-    let details = summary.details.filter(|text| !text.is_empty());
-    match (main, details) {
-        (Some(main), Some(details)) => Some(vec![main, SEPARATOR.to_owned(), details]),
-        (Some(main), None) => Some(vec![main]),
-        (None, Some(details)) => Some(vec![details]),
-        (None, None) => None,
-    }
-}
-
-/// The same summary as one string, for a channel that has nowhere to put parts.
-pub fn summary_joined(
-    line: &[u8],
-    analysis: &MessageAnalysis,
-    options: &Options,
-) -> Option<String> {
-    Some(summary_parts(line, analysis, options)?.concat())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,10 +194,6 @@ mod tests {
 
     const HEARTBEAT: &str =
         "8=FIX.4.4|9=57|35=0|34=1|49=CLIENT1|56=BROKER1|52=20251026-09:02:00.000|10=171|";
-    /// An order has a second half to its summary; a session message does not.
-    const ORDER: &str = "8=FIX.4.4|9=139|35=D|34=2|49=CLIENT1|56=BROKER1|\
-52=20251026-09:00:02.000|11=ORDER123|21=1|55=BTCUSD|54=1|38=10|40=2|44=65000|59=0|\
-60=20251026-09:00:02.000|10=213|";
     const GROUPS: &str =
         "8=FIX.4.4|9=124|35=W|34=3|49=EXCHANGE|56=CLIENT|52=20251026-09:05:00.000|\
 55=BTCUSD|268=2|269=0|270=65000.50|271=1.5|269=1|270=65001.00|271=2.0|10=145|";
@@ -396,46 +362,5 @@ mod tests {
         );
         assert_eq!(marked_under("FIX.9.1", 55).as_deref(), Some("(Symbol?)"));
         assert_eq!(marked_under("FIX.4.4", 9000), None);
-    }
-
-    /// LSP forbids an empty label part, and the template is the user's to
-    /// write, so every shape the summary can take is enumerated — and each of
-    /// the four is *constructed* here, rather than allowed for by a disjunction
-    /// that any one of them satisfies.
-    #[test]
-    fn the_summary_takes_one_of_four_shapes() {
-        let empty_template = || Options {
-            template: crate::render::Template::parse("").expect("an empty template"),
-            ..Options::default()
-        };
-
-        // Both: an order has details to say. Exactly three parts, and the
-        // middle one is the separator this channel does not draw itself.
-        let (bytes, analysis) = one(ORDER);
-        let parts = summary_parts(&bytes, &analysis, &Options::default()).expect("a summary");
-        assert_eq!(parts.len(), 3, "{parts:?}");
-        assert_eq!(parts[1], SEPARATOR);
-        assert_eq!(
-            summary_joined(&bytes, &analysis, &Options::default()).as_deref(),
-            Some(parts.concat().as_str())
-        );
-
-        // Details alone: nothing in the template, but an order still has them.
-        let parts = summary_parts(&bytes, &analysis, &empty_template()).expect("a summary");
-        assert_eq!(parts.len(), 1, "{parts:?}");
-        assert!(!parts[0].is_empty() && parts[0] != SEPARATOR, "{parts:?}");
-
-        // Main alone: a session message has no second half to its summary.
-        let (bytes, analysis) = one(HEARTBEAT);
-        let parts = summary_parts(&bytes, &analysis, &Options::default()).expect("a summary");
-        assert_eq!(parts.len(), 1, "{parts:?}");
-
-        // Neither: an empty template and nothing to detail draws nothing at
-        // all, rather than an empty part LSP forbids.
-        let nothing = Options {
-            details: false,
-            ..empty_template()
-        };
-        assert_eq!(summary_parts(&bytes, &analysis, &nothing), None);
     }
 }
