@@ -600,7 +600,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ----------------------------------------
 - aho-corasick 1.1.5
-- globset 0.4.20
+- globset 0.4.21
 - memchr 2.8.3
 
 The MIT License (MIT)
