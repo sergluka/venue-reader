@@ -1,14 +1,13 @@
-//! The pool-ready request boundary.
+//! Immutable request snapshots and dispatch outcomes.
 //!
-//! A request handler `prepare`s a [`RequestTask`] over an immutable [`Snapshot`].
-//! Stage 1 runs the task inline in the main loop; Stage 3/4 submits the same task
-//! to a bounded executor and completes the response from a result channel — no
-//! handler is rewritten, only the main loop's execution site changes.
+//! Ordinary tasks run inline; a `Background` outcome transfers work to the
+//! background worker.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use lsp_server::{Notification, ResponseError};
-use lsp_types::{LogMessageParams, MessageType};
+use lsp_types::{LogMessageParams, MessageType, ProgressToken, Uri};
 use serde_json::{json, Value};
 
 use crate::codec::LineAnalysis;
@@ -18,14 +17,7 @@ use crate::render::Options;
 use crate::rules::Registry;
 use crate::transport::{Sink, WriteJson};
 
-/// Immutable per-document view a request task runs against.
-///
-/// Exists to keep handlers pool-ready: a task is `Send + 'static`, so it cannot
-/// borrow `ServerState`, and the main loop stays free to mutate documents while a
-/// task runs. Cloning is cheap — `Arc` pointers, never line bytes — so a task
-/// keeps a coherent frozen view of the document it was scheduled on, instead of
-/// stitching its answer from lines that changed underneath it. Stage 1 runs tasks
-/// inline; the executor arrives in Stage 3/4 with the handlers unchanged.
+/// Lines and configuration captured together so asynchronous work cannot mix generations.
 #[derive(Clone)]
 pub struct Snapshot {
     pub lines: Arc<Vec<Arc<Line>>>,
@@ -215,16 +207,48 @@ impl From<Value> for Answer {
 /// What a request handler hands back to the main loop.
 ///
 /// Handlers never execute their own work: they either answer immediately from
-/// server state, or return a task plus the snapshot it runs against. The loop is
-/// the single execution site, so Stage 3/4 submits the task to a bounded executor
-/// there — no handler changes shape.
+/// server state, return an inline task, or transfer a task to the background worker.
+/// The main loop owns response completion for every outcome.
 pub enum Dispatched {
+    Background(BackgroundTask),
     WaitingForConfiguration(super::pending_requests::PendingRequest),
     Now(HandlerResult),
     Task(Snapshot, RequestTask),
     /// Answered from server state like `Now`, as a value the writer
     /// serialises rather than a tree this builds.
     Lazy(Result<Box<dyn WriteJson>, ResponseError>),
+}
+
+/// What a background task says while it runs.
+pub enum BackgroundEvent {
+    /// One encoded JSON value, sent as a partial result.
+    Chunk(Vec<u8>),
+    Progress {
+        percentage: u32,
+        phase: &'static str,
+    },
+}
+
+/// A background task's result, already encoded as JSON.
+pub type BackgroundResult = Result<Vec<u8>, ResponseError>;
+
+/// Work for the background worker. It stops with an error once the flag is set.
+pub type BackgroundRun = Box<
+    dyn FnOnce(&Snapshot, &AtomicBool, &mut dyn FnMut(BackgroundEvent)) -> BackgroundResult + Send,
+>;
+
+/// A whole-document request that runs off the main loop.
+pub struct BackgroundTask {
+    pub method: &'static str,
+    /// Title of the work-done progress.
+    pub title: &'static str,
+    /// The document whose edit or close invalidates the task.
+    pub uri: Uri,
+    pub snapshot: Snapshot,
+    pub work_done: Option<ProgressToken>,
+    /// With a token, chunks stream to the client; without one they are dropped.
+    pub partial: Option<ProgressToken>,
+    pub run: BackgroundRun,
 }
 
 /// A `'static + Send` unit of work over a [`Snapshot`]. `Send` is required now so

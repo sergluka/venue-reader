@@ -115,6 +115,16 @@ impl<T: serde::Serialize + Send> WriteJson for T {
     }
 }
 
+/// JSON its producer already encoded, written as it is.
+pub struct Encoded(pub Vec<u8>);
+
+impl WriteJson for Encoded {
+    fn write_json(&self, out: &mut Vec<u8>) -> serde_json::Result<()> {
+        out.extend_from_slice(&self.0);
+        Ok(())
+    }
+}
+
 /// What the server hands the writer.
 ///
 /// A `Result` skips `serde_json::Value` entirely: building the tree and then
@@ -123,6 +133,11 @@ impl<T: serde::Serialize + Send> WriteJson for T {
 /// array.
 pub enum Outbound {
     Message(Message),
+    /// A notification whose params the writer serialises.
+    Notification {
+        method: &'static str,
+        params: Box<dyn WriteJson>,
+    },
     /// A successful response whose result is still a value, not yet JSON.
     Result {
         id: RequestId,
@@ -161,6 +176,13 @@ impl Outbound {
     pub fn into_message(self) -> Message {
         match self {
             Outbound::Message(msg) => msg,
+            Outbound::Notification { method, params } => Message::Notification(Notification {
+                method: method.into(),
+                params: as_value(params.as_ref()).unwrap_or_else(|e| {
+                    log::error!("transport: {method} params that cannot be serialised: {e}");
+                    Value::Null
+                }),
+            }),
             Outbound::Result { id, body } => Message::Response(Response {
                 id,
                 response_result: as_value(body.as_ref()).map_err(|e| ResponseError {
@@ -277,6 +299,9 @@ pub fn stdio() -> (Link, TransportThreads) {
         for out in writer_rx {
             let wrote = match &out {
                 Outbound::Message(msg) => write_message(&mut lock, msg),
+                Outbound::Notification { method, params } => {
+                    write_notification(&mut lock, method, params.as_ref())
+                }
                 Outbound::Result { id, body } => write_result(&mut lock, id, body.as_ref()),
             };
             if let Err(e) = wrote {
@@ -331,6 +356,27 @@ fn write_message(w: &mut impl Write, msg: &Message) -> io::Result<()> {
     w.flush()
 }
 
+/// One frame: `head`, `body` and the brace that closes the message.
+fn write_framed(w: &mut impl Write, head: &str, body: &[u8]) -> io::Result<()> {
+    write!(w, "Content-Length: {}\r\n\r\n", head.len() + body.len() + 1)?;
+    w.write_all(head.as_bytes())?;
+    w.write_all(body)?;
+    w.write_all(b"}")?;
+    w.flush()
+}
+
+fn write_notification(w: &mut impl Write, method: &str, params: &dyn WriteJson) -> io::Result<()> {
+    let mut body = Vec::new();
+    // Nobody waits for a notification, so one that will not serialise is dropped whole.
+    if let Err(e) = params.write_json(&mut body) {
+        log::error!("transport: {method} params that cannot be serialised: {e}");
+        return Ok(());
+    }
+    let method = serde_json::to_string(method).map_err(io::Error::other)?;
+    let head = format!(r#"{{"jsonrpc":"2.0","method":{method},"params":"#);
+    write_framed(w, &head, &body)
+}
+
 /// One response, serialised here rather than by whoever produced it.
 ///
 /// Hand-framed rather than routed through `lsp_server::Response`, which holds
@@ -338,6 +384,7 @@ fn write_message(w: &mut impl Write, msg: &Message) -> io::Result<()> {
 /// exists to avoid. The buffer is not avoidable — `Content-Length` precedes
 /// the body, so the length must be known before the first byte goes out.
 fn write_result(w: &mut impl Write, id: &RequestId, body: &dyn WriteJson) -> io::Result<()> {
+    let serialization = std::time::Instant::now();
     let mut result = Vec::new();
     // Two failures with nothing in common. A body that will not serialise is
     // about this one response and the client is owed an error for it; a write
@@ -355,18 +402,14 @@ fn write_result(w: &mut impl Write, id: &RequestId, body: &dyn WriteJson) -> io:
             )),
         );
     }
+    log::debug!(
+        "result serialization: serialization_ms={:.3} result_bytes={}",
+        serialization.elapsed().as_secs_f64() * 1000.0,
+        result.len(),
+    );
     let id = serde_json::to_string(id).map_err(io::Error::other)?;
     let head = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":"#);
-    // The closing brace is the one byte past the head and the result.
-    write!(
-        w,
-        "Content-Length: {}\r\n\r\n",
-        head.len() + result.len() + 1
-    )?;
-    w.write_all(head.as_bytes())?;
-    w.write_all(&result)?;
-    w.write_all(b"}")?;
-    w.flush()
+    write_framed(w, &head, &result)
 }
 
 #[cfg(test)]
@@ -569,5 +612,50 @@ mod frames {
             })
             .collect();
         assert_eq!(seen, ["first", "a response", "third"]);
+    }
+    #[test]
+    fn a_written_notification_preserves_encoded_params_bytes() {
+        let params = r#"{"token":"symbols-✓\"","value":[ {"name":"keep whitespace"} ]}"#;
+        let mut wire = Vec::new();
+        write_notification(&mut wire, "$/progress", &Encoded(params.into())).expect("write frame");
+        let mut reader = io::Cursor::new(wire);
+        let body = read_frame(&mut reader)
+            .expect("read frame")
+            .expect("notification body");
+        assert!(body
+            .windows(params.len())
+            .any(|bytes| bytes == params.as_bytes()));
+        let parsed: Value = serde_json::from_slice(&body).expect("valid notification");
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["method"], "$/progress");
+        assert_eq!(
+            parsed["params"],
+            serde_json::from_str::<Value>(params).unwrap()
+        );
+        assert!(read_frame(&mut reader).expect("frame boundary").is_none());
+    }
+
+    #[test]
+    fn a_notification_reaches_a_memory_sink_in_order() {
+        let (sender, receiver) = unbounded::<Message>();
+        let sink = Sink::Memory(sender);
+        sink.send(Outbound::Notification {
+            method: "$/progress",
+            params: Box::new(Encoded(
+                br#"{"token":"partial","value":[{"name":"root"}]}"#.to_vec(),
+            )),
+        });
+        sink.send(Response::new_ok(3.into(), json!([])));
+        let seen: Vec<_> = receiver.try_iter().collect();
+        assert_eq!(seen.len(), 2);
+        let Message::Notification(note) = &seen[0] else {
+            panic!("expected progress")
+        };
+        assert_eq!(note.method, "$/progress");
+        assert_eq!(
+            note.params,
+            json!({"token":"partial", "value":[{"name":"root"}]})
+        );
+        assert!(matches!(&seen[1], Message::Response(response) if response.id == 3.into()));
     }
 }

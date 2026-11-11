@@ -123,6 +123,11 @@ The outline shows messages, fields, and repeating-group entries. Select an
 entry to navigate to its location. `documentSymbol.depth` accepts `messages`,
 `fields`, or `full`; the default is `full`.
 
+Clients that request partial results receive complete message subtrees as they
+are built; other clients receive one final outline. The outline reuses valid
+cached analyses without filling the cache. Its item limit includes an ordinary
+text marker when messages or children are omitted; picker filters may hide it.
+
 <details>
 <summary>Example: repeating groups in the outline</summary>
 

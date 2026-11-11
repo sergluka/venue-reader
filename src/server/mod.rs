@@ -1,14 +1,14 @@
 //! Server main loop and message dispatch.
 //!
-//! Single-threaded in Stage 1: each request `prepare`s a task over a [`Snapshot`]
-//! and runs it inline. Responses go through one point via [`ReqQueue`]; every
-//! handler is wrapped in `catch_unwind` so a panic becomes an `InternalError` and
-//! the loop survives. The worker pool is deferred to Stage 3/4 (see `dispatch`).
+//! Ordinary request tasks run inline; whole-document requests use one background worker.
+//! Responses and background results pass through the main loop. Panic guards
+//! turn handler failures into request errors without stopping the server.
 //!
 //! This file owns only the loop, the dispatch tables, and the shared state. Each
 //! capability lives in its own module and adds an `impl ServerState` block there;
 //! later stages add a module per capability rather than growing this one.
 
+mod background;
 pub mod capabilities;
 mod code_action;
 mod code_lens;
@@ -26,6 +26,7 @@ pub mod lifecycle;
 mod method;
 mod pending_requests;
 mod prepared_request;
+mod progress;
 mod selection_range;
 mod semantic_tokens;
 #[cfg(test)]
@@ -132,10 +133,13 @@ pub fn serve_started(link: Link, startup: Startup) -> ServerExit {
     // against a configuration change.
     let reports_rx = state.diagnostics.reports_rx.clone();
     let configuration_rx = state.loader.reports.clone();
+    let background_rx = state.background.reports.clone();
     loop {
         state.check_config_deadline();
         state.process_pending_requests(Instant::now());
+        state.report_waiting_background(Instant::now());
         if let Some(error) = state.fatal.take() {
+            state.stop_background("configuration failed; server is exiting");
             state.diagnostics.abandon();
             return ServerExit::Fatal(error);
         }
@@ -157,15 +161,21 @@ pub fn serve_started(link: Link, startup: Startup) -> ServerExit {
                 let Ok(report) = report else { break };
                 state.on_diagnostic_report(report);
             }
+            recv(background_rx) -> report => {
+                if let Ok(report) = report {
+                    state.drain_background(report);
+                }
+            }
             recv(configuration_rx) -> report => {
                 match report {
                     Ok(report) => state.on_configuration_report(report),
                     Err(_) => state.fail_configuration("configuration worker disconnected".into()),
                 }
             }
-            default(state.diagnostics.tick_in().min(state.config_tick_in()).min(state.pending_requests.tick_in(Instant::now()))) => state.dispatch_due_diagnostics(),
+            default(state.diagnostics.tick_in().min(state.config_tick_in()).min(state.pending_requests.tick_in(Instant::now())).min(state.background.tick_in(Instant::now()))) => state.dispatch_due_diagnostics(),
         }
     }
+    state.stop_background("server is exiting");
     ServerExit::Normal
 }
 
@@ -179,6 +189,7 @@ pub(crate) struct ServerState {
     pub(super) encoding: PositionEncoding,
     pub(super) req_queue: ReqQueue<(), OutgoingRequest>,
     pending_requests: pending_requests::PendingRequests,
+    background: background::Worker,
     pub(super) shutdown_requested: bool,
     pub(super) config: ConfigState,
     pub(super) client: ClientSupport,
@@ -274,6 +285,7 @@ impl ServerState {
             encoding: PositionEncoding::Utf16, // until initialize negotiates
             req_queue: ReqQueue::default(),
             pending_requests: pending_requests::PendingRequests::default(),
+            background: background::Worker::start(),
             shutdown_requested: false,
             config: ConfigState::default(),
             client: ClientSupport::default(),
@@ -297,7 +309,7 @@ impl ServerState {
 
     fn on_request(&mut self, req: Request) {
         // Preserve the original request even when a duplicate ID names shutdown.
-        if self.pending_requests.contains(&req.id) {
+        if self.pending_requests.contains(&req.id) || self.background.contains(&req.id) {
             log::warn!("ignoring duplicate pending command ID {}", req.id);
             return;
         }
@@ -305,6 +317,7 @@ impl ServerState {
             self.shutdown_requested = true;
             self.stop_configuration();
             self.fail_pending_requests("server is shutting down");
+            self.stop_background("server is shutting down");
             self.respond(Response::new_ok(req.id, Value::Null));
             return;
         }
@@ -338,6 +351,10 @@ impl ServerState {
     ) -> Result<Option<Answer>, ResponseError> {
         match dispatched {
             Dispatched::Now(result) => result.map(|value| Some(Answer::Json(value))),
+            Dispatched::Background(task) => {
+                self.start_background(id, task);
+                Ok(None)
+            }
             Dispatched::Task(snapshot, task) => {
                 task(&snapshot, &mut Notices::to(self.sender.clone()))
                     .map(|value| Some(Answer::Json(value)))
@@ -543,6 +560,7 @@ impl ServerState {
         };
         let id: RequestId = params.id;
         self.pending_requests.remove(&id);
+        self.cancel_background(&id);
         if let Some(resp) = self.req_queue.incoming.cancel(id) {
             self.respond(resp);
         }

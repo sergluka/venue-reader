@@ -337,11 +337,16 @@ fn all_document_requests_wait_for_initial_configuration() {
         .collect();
     assert!(barrier(&mut client).is_empty());
     client.answer_base_pull();
-    let responses = complete(&mut client, pending.last().unwrap());
+    let mut responses = client.responses_for(&pending);
+    responses.extend(barrier(&mut client));
     assert_eq!(responses.len(), pending.len());
-    for (response, expected) in responses.iter().zip(&pending) {
-        assert_eq!(&response.id, expected);
-        assert!(response.response_result.is_ok(), "{response:?}");
+    for expected in &pending {
+        let matched: Vec<_> = responses
+            .iter()
+            .filter(|response| &response.id == expected)
+            .collect();
+        assert_eq!(matched.len(), 1, "one response for {expected}");
+        assert!(matched[0].response_result.is_ok(), "{:?}", matched[0]);
     }
     client.shutdown();
 }

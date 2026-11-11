@@ -79,6 +79,7 @@ impl ServerState {
             log::debug!("skipping document with an empty URI path");
             return;
         }
+        self.invalidate_background(&uri);
         let doc = Document::open(&text_into_bytes(text), version, self.ctx.clone());
         let reopened = self.docs.insert(uri.clone(), doc).is_some();
         // A reopened document keeps its URI, so an id from the last time it was
@@ -141,6 +142,7 @@ impl ServerState {
                     || last as usize >= doc.content_lines().saturating_sub(EDGE_LINES)
             }
         };
+        self.invalidate_background(&uri);
         if let Some(digest) = self.tokens.get_mut(&uri) {
             digest.edited = digest.edited.then(edited);
         }
@@ -159,6 +161,7 @@ impl ServerState {
         let Some(uri) = parse_uri("didClose", &params.text_document.uri) else {
             return;
         };
+        self.invalidate_background(&uri);
         let version = self.docs.remove(&uri).map_or(0, |doc| doc.version);
         self.clear_diagnostics(&uri, version);
         // Drop the document's configuration state too, or it accumulates for the

@@ -177,8 +177,17 @@ pub fn initialize_result(encoding: PositionEncoding, caps: &ClientCapabilities) 
             // answer a client cannot read is worse than not offering it.
             // `documentSymbol.enabled` gates the *response* for everyone else,
             // so switching the outline off needs no reconnect.
-            document_symbol_provider: super::document_symbol::takes_nested_symbols(caps)
-                .then(|| true.into()),
+            document_symbol_provider: super::document_symbol::takes_nested_symbols(caps).then(
+                || {
+                    lsp_types::DocumentSymbolOptions {
+                        work_done_progress_options: WorkDoneProgressOptions {
+                            work_done_progress: Some(true),
+                        },
+                        label: None,
+                    }
+                    .into()
+                },
+            ),
             // No `resolveProvider`: a quickfix carries its edit already, and
             // `source.fixAll` — the only thing that would be resolved — waits
             // for the worker pool in Stage 4b.

@@ -80,8 +80,12 @@ pub fn instance(entry: u32) -> String {
 
 /// What the budget left out. Never a bare `[]`: an outline that stops without
 /// saying so reads as a server that gave up.
-pub fn truncated(messages: usize) -> String {
-    format!("… {messages} more messages")
+pub fn truncated(messages: usize, children: bool) -> String {
+    match (messages, children) {
+        (0, true) => "… Some fields/groups omitted".into(),
+        (messages, true) => format!("… {messages} more messages; some fields/groups omitted"),
+        (messages, false) => format!("… {messages} more messages"),
+    }
 }
 
 #[cfg(test)]

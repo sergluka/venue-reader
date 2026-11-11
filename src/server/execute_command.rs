@@ -978,6 +978,7 @@ mod tests {
         ) {
             Dispatched::Now(result) => result,
             Dispatched::Task(..)
+            | Dispatched::Background(..)
             | Dispatched::Lazy(..)
             | Dispatched::WaitingForConfiguration(..) => {
                 panic!("a description needs no document")

@@ -21,11 +21,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use lsp_server::Notification;
-use lsp_types::Uri;
+use lsp_types::{ProgressToken, Uri};
 use serde_json::json;
 
 use super::dispatch::Snapshot;
+use super::progress::{notify, Progress};
 use super::{OutgoingRequest, ServerState};
 use crate::ctx::analyze;
 use crate::document::{Column, Columns, LineNo};
@@ -98,64 +98,6 @@ struct Inflight {
     token: Option<String>,
     /// `None` until the walk has run long enough to be worth announcing.
     progress: Option<Progress>,
-}
-
-/// A begun `$/progress` sequence. Every one owes an `end`, on completion,
-/// cancellation, coalescing, worker panic and shutdown alike — so the `end`
-/// lives in `Drop` and no exit path can forget it.
-struct Progress {
-    sender: Sink,
-    token: String,
-}
-
-impl Progress {
-    /// Announce the work under a token the client has already agreed to.
-    fn begin(sender: &Sink, token: String, percentage: u32) -> Progress {
-        notify(
-            sender,
-            super::method::PROGRESS,
-            json!({
-                "token": token,
-                // With a percentage the client renders a determinate bar; the
-                // walk always knows how many lines it has left.
-                "value": { "kind": "begin", "title": "Validating FIX", "percentage": percentage },
-            }),
-        );
-        Progress {
-            sender: sender.clone(),
-            token,
-        }
-    }
-}
-
-impl Progress {
-    fn report(&self, percentage: u32) {
-        notify(
-            &self.sender,
-            super::method::PROGRESS,
-            json!({
-                "token": self.token,
-                "value": { "kind": "report", "percentage": percentage },
-            }),
-        );
-    }
-}
-
-impl Drop for Progress {
-    fn drop(&mut self) {
-        notify(
-            &self.sender,
-            super::method::PROGRESS,
-            json!({ "token": self.token, "value": { "kind": "end" } }),
-        );
-    }
-}
-
-fn notify(sender: &Sink, method: &str, params: serde_json::Value) {
-    sender.send(Notification {
-        method: method.into(),
-        params,
-    });
 }
 
 /// The token for one walk. Unique per generation, so a stale `create` reply
@@ -721,12 +663,21 @@ impl ServerState {
                     return;
                 };
                 match &inflight.progress {
-                    Some(progress) => progress.report(percentage),
+                    Some(progress) => progress.report(percentage, None),
                     // The first report is what opens the bar, and it opens at
                     // the percentage the walk has actually reached.
                     None => {
                         if let Some(token) = inflight.token.take() {
-                            inflight.progress = Some(Progress::begin(&sender, token, percentage));
+                            // With a percentage the client renders a determinate
+                            // bar; the walk always knows how many lines it has left.
+                            inflight.progress = Some(Progress::begin(
+                                &sender,
+                                ProgressToken::String(token),
+                                "Validating FIX",
+                                percentage,
+                                None,
+                                false,
+                            ));
                         }
                     }
                 }
@@ -1244,7 +1195,14 @@ mod tests {
     fn dropping_a_begun_progress_ends_it() {
         let (tx, rx) = unbounded::<lsp_server::Message>();
         let tx = crate::transport::Sink::Memory(tx);
-        let progress = Progress::begin(&tx, token_for(7), 0);
+        let progress = Progress::begin(
+            &tx,
+            ProgressToken::String(token_for(7)),
+            "Validating FIX",
+            0,
+            None,
+            false,
+        );
         let begun = rx.try_recv().expect("a begin");
         drop(progress);
         let ended = rx.try_recv().expect("an end");
@@ -1274,9 +1232,16 @@ mod tests {
     fn a_report_carries_the_percentage_under_the_agreed_token() {
         let (tx, rx) = unbounded::<lsp_server::Message>();
         let tx = crate::transport::Sink::Memory(tx);
-        let progress = Progress::begin(&tx, token_for(3), 0);
+        let progress = Progress::begin(
+            &tx,
+            ProgressToken::String(token_for(3)),
+            "Validating FIX",
+            0,
+            None,
+            false,
+        );
         let _ = rx.try_recv();
-        progress.report(42);
+        progress.report(42, None);
         let Ok(Message::Notification(note)) = rx.try_recv() else {
             panic!("a report");
         };

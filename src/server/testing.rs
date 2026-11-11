@@ -84,6 +84,15 @@ pub(crate) fn answered_with(dispatched: Dispatched) -> (Value, Vec<(MessageType,
             panic!("expected an immediate answer, got deferred command")
         }
         Dispatched::Task(snapshot, task) => task(&snapshot, &mut notices).expect("answered"),
+        Dispatched::Background(task) => {
+            let json = (task.run)(
+                &task.snapshot,
+                &std::sync::atomic::AtomicBool::new(false),
+                &mut |_| {},
+            )
+            .expect("answered");
+            serde_json::from_slice(&json).expect("a JSON answer")
+        }
         Dispatched::Now(result) => result.expect("answered"),
         // Serialised and parsed back so a lazy answer is asserted like any
         // other; the wire path is what `tests/stdio_e2e.rs` covers.

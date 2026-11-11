@@ -38,8 +38,9 @@ follows is what is easy to get wrong here and not visible from any one file.
   line is rebuilt.
 - **Only viewport-bounded requests may populate a line's cache.** Hover, inlay
   hints and semantic tokens over a range may call `Snapshot::analysis`;
-  anything that walks the whole document — diagnostics above all — calls
-  `analyze` and drops the result. A fully populated cache costs several times
+  whole-document walks may read valid analyses with `analysis_if_cached()`
+  without refreshing eviction marks, and call `analyze` transiently on a miss.
+  They never populate the cache. A fully populated cache costs several times
   the file size, and the budget is met by this rule rather than by the layout of
   any struct. The caching accessor is the one that carries the label, because it
   is the one that can break the budget.

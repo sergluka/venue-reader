@@ -1,20 +1,22 @@
 //! `textDocument/documentSymbol`: the outline of a log.
 //!
-//! `DocumentSymbolParams` carries no range, so this walks the whole document
-//! and therefore calls `ctx::analyze` and drops the result. It is not a
-//! permitted cache populator, and `Line::cached_analysis` compiling here is the
-//! easiest mistake in the module.
+//! Whole-document enumeration may read existing analyses, but never populates
+//! the line cache or refreshes its eviction marks.
 
-use lsp_types::{DocumentSymbolParams, MessageType, SymbolKind};
+use lsp_server::{ErrorCode, ResponseError};
+use lsp_types::{DocumentSymbolParams, SymbolKind};
+use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-use super::dispatch::{Dispatched, HandlerResult, Notices, RequestTask, Snapshot};
+use super::dispatch::{BackgroundEvent, BackgroundResult, BackgroundTask, Dispatched, Snapshot};
 use super::ServerState;
 use crate::codec::{tokenize, ByteOffset, GroupSpans, LineKind, MessageAnalysis};
 use crate::config::SymbolDepth;
-use crate::document::{Columns, LineNo};
+use crate::document::{Column, Columns, LineNo};
 use crate::render::{symbol, Options};
 
 /// Deepest group nesting the outline represents.
@@ -27,13 +29,14 @@ use crate::render::{symbol, Options};
 const MAX_NESTING: u8 = 24;
 
 /// What the outline needs from configuration, gathered where the config lives.
-#[derive(Clone)]
-pub(super) struct Wanted {
+struct Wanted {
     depth: SymbolDepth,
     kinds: Kinds,
     /// `limits.documentSymbolItems`: the most symbols one answer may hold, the
     /// truncation marker counted among them.
     max_symbols: usize,
+    #[cfg(test)]
+    skip_line: Option<LineNo>,
 }
 
 /// The `SymbolKind` numbers to answer with.
@@ -113,17 +116,27 @@ impl ServerState {
                 .unwrap_or(&self.config.base)
                 .limits
                 .document_symbol_items,
+            #[cfg(test)]
+            skip_line: None,
         };
-        match self.snapshot_for(&params.text_document.uri) {
-            Some(snapshot) => Dispatched::Task(snapshot, prepare(wanted)),
+        let Some(snapshot) = self.snapshot_for(uri) else {
             // Closed between the request and here.
-            None => Dispatched::Now(Ok(json!([]))),
-        }
+            return Dispatched::Now(Ok(json!([])));
+        };
+        let partial = params.partial_result_params.partial_result_token;
+        let streaming = partial.is_some();
+        Dispatched::Background(BackgroundTask {
+            method: super::method::DOCUMENT_SYMBOL,
+            title: "Document symbols",
+            uri: params.text_document.uri,
+            snapshot,
+            work_done: params.work_done_progress_params.work_done_token,
+            partial,
+            run: Box::new(move |snapshot, cancelled, emit| {
+                enumerate(&wanted, snapshot, cancelled, streaming, emit)
+            }),
+        })
     }
-}
-
-fn prepare(wanted: Wanted) -> RequestTask {
-    Box::new(move |snapshot: &Snapshot, notices: &mut Notices| answer(&wanted, snapshot, notices))
 }
 
 /// How the budget is spent, decided before any tree is built.
@@ -142,10 +155,8 @@ struct Budget {
 }
 
 impl Budget {
+    /// `cap` is at least one: the marker needs a slot.
     fn spend(cap: usize, total: usize) -> Budget {
-        // The schema refuses zero, because a cap of zero cannot hold the marker
-        // it would need; a client that sends one anyway gets the marker.
-        let cap = cap.max(1);
         if total > cap {
             // The marker counts, which is what makes this `cap` and not `cap+1`.
             Budget {
@@ -162,117 +173,359 @@ impl Budget {
         }
     }
 
-    fn omitted(&self) -> Option<usize> {
-        (self.total > self.roots).then(|| self.total - self.roots)
+    fn omitted(&self) -> usize {
+        self.total - self.roots
     }
 }
 
-fn answer(wanted: &Wanted, snapshot: &Snapshot, notices: &mut Notices) -> HandlerResult {
-    // Classification, not analysis: `tokenize` needs no dictionary, and the
-    // roots have to be counted before the first one is built.
-    let lines: Vec<LineNo> = (0..snapshot.content_lines())
-        .map(|number| LineNo::new(number as u32))
-        .filter(|number| {
-            snapshot
-                .line(*number)
-                .is_some_and(|line| tokenize(&line.bytes).kind == LineKind::Message)
-        })
-        .collect();
-    let budget = Budget::spend(wanted.max_symbols, lines.len());
-    // Taken before the loop consumes the list: the marker is anchored on the
-    // first message it stands for.
-    let first_omitted = lines.get(budget.roots).copied();
+/// Bounds of one streamed chunk: its symbols, its bytes and its age.
+const CHUNK_ITEMS: usize = 256;
+const CHUNK_BYTES: usize = 64 * 1024;
+const CHUNK_INTERVAL: Duration = Duration::from_millis(20);
 
-    let mut out = Vec::new();
-    let mut room = budget.children;
-    // Once a message's children do not fit, no later message gets any: a
-    // deterministic prefix, rather than an outline where a small message three
-    // screens down happens to have fields and its neighbours do not.
-    //
-    // False from the start when the roots took everything, so that a document
-    // with more messages than the cap builds no subtree at all rather than one.
-    let mut children_fit = budget.children > 0;
-    for number in lines.into_iter().take(budget.roots) {
-        let Some(line) = snapshot.line(number) else {
-            continue;
-        };
-        // `analyze`, not `cached_analysis`: this walk is whole-document.
-        let analysis = crate::ctx::analyze(&line.bytes, &snapshot.ctx);
-        let Some(message) = analysis.message() else {
-            continue;
-        };
-        let Some(line_end) = ByteOffset::from_len(line.bytes.len()) else {
-            continue;
-        };
-        // All of a message's children or none of them. A message showing three
-        // of its sixty fields says something false about the line; a message
-        // showing none says only that the outline stopped.
-        //
-        // Whether a message's children fit is known only once they are built —
-        // group symbols change the count — so the *first* rejected subtree is
-        // built and dropped. Every later one is not built at all, which is what
-        // makes the degraded path the cheap one it exists to be.
-        let mut outline = tree(
-            &line.bytes,
-            message,
-            wanted,
-            &snapshot.render,
-            line_end,
-            children_fit,
-        );
-        if children_fit {
-            let wanted_children = outline.count() - 1;
-            if wanted_children <= room {
-                room -= wanted_children;
-            } else {
-                children_fit = false;
-                outline.children.clear();
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+/// Classification reads the clock once per this many lines, not on every line.
+const CLOCK_STRIDE: usize = 1024;
+
+fn check_cancel(cancelled: &AtomicBool) -> Result<(), ResponseError> {
+    if cancelled.load(Ordering::Relaxed) {
+        Err(ResponseError {
+            code: ErrorCode::RequestCanceled as i32,
+            message: "document symbols request cancelled".into(),
+            data: None,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// Share of the bar that classification gets. It is cheap beside the build,
+/// so an equal split would fill half the bar at once and then appear to stop.
+const CLASSIFY_SHARE: u64 = 10;
+
+/// Progress through one phase, as that phase's share of the whole bar.
+struct Progress {
+    phase: &'static str,
+    /// Percentage at which the phase starts.
+    base: u64,
+    share: u64,
+    done: u64,
+    of: u64,
+    reported: Instant,
+}
+
+impl Progress {
+    fn classifying(lines: usize) -> Progress {
+        Progress {
+            phase: "Classifying",
+            base: 0,
+            share: CLASSIFY_SHARE,
+            done: 0,
+            of: lines as u64,
+            reported: Instant::now(),
+        }
+    }
+
+    fn build(&mut self, roots: usize) {
+        self.phase = "Building symbols";
+        self.base = CLASSIFY_SHARE;
+        self.share = 100 - CLASSIFY_SHARE;
+        self.done = 0;
+        self.of = roots as u64;
+    }
+
+    fn advance(&mut self, emit: &mut dyn FnMut(BackgroundEvent)) {
+        self.done += 1;
+        self.report(emit);
+    }
+
+    fn report(&mut self, emit: &mut dyn FnMut(BackgroundEvent)) {
+        if self.reported.elapsed() >= PROGRESS_INTERVAL {
+            let within = self.done.saturating_mul(self.share) / self.of.max(1);
+            emit(BackgroundEvent::Progress {
+                // 100 is said once, when the answer is complete.
+                percentage: (self.base + within).min(99) as u32,
+                phase: self.phase,
+            });
+            self.reported = Instant::now();
+        }
+    }
+}
+
+struct Root {
+    number: LineNo,
+    items: usize,
+    /// The root and its subtree, as JSON.
+    encoded: Vec<u8>,
+}
+
+/// The answer as one open JSON array: flushed in chunks when streaming, kept whole otherwise.
+struct Output {
+    streaming: bool,
+    array: Vec<u8>,
+    /// Symbols in `array` since the last flush.
+    items: usize,
+    sent: bool,
+    flushed: Instant,
+}
+
+impl Output {
+    fn new(streaming: bool) -> Self {
+        Self {
+            streaming,
+            array: vec![b'['],
+            items: 0,
+            sent: false,
+            flushed: Instant::now(),
+        }
+    }
+
+    fn flush(&mut self, emit: &mut dyn FnMut(BackgroundEvent)) {
+        if self.items == 0 {
+            return;
+        }
+        self.array.push(b']');
+        emit(BackgroundEvent::Chunk(std::mem::replace(
+            &mut self.array,
+            vec![b'['],
+        )));
+        self.items = 0;
+        self.sent = true;
+        self.flushed = Instant::now();
+    }
+
+    fn push(
+        &mut self,
+        root: Root,
+        cancelled: &AtomicBool,
+        emit: &mut dyn FnMut(BackgroundEvent),
+    ) -> Result<(), ResponseError> {
+        check_cancel(cancelled)?;
+        let separator = usize::from(self.items != 0);
+        if self.streaming
+            && self.items != 0
+            && (self.items + root.items > CHUNK_ITEMS
+                || self.array.len() + separator + root.encoded.len() + 1 > CHUNK_BYTES)
+        {
+            self.flush(emit);
+        }
+        if self.items != 0 {
+            self.array.push(b',');
+        }
+        self.array.extend_from_slice(&root.encoded);
+        self.items += root.items;
+        if self.streaming
+            && (!self.sent
+                || self.items >= CHUNK_ITEMS
+                || self.array.len() + 1 >= CHUNK_BYTES
+                || self.flushed.elapsed() >= CHUNK_INTERVAL)
+        {
+            self.flush(emit);
+        }
+        Ok(())
+    }
+
+    /// The final result: empty when every root went out in a chunk.
+    fn finish(mut self, emit: &mut dyn FnMut(BackgroundEvent)) -> Vec<u8> {
+        if self.streaming {
+            self.flush(emit);
+            return b"[]".to_vec();
+        }
+        self.array.push(b']');
+        self.array
+    }
+}
+
+fn encode(value: &impl Serialize) -> Vec<u8> {
+    serde_json::to_vec(value).expect("a symbol is strings and numbers")
+}
+
+fn affected(first: &mut Option<LineNo>, number: LineNo) {
+    *first = Some(first.map_or(number, |previous| previous.min(number)));
+}
+
+fn enumerate(
+    wanted: &Wanted,
+    snapshot: &Snapshot,
+    cancelled: &AtomicBool,
+    streaming: bool,
+    emit: &mut dyn FnMut(BackgroundEvent),
+) -> BackgroundResult {
+    let started = Instant::now();
+    let mut cache_hits = 0;
+    let mut cache_misses = 0;
+    let mut build_time = Duration::ZERO;
+    let mut serialization = Duration::ZERO;
+    // The schema refuses zero, because a cap of zero cannot hold the marker
+    // it would need; a client that sends one anyway gets the marker.
+    let cap = wanted.max_symbols.max(1);
+    let physical_lines = snapshot.content_lines();
+    let mut progress = Progress::classifying(physical_lines);
+    let mut lines = Vec::with_capacity(physical_lines.min(cap.saturating_add(1)));
+    let mut total = 0;
+    for number in 0..physical_lines {
+        check_cancel(cancelled)?;
+        let number = LineNo::new(number as u32);
+        // Tokenized always: a cache lookup locks the line, and a hit saves little here.
+        if snapshot
+            .line(number)
+            .is_some_and(|line| tokenize(&line.bytes).kind == LineKind::Message)
+        {
+            total += 1;
+            if lines.len() <= cap {
+                lines.push(number);
             }
         }
-
-        // Every offset of the line in one walk: a tree produces many, and
-        // converting them one at a time rescans the line for each.
-        let mut offsets = Vec::new();
-        outline.offsets(&mut offsets);
-        let columns = Columns::of(line, offsets, snapshot.encoding);
-        out.push(outline.to_json(number, &columns));
+        progress.done += 1;
+        if number.index().is_multiple_of(CLOCK_STRIDE) {
+            progress.report(emit);
+        }
     }
-
-    if let Some(omitted) = budget.omitted() {
-        // Sound because `omitted()` is `Some` only when `roots` is below the
-        // number of message lines, so there is a first one it stands for.
-        // Asserted rather than defaulted: a marker on the wrong line is worse
-        // than a loud failure, and dropping it would break "never a bare `[]`".
-        let at = first_omitted.expect("a message the marker stands for");
-        out.push(marker(omitted, at, wanted.kinds.marker));
+    let classification_time = started.elapsed();
+    let budget = Budget::spend(cap, total);
+    let mut omitted = budget.omitted();
+    let mut first_affected = lines.get(budget.roots).copied().filter(|_| omitted != 0);
+    let mut children_omitted = false;
+    let mut room = budget.children;
+    let mut children_fit = room != 0;
+    let mut pending: Option<Root> = None;
+    let mut used = 0;
+    let mut output = Output::new(streaming);
+    progress.build(budget.roots);
+    for number in lines.into_iter().take(budget.roots) {
+        check_cancel(cancelled)?;
+        let building = Instant::now();
+        let root = snapshot.line(number).and_then(|line| {
+            #[cfg(test)]
+            if wanted.skip_line == Some(number) {
+                return None;
+            }
+            let analysis = match line.analysis_if_cached() {
+                Some(analysis) => {
+                    cache_hits += 1;
+                    analysis
+                }
+                None => {
+                    cache_misses += 1;
+                    std::sync::Arc::new(crate::ctx::analyze(&line.bytes, &snapshot.ctx))
+                }
+            };
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+            let message = analysis.message()?;
+            let line_end = ByteOffset::from_len(line.bytes.len())?;
+            let has_children = wanted.depth != SymbolDepth::Messages && !message.fields.is_empty();
+            let mut outline = tree(
+                &line.bytes,
+                message,
+                wanted,
+                &snapshot.render,
+                line_end,
+                children_fit,
+            );
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+            if children_fit {
+                let count = outline.count() - 1;
+                if count <= room {
+                    room -= count;
+                } else {
+                    children_fit = false;
+                    outline.children.clear();
+                }
+            }
+            if has_children && !children_fit {
+                children_omitted = true;
+                affected(&mut first_affected, number);
+            }
+            let items = outline.count();
+            let mut offsets = Vec::new();
+            outline.offsets(&mut offsets);
+            let columns = Columns::of(line, offsets, snapshot.encoding);
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+            let encoding = Instant::now();
+            let encoded = encode(&Node {
+                symbol: &outline,
+                line: number,
+                columns: &columns,
+            });
+            serialization += encoding.elapsed();
+            Some(Root {
+                number,
+                items,
+                encoded,
+            })
+        });
+        build_time += building.elapsed();
+        check_cancel(cancelled)?;
+        if let Some(root) = root {
+            used += root.items;
+            // Retain the last actually produced root, even if a later candidate cannot render.
+            if let Some(previous) = pending.replace(root) {
+                output.push(previous, cancelled, emit)?;
+            }
+        } else {
+            omitted += 1;
+            affected(&mut first_affected, number);
+        }
+        progress.advance(emit);
     }
-    // Only when something was actually left out. Reaching the cap exactly is
-    // not omission, and an empty document has nothing to report.
-    if budget.omitted().is_some() || !children_fit {
-        notices.log(
-            MessageType::Info,
-            &format!(
-                "venue-reader: the outline is truncated at {} symbols; raise \
-                 fix.limits.documentSymbolItems or lower fix.documentSymbol.depth",
-                wanted.max_symbols.max(1),
-            ),
-        );
+    if omitted != 0 || children_omitted {
+        if used == cap {
+            let displaced = pending.take().expect("a full answer has a final root");
+            used -= displaced.items;
+            omitted += 1;
+            affected(&mut first_affected, displaced.number);
+        }
+        if let Some(root) = pending.take() {
+            output.push(root, cancelled, emit)?;
+        }
+        let number = first_affected.expect("omission identifies an affected line");
+        debug_assert!(used < cap);
+        output.push(
+            Root {
+                number,
+                items: 1,
+                encoded: encode(&marker(
+                    omitted,
+                    children_omitted,
+                    number,
+                    wanted.kinds.marker,
+                )),
+            },
+            cancelled,
+            emit,
+        )?;
+        used += 1;
+    } else if let Some(root) = pending.take() {
+        output.push(root, cancelled, emit)?;
     }
-    Ok(Value::Array(out))
+    check_cancel(cancelled)?;
+    let result = output.finish(emit);
+    emit(BackgroundEvent::Progress {
+        percentage: 100,
+        phase: "Symbols generated",
+    });
+    log::debug!(
+        "document symbols phases: classification_ms={:.3} build_ms={:.3} serialization_ms={:.3} total_ms={:.3} cache_hits={} cache_misses={} output_items={}",
+        classification_time.as_secs_f64() * 1000.0,
+        build_time.as_secs_f64() * 1000.0,
+        serialization.as_secs_f64() * 1000.0,
+        started.elapsed().as_secs_f64() * 1000.0,
+        cache_hits, cache_misses, used,
+    );
+    Ok(result)
 }
 
-/// What the budget left out, as a symbol rather than a silence.
-///
-/// Anchored on the first message it stands for — "after the last symbol
-/// emitted" does not exist when the marker is the only thing returned. Its
-/// kind is `String` because it is a line of text rather than a structure, and
-/// because the kinds that would read better are outside the set a client
-/// understands without listing them.
-fn marker(omitted: usize, at: LineNo, kind: SymbolKind) -> Value {
+fn marker(omitted: usize, children: bool, at: LineNo, kind: SymbolKind) -> Value {
     let empty = json!({ "line": at, "character": 0 });
     let range = json!({ "start": empty, "end": empty });
     json!({
-        "name": symbol::truncated(omitted),
+        "name": symbol::truncated(omitted, children),
         "kind": kind,
         "range": range,
         "selectionRange": range,
@@ -304,29 +557,67 @@ impl Symbol {
             child.offsets(out);
         }
     }
+}
 
-    fn to_json(&self, line: LineNo, columns: &Columns) -> Value {
-        let span = |range: &Range<ByteOffset>| {
-            json!({
-                "start": { "line": line, "character": columns.at(range.start) },
-                "end": { "line": line, "character": columns.at(range.end) },
-            })
+/// A symbol as the wire wants it, written without a `Value` tree between.
+///
+/// Keys go out sorted, as a `serde_json::Value` writes them.
+struct Node<'a> {
+    symbol: &'a Symbol,
+    line: LineNo,
+    columns: &'a Columns,
+}
+
+#[derive(serde::Serialize)]
+struct Position {
+    character: Column,
+    line: LineNo,
+}
+
+#[derive(serde::Serialize)]
+struct Span {
+    end: Position,
+    start: Position,
+}
+
+impl Node<'_> {
+    fn span(&self, range: &Range<ByteOffset>) -> Span {
+        let position = |byte| Position {
+            character: self.columns.at(byte),
+            line: self.line,
         };
-        let mut node = json!({
-            "name": self.name,
-            "kind": self.kind,
-            "range": span(&self.range),
-            "selectionRange": span(&self.selection),
-        });
-        if !self.children.is_empty() {
-            node["children"] = Value::Array(
-                self.children
-                    .iter()
-                    .map(|child| child.to_json(line, columns))
-                    .collect(),
-            );
+        Span {
+            end: position(range.end),
+            start: position(range.start),
         }
-        node
+    }
+}
+
+impl Serialize for Node<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let symbol = self.symbol;
+        let mut map = serializer.serialize_map(None)?;
+        if !symbol.children.is_empty() {
+            map.serialize_entry("children", &Children(self))?;
+        }
+        map.serialize_entry("kind", &symbol.kind)?;
+        map.serialize_entry("name", &symbol.name)?;
+        map.serialize_entry("range", &self.span(&symbol.range))?;
+        map.serialize_entry("selectionRange", &self.span(&symbol.selection))?;
+        map.end()
+    }
+}
+
+struct Children<'a>(&'a Node<'a>);
+
+impl Serialize for Children<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let parent = self.0;
+        serializer.collect_seq(parent.symbol.children.iter().map(|symbol| Node {
+            symbol,
+            line: parent.line,
+            columns: parent.columns,
+        }))
     }
 }
 
@@ -523,7 +814,7 @@ mod tests {
     #[cfg(not(feature = "bench-no-line-cache"))]
     use crate::server::testing::cached;
     use crate::server::testing::heartbeats;
-    use crate::server::testing::{answered, answered_with, state_with, HEARTBEAT};
+    use crate::server::testing::{answered, state_with, HEARTBEAT};
 
     /// Two parties, the first carrying a nested sub-ID group: every shape the
     /// outline can produce, on one line.
@@ -710,12 +1001,23 @@ mod tests {
     /// A heartbeat is eight fields, so nine symbols with its message row.
     const PER_HEARTBEAT: usize = 9;
 
-    /// The answer and whatever the handler said while producing it.
-    fn under_cap(text: &str, cap: usize) -> (Value, Vec<(lsp_types::MessageType, String)>) {
+    fn under_cap(text: &str, cap: usize) -> Value {
         let (mut state, uri) = state_with(text);
         state.config.base.limits.document_symbol_items = cap;
         super::super::testing::reconfigure(&mut state);
-        answered_with(state.document_symbol_task_prepared(request(&uri)))
+        answered(state.document_symbol_task_prepared(request(&uri)))
+    }
+
+    /// The whole answer, not streamed.
+    fn enumerated(wanted: &Wanted, snapshot: &Snapshot) -> Result<Value, ResponseError> {
+        enumerate(
+            wanted,
+            snapshot,
+            &AtomicBool::new(false),
+            false,
+            &mut |_| {},
+        )
+        .map(|bytes| serde_json::from_slice(&bytes).expect("a JSON answer"))
     }
 
     fn rows(answer: &Value) -> usize {
@@ -736,14 +1038,13 @@ mod tests {
     /// of the first messages eat the cap and the answer is truncated from the
     /// middle of a document where every message alone would have fitted.
     #[test]
-    fn every_message_is_answered_when_the_messages_alone_fit() {
-        let (answer, said) = under_cap(&heartbeats(3), 3);
-        assert_eq!(rows(&answer), 3, "three messages, no marker");
+    fn the_last_root_gives_its_slot_to_a_child_omission_marker() {
+        let answer = under_cap(&heartbeats(3), 3);
+        assert_eq!(rows(&answer), 3, "two messages and a marker");
         assert_eq!(symbols(&answer), 3, "and no room left for a single field");
         assert_eq!(
-            said.len(),
-            1,
-            "the children that were dropped are said once"
+            answer[2]["name"],
+            "… 1 more messages; some fields/groups omitted"
         );
     }
 
@@ -752,7 +1053,7 @@ mod tests {
     #[test]
     fn children_are_dropped_per_message_and_never_by_half() {
         // Room for one message's children and one item over.
-        let (answer, _) = under_cap(&heartbeats(2), 2 + PER_HEARTBEAT - 1 + 1);
+        let answer = under_cap(&heartbeats(2), 2 + PER_HEARTBEAT - 1 + 1);
         let rows = answer.as_array().expect("an array");
         assert_eq!(
             rows[0]["children"].as_array().map(Vec::len),
@@ -768,16 +1069,14 @@ mod tests {
 
     #[test]
     fn a_complete_answer_says_nothing() {
-        let (answer, said) = under_cap(&heartbeats(3), 3 * PER_HEARTBEAT);
+        let answer = under_cap(&heartbeats(3), 3 * PER_HEARTBEAT);
         assert_eq!(symbols(&answer), 3 * PER_HEARTBEAT, "an exact fit");
-        assert!(said.is_empty(), "nothing was left out: {said:?}");
     }
 
     #[test]
     fn an_empty_document_is_not_something_to_report() {
-        let (answer, said) = under_cap("# just a comment\n", 50);
+        let answer = under_cap("# just a comment\n", 50);
         assert_eq!(answer, json!([]));
-        assert!(said.is_empty(), "{said:?}");
     }
 
     /// Past the cap the answer is a deterministic prefix plus one marker, and
@@ -785,35 +1084,37 @@ mod tests {
     /// over it.
     #[test]
     fn past_the_cap_a_prefix_and_a_marker_that_counts_itself() {
-        let (answer, said) = under_cap(&heartbeats(3), 2);
+        let answer = under_cap(&heartbeats(3), 2);
         assert_eq!(symbols(&answer), 2, "one message and the marker");
         let rows = answer.as_array().expect("an array");
-        assert_eq!(rows[1]["name"], "… 2 more messages");
         assert_eq!(
-            rows[1]["range"]["start"]["line"], 1,
-            "anchored on the first message it stands for"
+            rows[1]["name"],
+            "… 2 more messages; some fields/groups omitted"
         );
-        assert_eq!(said.len(), 1);
+        assert_eq!(
+            rows[1]["range"]["start"]["line"], 0,
+            "anchored on the earliest omitted children"
+        );
     }
 
     /// A cap of one leaves no room for a root at all, so the marker stands for
     /// every message. The schema refuses zero for the same reason.
     #[test]
     fn a_cap_of_one_is_the_marker_alone() {
-        let (answer, _) = under_cap(&heartbeats(3), 1);
+        let answer = under_cap(&heartbeats(3), 1);
         assert_eq!(rows(&answer), 1);
         assert_eq!(answer[0]["name"], "… 3 more messages");
 
         let (mut state, uri) = state_with(&heartbeats(3));
         let snapshot = state.snapshot_for(&uri).expect("ready");
-        let zero = super::answer(
+        let zero = enumerated(
             &Wanted {
                 depth: SymbolDepth::Full,
                 kinds: Kinds::for_client(false),
                 max_symbols: 0,
+                skip_line: None,
             },
             &snapshot,
-            &mut Notices::collecting(),
         )
         .expect("defensive zero bound");
         assert_eq!(zero, answer, "a zero that arrives anyway is treated as one");
@@ -824,13 +1125,12 @@ mod tests {
     #[test]
     fn lines_that_are_not_messages_do_not_spend_the_budget() {
         let text = format!("{}\n# a comment\n{}", HEARTBEAT, HEARTBEAT);
-        let (answer, said) = under_cap(&text, 2);
-        assert_eq!(rows(&answer), 2, "two messages, no marker");
+        let answer = under_cap(&text, 2);
+        assert_eq!(rows(&answer), 2, "one message and a marker");
         assert!(
             answer.as_array().expect("an array")[1]["name"] != "… 1 more messages",
             "the comment was not counted as an omitted message"
         );
-        assert_eq!(said.len(), 1, "only the children were dropped");
     }
 
     #[test]
@@ -847,5 +1147,124 @@ mod tests {
             answered(state.document_symbol_task_prepared(request(&uri))),
             json!([])
         );
+    }
+
+    #[cfg(not(feature = "bench-no-line-cache"))]
+    #[test]
+    fn warmed_analyses_are_reused_without_populating_or_refreshing_marks() {
+        let (mut state, uri) = state_with(&heartbeats(3));
+        let snapshot = state.snapshot_for(&uri).expect("ready");
+        let wanted = Wanted {
+            depth: SymbolDepth::Full,
+            kinds: Kinds::for_client(false),
+            max_symbols: 100,
+            skip_line: None,
+        };
+        let cold = enumerated(&wanted, &snapshot).unwrap();
+        let warmed = snapshot.analysis(snapshot.line(LineNo::new(0)).unwrap());
+        let document = state.docs.get(&uri).unwrap();
+        assert_eq!(
+            document.evict_over(0),
+            0,
+            "first sweep clears the existing use mark"
+        );
+        let warm = enumerated(&wanted, &snapshot).unwrap();
+        assert_eq!(cold, warm);
+        assert_eq!(cached(&mut state, &uri), vec![true, false, false]);
+        assert!(std::sync::Arc::ptr_eq(
+            &warmed,
+            &snapshot
+                .line(LineNo::new(0))
+                .unwrap()
+                .analysis_if_cached()
+                .unwrap()
+        ));
+        assert_eq!(
+            state.docs.get(&uri).unwrap().evict_over(0),
+            1,
+            "enumeration did not refresh the use mark"
+        );
+        assert!(cached(&mut state, &uri).iter().all(|present| !present));
+        let old_analysis = snapshot.analysis(snapshot.line(LineNo::new(0)).unwrap());
+        state
+            .docs
+            .get_mut(&uri)
+            .unwrap()
+            .set_ctx(crate::ctx::Ctx::for_test("FIX.4.2"));
+        assert!(state.docs.get(&uri).unwrap().lines[0]
+            .analysis_if_cached()
+            .is_none());
+        let old_view = enumerated(&wanted, &snapshot).unwrap();
+        assert_eq!(
+            old_view, cold,
+            "old snapshot retains its own lines and context"
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &old_analysis,
+            &snapshot
+                .line(LineNo::new(0))
+                .unwrap()
+                .analysis_if_cached()
+                .unwrap()
+        ));
+    }
+
+    /// The view writes keys in the order a `Value` does, so no client sees new bytes.
+    #[test]
+    fn the_encoded_answer_matches_a_value_byte_for_byte() {
+        let (mut state, uri) = state_with(PARTIES);
+        let snapshot = state.snapshot_for(&uri).expect("ready");
+        let wanted = Wanted {
+            depth: SymbolDepth::Full,
+            kinds: Kinds::for_client(true),
+            max_symbols: 100,
+            skip_line: None,
+        };
+        let encoded = enumerate(
+            &wanted,
+            &snapshot,
+            &AtomicBool::new(false),
+            false,
+            &mut |_| {},
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&encoded).unwrap();
+        let fields = value[0]["children"].as_array().expect("fields");
+        assert!(
+            fields.iter().any(|field| field["children"].is_array()),
+            "nested"
+        );
+        assert_eq!(encoded, serde_json::to_vec(&value).unwrap());
+    }
+
+    #[test]
+    fn an_unrenderable_final_candidate_frees_its_slot_without_retraction() {
+        let (mut state, uri) = state_with(&heartbeats(3));
+        let snapshot = state.snapshot_for(&uri).expect("ready");
+        let wanted = Wanted {
+            depth: SymbolDepth::Messages,
+            kinds: Kinds::for_client(false),
+            max_symbols: 3,
+            skip_line: Some(LineNo::new(2)),
+        };
+        let mut chunks = Vec::new();
+        let final_result = enumerate(
+            &wanted,
+            &snapshot,
+            &AtomicBool::new(false),
+            true,
+            &mut |event| {
+                if let BackgroundEvent::Chunk(bytes) = event {
+                    chunks.extend(serde_json::from_slice::<Vec<Value>>(&bytes).unwrap());
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(final_result, b"[]");
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0]["range"]["start"]["line"], 0);
+        assert_eq!(chunks[1]["range"]["start"]["line"], 1);
+        assert_eq!(chunks[2]["name"], "… 1 more messages");
+        assert_eq!(chunks[2]["range"]["start"]["line"], 2);
     }
 }

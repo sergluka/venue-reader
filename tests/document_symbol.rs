@@ -1,12 +1,8 @@
-//! `textDocument/documentSymbol` through the protocol.
-//!
-//! What the in-crate tests cannot see: the wire shape a client actually
-//! receives, and the `window/logMessage` the server sends *before* the task
-//! runs — which is where every limit in this server is decided.
+//! `textDocument/documentSymbol` through the generic LSP transport.
 
 mod harness;
 
-use harness::TestClient;
+use harness::{nesting_client, TestClient};
 use serde_json::{json, Value};
 
 const URI: &str = "file:///a.fix";
@@ -16,16 +12,6 @@ const PARTIES: &str = concat!(
     "8=FIX.4.4|35=D|453=2|448=A|447=D|452=1|802=1|523=S1|803=1",
     "|448=B|447=D|452=2|54=1"
 );
-
-fn nesting_client() -> Value {
-    json!({
-        "general": { "positionEncodings": ["utf-8"] },
-        "textDocument": { "documentSymbol": {
-            "hierarchicalDocumentSymbolSupport": true,
-            "symbolKind": { "valueSet": (1..=26).collect::<Vec<i32>>() },
-        }},
-    })
-}
 
 fn open_with(capabilities: Value, text: &str) -> TestClient {
     let mut client = TestClient::start();
@@ -152,18 +138,21 @@ fn a_client_without_nesting_is_offered_no_provider() {
 fn a_client_that_takes_nesting_is_offered_the_provider() {
     let mut client = TestClient::start();
     let result = client.initialize_caps(nesting_client());
-    assert_eq!(result["capabilities"]["documentSymbolProvider"], true);
+    assert_eq!(
+        result["capabilities"]["documentSymbolProvider"]["workDoneProgress"],
+        true
+    );
     client.shutdown();
 }
 
 /// Past the budget: a deterministic prefix, one marker that counts itself, and
-/// one log naming the setting.
+/// no duplicate truncation log.
 #[test]
 fn past_the_budget_the_answer_says_what_it_left_out() {
     let mut client = TestClient::start();
     client.initialize_with(json!({
         "capabilities": nesting_client(),
-        "initializationOptions": { "fix": { "limits": { "documentSymbolItems": 2 } } },
+        "initializationOptions": { "fix": { "documentSymbol": { "depth": "messages" }, "limits": { "documentSymbolItems": 2 } } },
     }));
     let heartbeat = "8=FIX.4.4|9=57|35=0|34=1|49=CLIENT1|56=BROKER1|10=171|";
     client.did_open(URI, &[heartbeat; 3].join("\n"), 1);
@@ -177,12 +166,15 @@ fn past_the_budget_the_answer_says_what_it_left_out() {
     );
 
     let said = client.drain_notifications(std::time::Duration::from_millis(50));
-    let logged = said
-        .iter()
-        .find(|(method, _)| method == "window/logMessage")
-        .map(|(_, params)| params["message"].as_str().unwrap_or_default().to_owned())
-        .expect("the cap is reported");
-    assert!(logged.contains("documentSymbolItems"), "{logged}");
+    assert!(
+        !said
+            .iter()
+            .any(|(method, params)| method == "window/logMessage"
+                && params["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("outline is truncated"))),
+        "the symbol marker is the truncation notice: {said:?}"
+    );
     client.shutdown();
 }
 

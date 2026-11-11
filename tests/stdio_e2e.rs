@@ -619,3 +619,76 @@ fn fatal_configuration_with_pending_commands_exits_even_if_responses_are_not_flu
         }
     }
 }
+
+#[test]
+fn document_symbol_chunks_preserve_encoded_unicode_and_oversized_roots_over_stdio() {
+    let mut client = StdioClient::start("symbol-chunks", None, None);
+    let value = "SYNTHETIC_\"\\🙂".repeat(10_000);
+    let text = format!("8=FIX.4.4|35=0|\n8=FIX.4.4|35=0|58={value}|\n8=FIX.4.4|35=0|");
+    let uri = client.write_workspace("synthetic.fix", text.as_bytes());
+    let initialized = client.request(
+        "initialize",
+        json!({
+            "rootUri": client.root_uri(),
+            "capabilities": {
+                "general": {"positionEncodings": ["utf-8"]},
+                "textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}}
+            },
+            "initializationOptions": {"fix": {"diagnostics": {"enabled": false}}}
+        }),
+    );
+    assert_eq!(
+        initialized["capabilities"]["documentSymbolProvider"]["workDoneProgress"],
+        true
+    );
+    client.notify("initialized", json!({}));
+    client.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {
+            "uri": uri, "languageId": "fix", "version": 1, "text": text
+        }}),
+    );
+    client.request(
+        "workspace/executeCommand",
+        json!({"command": "fix.describeOverrides", "arguments": [uri]}),
+    );
+    let identifier = json!(10_000);
+    client.send_value(&json!({"jsonrpc": "2.0", "id": identifier, "method": "textDocument/documentSymbol", "params": {
+        "textDocument": {"uri": uri}, "partialResultToken": "synthetic-result", "workDoneToken": "synthetic-work"
+    }}));
+    let first =
+        client.wait_for_notification("$/progress", |params| params["token"] == "synthetic-result");
+    assert_eq!(first["value"].as_array().expect("first array").len(), 1);
+    assert_eq!(first["value"][0]["range"]["start"]["line"], 0);
+    let response = client.response(&identifier);
+    assert_eq!(response["result"], json!([]));
+    assert!(response.get("error").is_none());
+    assert!(client.shutdown_and_exit().success());
+    let mut chunks = vec![first["value"].clone()];
+    let mut progress = Vec::new();
+    for message in client.received_after_exit() {
+        if message["method"] == "$/progress" {
+            if message["params"]["token"] == "synthetic-result" {
+                chunks.push(message["params"]["value"].clone());
+            } else if message["params"]["token"] == "synthetic-work" {
+                progress.push(message["params"]["value"].clone());
+            }
+        }
+    }
+    assert_eq!(progress.first().expect("begin")["kind"], "begin");
+    assert_eq!(progress.last().expect("end")["kind"], "end");
+    let roots: Vec<_> = chunks
+        .iter()
+        .flat_map(|chunk| chunk.as_array().expect("chunk array").iter())
+        .collect();
+    assert_eq!(roots.len(), 3);
+    assert_eq!(
+        roots[1]["children"][2]["name"],
+        format!("Text (58) = {value}")
+    );
+    let oversized = chunks
+        .iter()
+        .find(|chunk| serde_json::to_vec(chunk).expect("JSON").len() > 64 * 1024)
+        .expect("large chunk");
+    assert_eq!(oversized.as_array().expect("large array").len(), 1);
+}

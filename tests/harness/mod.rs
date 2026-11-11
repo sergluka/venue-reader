@@ -29,6 +29,17 @@ pub const CONTENT_MODIFIED: i32 = -32801;
 pub const INVALID_PARAMS: i32 = -32602;
 pub const REQUEST_FAILED: i32 = -32803;
 
+/// Client capabilities that take a nested outline with every symbol kind.
+pub fn nesting_client() -> Value {
+    json!({
+        "general": { "positionEncodings": ["utf-8"] },
+        "textDocument": { "documentSymbol": {
+            "hierarchicalDocumentSymbolSupport": true,
+            "symbolKind": { "valueSet": (1..=26).collect::<Vec<i32>>() },
+        }},
+    })
+}
+
 /// A message with BodyLength(9) and CheckSum(10) computed apart from the
 /// integrity repair of the server. `|` stands for SOH.
 pub fn frame(begin: &str, body: &str) -> String {
@@ -277,8 +288,8 @@ impl TestClient {
             .unwrap();
     }
 
-    /// Keep unmatched responses so a FIFO barrier can expose duplicate replies.
-    pub fn responses_through_barrier(&mut self, barrier: &RequestId) -> Vec<Response> {
+    /// Collect responses until `done` accepts one; other messages stay pending.
+    fn responses_until(&mut self, mut done: impl FnMut(&Response) -> bool) -> Vec<Response> {
         let mut responses = Vec::new();
         loop {
             match self
@@ -288,7 +299,7 @@ impl TestClient {
                 .expect("response within 10s")
             {
                 Message::Response(response) => {
-                    let reached = &response.id == barrier;
+                    let reached = done(&response);
                     responses.push(response);
                     if reached {
                         return responses;
@@ -298,6 +309,23 @@ impl TestClient {
                 Message::Request(request) => self.pending_requests.push(request),
             }
         }
+    }
+
+    /// Keep unmatched responses so a FIFO barrier can expose duplicate replies.
+    pub fn responses_through_barrier(&mut self, barrier: &RequestId) -> Vec<Response> {
+        self.responses_until(|response| &response.id == barrier)
+    }
+
+    /// Collect asynchronous responses without assuming request completion order.
+    pub fn responses_for(&mut self, expected: &[RequestId]) -> Vec<Response> {
+        let mut outstanding = expected.to_vec();
+        if outstanding.is_empty() {
+            return Vec::new();
+        }
+        self.responses_until(|response| {
+            outstanding.retain(|identifier| identifier != &response.id);
+            outstanding.is_empty()
+        })
     }
 
     /// `initialize` with arbitrary params (root, initializationOptions, …), then
