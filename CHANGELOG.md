@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0] - 2026-11-11
+
+### Added
+
+- stream document symbols without blocking requests
+
+### Breaking changes
+
+- add structured summaries and compact template expressions **Breaking change.**
+
+### Fixed
+
+- wait for initial configuration across requests
 ## [0.2.0] - 2026-11-03
 
 ### Added
