@@ -13,16 +13,17 @@
 //! here would agree with the server whatever the server sent.
 
 use lsp_types::{
-    CancelNotification, CodeActionRequest, CodeLensRefreshRequest, CodeLensRequest,
-    CodeLensResolveRequest, ConfigurationRequest, DidChangeConfigurationNotification,
-    DidChangeTextDocumentNotification, DidChangeWorkspaceFoldersNotification,
-    DidCloseTextDocumentNotification, DidOpenTextDocumentNotification, DocumentSymbolRequest,
-    ExecuteCommandRequest, ExitNotification, HoverRequest, InitializeRequest,
-    InitializedNotification, InlayHintRefreshRequest, InlayHintRequest, InlayHintResolveRequest,
-    LogMessageNotification, Notification as _, ProgressNotification,
-    PublishDiagnosticsNotification, Request as _, SelectionRangeRequest,
-    SemanticTokensDeltaRequest, SemanticTokensRangeRequest, SemanticTokensRefreshRequest,
-    SemanticTokensRequest, SetTraceNotification, ShowMessageNotification, ShutdownRequest,
+    CancelNotification, CodeActionRequest, CodeActionResolveRequest, CodeLensRefreshRequest,
+    CodeLensRequest, CodeLensResolveRequest, ConfigurationRequest,
+    DidChangeConfigurationNotification, DidChangeTextDocumentNotification,
+    DidChangeWorkspaceFoldersNotification, DidCloseTextDocumentNotification,
+    DidOpenTextDocumentNotification, DocumentSymbolRequest, ExecuteCommandRequest,
+    ExitNotification, HoverRequest, InitializeRequest, InitializedNotification,
+    InlayHintRefreshRequest, InlayHintRequest, InlayHintResolveRequest, LogMessageNotification,
+    Notification as _, ProgressNotification, PublishDiagnosticsNotification, Request as _,
+    SelectionRangeRequest, SemanticTokensDeltaRequest, SemanticTokensRangeRequest,
+    SemanticTokensRefreshRequest, SemanticTokensRequest, SetTraceNotification,
+    ShowMessageNotification, ShutdownRequest, WorkDoneProgressCancelNotification,
     WorkDoneProgressCreateRequest,
 };
 
@@ -30,6 +31,7 @@ pub const INITIALIZE: &str = InitializeRequest::METHOD.as_str();
 pub const SHUTDOWN: &str = ShutdownRequest::METHOD.as_str();
 pub const HOVER: &str = HoverRequest::METHOD.as_str();
 pub const CODE_ACTION: &str = CodeActionRequest::METHOD.as_str();
+pub const CODE_ACTION_RESOLVE: &str = CodeActionResolveRequest::METHOD.as_str();
 pub const CODE_LENS: &str = CodeLensRequest::METHOD.as_str();
 pub const INLAY_HINT: &str = InlayHintRequest::METHOD.as_str();
 pub const INLAY_HINT_RESOLVE: &str = InlayHintResolveRequest::METHOD.as_str();
@@ -55,6 +57,7 @@ pub const DID_OPEN: &str = DidOpenTextDocumentNotification::METHOD.as_str();
 pub const DID_CHANGE: &str = DidChangeTextDocumentNotification::METHOD.as_str();
 pub const DID_CLOSE: &str = DidCloseTextDocumentNotification::METHOD.as_str();
 pub const CANCEL_REQUEST: &str = CancelNotification::METHOD.as_str();
+pub const PROGRESS_CANCEL: &str = WorkDoneProgressCancelNotification::METHOD.as_str();
 pub const SET_TRACE: &str = SetTraceNotification::METHOD.as_str();
 pub const PROGRESS: &str = ProgressNotification::METHOD.as_str();
 pub const PUBLISH_DIAGNOSTICS: &str = PublishDiagnosticsNotification::METHOD.as_str();

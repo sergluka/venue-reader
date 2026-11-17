@@ -17,6 +17,10 @@ pub(super) struct Progress {
 }
 
 impl Progress {
+    pub fn token(&self) -> &ProgressToken {
+        &self.token
+    }
+
     /// Announce the work under a token the client already knows.
     pub fn begin(
         sender: &Sink,

@@ -132,6 +132,7 @@ impl ServerState {
             snapshot,
             work_done: params.work_done_progress_params.work_done_token,
             partial,
+            repair_range_lines: None,
             run: Box::new(move |snapshot, cancelled, emit| {
                 enumerate(&wanted, snapshot, cancelled, streaming, emit)
             }),

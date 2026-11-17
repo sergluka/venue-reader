@@ -56,6 +56,14 @@ impl ServerState {
         // The group overlay covers ranges the member fields already carry, so a
         // client that does not render overlap gets the fields alone.
         self.client.overlaps_tokens = capabilities::overlaps_tokens(&caps);
+        self.client.takes_actions = capabilities::offers_code_actions(&caps);
+        self.client.defers_action_edits = capabilities::defers_action_edits(&caps);
+        self.client.disabled_actions = caps
+            .text_document
+            .as_ref()
+            .and_then(|doc| doc.code_action.as_ref())
+            .and_then(|action| action.disabled_support)
+            .unwrap_or(false);
         // Read by truth rather than by presence: a client that sends `false` is
         // refusing, not staying silent.
         self.client.prefers_actions = caps

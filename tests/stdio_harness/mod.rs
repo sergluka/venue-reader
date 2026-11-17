@@ -390,6 +390,16 @@ impl StdioClient {
         })
     }
 
+    /// Messages received before a freshly sent request's response.
+    pub fn response_collecting(&mut self, request_id: &Value) -> (Value, Vec<Value>) {
+        assert!(self
+            .pending
+            .iter()
+            .all(|message| message.get("id") != Some(request_id)));
+        let response = self.response(request_id);
+        (response, std::mem::take(&mut self.pending))
+    }
+
     pub fn stderr(&self) -> String {
         String::from_utf8_lossy(&self.stderr.lock().expect("stderr lock")).into_owned()
     }

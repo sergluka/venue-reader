@@ -94,6 +94,17 @@ follows is what is easy to get wrong here and not visible from any one file.
   no cached line. A rule that needs
   something the analysis does not carry is a signal to re-read the analysis,
   not to widen the rule.
+- **Every diagnostic cause must declare repairability explicitly.** Exhaustively
+  classify typed causes, including resolution issues, as automatically repairable
+  or requiring judgment with a reason. No wildcard or default may hide a new cause.
+  Keep causes local to rules; shared diagnostics carry a code and explicit
+  fixability, never a closed enum of all built-in causes.
+  Register safe repair providers once through the shared rule contract: range
+  quickfix and source.fixAll must discover them automatically. Never add a second
+  fix-all allowlist. Document eligibility, dependencies and termination; disabled
+  dependencies never run and do not disable other repairs. Test each provider
+  through aggregate repair, including unsafe input and disabled rules. A successful
+  candidate parse alone does not establish that the original meaning was preserved.
 - **Background results reach the client only through the main loop.** The
   diagnostics worker walks and reports back; the loop checks the document is
   still open and the generation still current, then sends. This is what makes a

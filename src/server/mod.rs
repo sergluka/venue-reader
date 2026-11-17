@@ -42,7 +42,7 @@ use lsp_server::{
     Connection, ErrorCode, Message, Notification, ReqQueue, Request, RequestId, Response,
     ResponseError,
 };
-use lsp_types::{LogMessageParams, MarkupKind, MessageType, Uri};
+use lsp_types::{LogMessageParams, MarkupKind, MessageType, Uri, WorkDoneProgressCancelParams};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -67,6 +67,9 @@ pub enum OutgoingRequest {
     /// may not be used until the client has agreed to it.
     ProgressCreate {
         uri: Uri,
+        generation: u64,
+    },
+    BackgroundProgressCreate {
         generation: u64,
     },
     /// `workspace/*/refresh`: the client is asked to re-request a channel
@@ -244,6 +247,9 @@ pub(super) struct ClientSupport {
     /// Whether overlapping semantic tokens can be rendered.
     pub overlaps_tokens: bool,
     pub summary_tokens: bool,
+    pub takes_actions: bool,
+    pub defers_action_edits: bool,
+    pub disabled_actions: bool,
     /// Whether code actions may be marked as preferred.
     pub prefers_actions: bool,
 }
@@ -262,6 +268,9 @@ impl Default for ClientSupport {
             refreshes_semantic_tokens: false,
             overlaps_tokens: false,
             summary_tokens: false,
+            takes_actions: false,
+            defers_action_edits: false,
+            disabled_actions: false,
             prefers_actions: false,
         }
     }
@@ -480,6 +489,7 @@ impl ServerState {
             method::INITIALIZE => Dispatched::Now(Ok(self.on_initialize(&req.params))),
             method::INLAY_HINT_RESOLVE => self.inlay_hint_resolve_task(&req.params),
             method::CODE_LENS_RESOLVE => self.code_lens_resolve_task(&req.params),
+            method::CODE_ACTION_RESOLVE => self.code_action_resolve_task_owned(req.params.clone()),
             other => Dispatched::Now(Err(lsp_server::ResponseError {
                 code: ErrorCode::MethodNotFound as i32,
                 message: format!("unhandled method: {other}"),
@@ -507,6 +517,9 @@ impl ServerState {
             }
             OutgoingRequest::ProgressCreate { uri, generation } => {
                 self.on_progress_created(&uri, generation, resp.response_result.is_ok());
+            }
+            OutgoingRequest::BackgroundProgressCreate { generation } => {
+                self.on_background_progress_created(generation, resp.response_result.is_ok());
             }
         }
     }
@@ -549,6 +562,14 @@ impl ServerState {
             method::DID_CHANGE => self.on_did_change(note.params),
             method::DID_CLOSE => self.on_did_close(note.params),
             method::CANCEL_REQUEST => self.on_cancel(note.params),
+            method::PROGRESS_CANCEL => {
+                if let Some(params) = from_params::<WorkDoneProgressCancelParams>(
+                    method::PROGRESS_CANCEL,
+                    note.params,
+                ) {
+                    self.cancel_background_progress(params.token);
+                }
+            }
             method::SET_TRACE => self.on_set_trace(note.params),
             _ => {}
         }
@@ -558,7 +579,10 @@ impl ServerState {
         let Some(params) = from_params::<CancelParams>(method::CANCEL_REQUEST, params) else {
             return;
         };
-        let id: RequestId = params.id;
+        self.cancel_request(params.id);
+    }
+
+    fn cancel_request(&mut self, id: RequestId) {
         self.pending_requests.remove(&id);
         self.cancel_background(&id);
         if let Some(resp) = self.req_queue.incoming.cancel(id) {
@@ -760,10 +784,19 @@ mod tests {
             "textDocument": { "codeAction": {
                 "codeActionLiteralSupport": { "codeActionKind": { "valueSet": ["quickfix"] } },
                 "isPreferredSupport": true,
+                "dataSupport": true,
+                "disabledSupport": true,
+                "resolveSupport": {"properties": ["edit"]},
             }},
             "workspace": { "workspaceEdit": { "documentChanges": true } },
         }));
         assert!(state.client.prefers_actions);
+        assert!(state.client.defers_action_edits);
+        assert!(state.client.disabled_actions);
+        assert_eq!(
+            result.pointer("/capabilities/codeActionProvider/resolveProvider"),
+            Some(&json!(true))
+        );
         assert!(result.pointer("/capabilities/codeActionProvider").is_some());
 
         let (state, result) = initialized_with(json!({
@@ -771,6 +804,8 @@ mod tests {
             "workspace": { "workspaceEdit": { "documentChanges": false } },
         }));
         assert!(!state.client.prefers_actions);
+        assert!(!state.client.defers_action_edits);
+        assert!(!state.client.disabled_actions);
         assert_eq!(
             result.pointer("/capabilities/codeActionProvider"),
             None,

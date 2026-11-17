@@ -248,6 +248,8 @@ pub struct BackgroundTask {
     pub work_done: Option<ProgressToken>,
     /// With a token, chunks stream to the client; without one they are dropped.
     pub partial: Option<ProgressToken>,
+    /// Only mixed repair requests depend on the range limit.
+    pub repair_range_lines: Option<usize>,
     pub run: BackgroundRun,
 }
 

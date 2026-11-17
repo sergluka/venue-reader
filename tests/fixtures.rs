@@ -112,11 +112,11 @@ fn a_repaired_line_has_nothing_left_to_repair() {
         assert_ne!(repaired, bytes, "{at}: the repair changed nothing");
 
         let analysis = analyze(&repaired, &ctx);
-        let left: Vec<&str> = rules
+        let left: Vec<_> = rules
             .check(&repaired, &analysis, &INTEGRITY)
             .diags
             .into_iter()
-            .map(|diag| diag.code)
+            .map(|diag| diag.kind.code)
             .collect();
         assert!(
             left.is_empty(),

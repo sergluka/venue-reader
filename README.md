@@ -331,6 +331,12 @@ All rules are enabled by default; use `diagnostics.rules` to disable them or
 change their severity.
 
 A quick fix repairs length and checksum together while preserving the separator.
+The standard `source.fixAll` action repairs all eligible issues across the open
+document. Both actions use the same enabled repair rules; currently these repair
+`BodyLength(9)` and `CheckSum(10)`. The ordinary action menu includes fix-all when
+the client supports resolving edits on selection; listing it does not scan the
+whole document. Clients without that support can explicitly request source
+actions for eager calculation.
 Try changing `BodyLength(9)` to `1` and `CheckSum(10)` to `000` in the Heartbeat
 above to see it in action.
 
@@ -343,13 +349,17 @@ codes, and repair behavior.
 
 Features use the client's advertised capabilities. Document symbols require
 `hierarchicalDocumentSymbolSupport`; flat `SymbolInformation` lists are not
-supported. Quick fixes require code-action literals and versioned document edits.
+supported. Quick fixes and fix-all require code-action literals and versioned
+document edits. Fix-all discovery additionally uses code-action data and lazy-edit
+resolution; clients supporting disabled actions can show why it is unavailable.
 Custom commands return data that the client must display or use.
 
-Requests are bounded to keep large logs usable. By default, code-lens summaries
+Several features limit their output for large logs. By default, code-lens summaries
 stop above 20,000 document lines, and full semantic tokens cover the first
 2,000 lines. Range requests let clients request a smaller part of the document.
 The outline reduces detail when its budget is exhausted; diagnostics are capped.
+Fix-all scans the whole document in the background without truncating repairs at
+these limits. It supports cancellation and does not populate the analysis cache.
 For summaries on larger logs, use inlay hints instead of code lens.
 
 See [LSP reference](https://github.com/sergluka/venue-reader/wiki/LSP-Reference) for capabilities and request

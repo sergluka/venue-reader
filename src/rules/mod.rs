@@ -9,9 +9,14 @@
 //! nowhere else, so a rule never constructs a protocol type.
 
 pub mod integrity;
+pub mod repair;
 pub mod structure;
 pub mod unknown;
 
+#[cfg(test)]
+mod dependency_tests;
+
+use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::sync::LazyLock;
 
@@ -32,11 +37,8 @@ pub const BUILTINS: &[&dyn Rule] = &[
 /// A problem on one line, in bytes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Diag {
-    /// What is wrong: the diagnostic's `code`.
-    pub code: &'static str,
-    /// The rule that reported it — its `diagnostics.rules` key, and the `rule`
-    /// in the diagnostic's `data`. Not the same string as `code`: BodyLength and
-    /// CheckSum are two problems with one cause, one switch and one repair.
+    pub kind: DiagnosticKind,
+    /// The `diagnostics.rules` key; one rule can report multiple causes and codes.
     pub rule: &'static str,
     pub start: ByteOffset,
     pub end: ByteOffset,
@@ -45,6 +47,19 @@ pub struct Diag {
     /// Whole-document consumers keep the first diagnostic for each
     /// `(rule, key)`. Line-scoped consumers need no special cases.
     pub document_key: Option<std::sync::Arc<str>>,
+}
+
+/// Rule-owned diagnostic metadata; new kinds require no shared enum variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticKind {
+    pub code: Cow<'static, str>,
+    pub fixability: Fixability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fixability {
+    Automatic,
+    RequiresJudgment(Cow<'static, str>),
 }
 
 /// One replacement in a line, in bytes. `start == end` is an insertion.
@@ -75,6 +90,18 @@ pub enum Precondition {
     Bound,
 }
 
+impl Precondition {
+    fn holds(self, line: &LineCtx) -> bool {
+        match self {
+            Self::Fields => !line.message.fields.is_empty(),
+            Self::FixMessage => *line
+                .fix_message
+                .get_or_init(|| line.message.first(tag::BEGIN_STRING).is_some()),
+            Self::Bound => *line.bound.get_or_init(|| line.message.is_bound()),
+        }
+    }
+}
+
 /// What a rule sees.
 pub struct LineCtx<'a> {
     pub bytes: &'a [u8],
@@ -85,6 +112,8 @@ pub struct LineCtx<'a> {
     pub labels: Labels<'a>,
     /// Arithmetic shared by integrity value checks, computed once per line.
     integrity: OnceCell<Integrity>,
+    fix_message: OnceCell<bool>,
+    bound: OnceCell<bool>,
 }
 
 impl<'a> LineCtx<'a> {
@@ -95,6 +124,8 @@ impl<'a> LineCtx<'a> {
             selected_version: None,
             labels: Labels::default(),
             integrity: OnceCell::new(),
+            fix_message: OnceCell::new(),
+            bound: OnceCell::new(),
         }
     }
 
@@ -107,10 +138,6 @@ impl<'a> LineCtx<'a> {
     pub fn begin_string(&self) -> Option<&'a str> {
         self.message.first(tag::BEGIN_STRING)?.text(self.bytes)
     }
-
-    fn bound(&self) -> bool {
-        self.message.is_bound()
-    }
 }
 
 pub trait Rule: Sync {
@@ -119,6 +146,7 @@ pub trait Rule: Sync {
     fn id(&self) -> &'static str;
     fn precondition(&self) -> Precondition;
     fn default_severity(&self) -> Severity;
+    fn repair_policy(&self) -> repair::RepairPolicy;
     fn check(&self, ctx: &LineCtx, severity: Severity) -> Vec<Diag>;
 
     /// How many findings `check` would return, without rendering them. Only for
@@ -206,27 +234,37 @@ impl Registry {
         }
     }
 
+    pub fn has_repairs(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|(rule, _)| matches!(rule.repair_policy(), repair::RepairPolicy::Safe(_)))
+    }
+
+    fn line_ctx<'a>(
+        &'a self,
+        bytes: &'a [u8],
+        message: &'a MessageAnalysis,
+        labels: Labels<'a>,
+    ) -> LineCtx<'a> {
+        LineCtx {
+            selected_version: self.selected_version.as_deref(),
+            labels,
+            ..LineCtx::new(bytes, message)
+        }
+    }
+
     /// Empty for a line that is not a message: there is nothing to check.
     pub fn check(&self, bytes: &[u8], analysis: &LineAnalysis, scope: &Scope) -> Checked {
         let mut checked = Checked::default();
         let Some(message) = analysis.message() else {
             return checked;
         };
-        let mut ctx = LineCtx::new(bytes, message);
-        ctx.selected_version = self.selected_version.as_deref();
-        ctx.labels = scope.labels;
-        let is_fix = message.first(tag::BEGIN_STRING).is_some();
-        let bound = OnceCell::new();
+        let ctx = self.line_ctx(bytes, message, scope.labels);
         for (rule, severity) in &self.rules {
             if scope.only.is_some_and(|id| id != rule.id()) {
                 continue;
             }
-            let holds = match rule.precondition() {
-                Precondition::Fields => !message.fields.is_empty(),
-                Precondition::FixMessage => is_fix,
-                Precondition::Bound => *bound.get_or_init(|| ctx.bound()),
-            };
-            if !holds {
+            if !rule.precondition().holds(&ctx) {
                 continue;
             }
             let refused = scope
@@ -261,8 +299,8 @@ pub(crate) mod tests {
     }
 
     /// What each diagnostic says is wrong, not which rule said it.
-    pub(crate) fn codes(line: &str) -> Vec<&'static str> {
-        diags(line).into_iter().map(|d| d.code).collect()
+    pub(crate) fn codes(line: &str) -> Vec<Cow<'static, str>> {
+        diags(line).into_iter().map(|diag| diag.kind.code).collect()
     }
 
     pub(crate) fn repair_of(line: &str) -> Option<Repair> {
@@ -291,6 +329,9 @@ pub(crate) mod tests {
     struct Probe;
 
     impl Rule for Probe {
+        fn repair_policy(&self) -> repair::RepairPolicy {
+            repair::RepairPolicy::DiagnosticOnly
+        }
         fn id(&self) -> &'static str {
             "probe"
         }
@@ -302,7 +343,10 @@ pub(crate) mod tests {
         }
         fn check(&self, ctx: &LineCtx, severity: Severity) -> Vec<Diag> {
             vec![Diag {
-                code: self.id(),
+                kind: DiagnosticKind {
+                    code: self.id().into(),
+                    fixability: Fixability::RequiresJudgment("Synthetic diagnostic".into()),
+                },
                 rule: self.id(),
                 start: ByteOffset::new(0),
                 end: ByteOffset::new(1),
@@ -382,11 +426,12 @@ pub(crate) mod tests {
         assert!(checked
             .diags
             .iter()
-            .any(|diag| diag.code == "unknownVersion"));
+            .any(|diag| diag.kind.code.as_ref() == "unknownVersion"));
         assert!(!checked
             .diags
             .iter()
-            .any(|diag| diag.code == "unknownTag" || diag.code == "unknownMsgType"));
+            .any(|diag| diag.kind.code.as_ref() == "unknownTag"
+                || diag.kind.code.as_ref() == "unknownMsgType"));
     }
 
     #[test]
@@ -530,7 +575,7 @@ pub(crate) mod tests {
         let bad = "8=FIX.4.4|9=7|35=0|34=1|49=A|56=B|10=001|";
         let check_sum = diags_with(bad, &config)
             .into_iter()
-            .find(|d| d.code == "checkSum")
+            .find(|d| d.kind.code.as_ref() == "checkSum")
             .expect("a checkSum diagnostic");
         assert_eq!(check_sum.severity, Severity::Hint);
     }
@@ -552,7 +597,7 @@ pub(crate) mod tests {
         let bad = "8=FIX.4.4|9=7|35=0|34=1|49=A|56=B|10=001|";
         let mut found = diags(bad);
         found.extend(diags("9=0|35=0|10=000|"));
-        let mut codes: Vec<&str> = found.iter().map(|d| d.code).collect();
+        let mut codes: Vec<&str> = found.iter().map(|d| d.kind.code.as_ref()).collect();
         codes.sort_unstable();
         assert_eq!(
             codes,
@@ -577,7 +622,7 @@ pub(crate) mod tests {
         assert_eq!(
             diags_with("8=FIX.9.9|9=0|35=0|10=000|", &config)
                 .into_iter()
-                .map(|d| d.code)
+                .map(|diag| diag.kind.code)
                 .collect::<Vec<_>>(),
             vec!["unknownVersion"],
             "an unrelated rule is untouched"

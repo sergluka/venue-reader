@@ -1,7 +1,7 @@
 //! Document model and incremental synchronisation.
 //!
 //! A document is `Vec<Arc<Line>>`; the line's bytes are the source of truth
-//! (terminators `\n`/`\r\n` are not part of a line). A `didChange` applies its
+//! (terminators are stored separately). A `didChange` applies its
 //! content changes sequentially, then takes the notification's `version` (which
 //! may be non-consecutive); a stale version or a malformed range rejects the
 //! whole notification without mutating anything.
@@ -110,6 +110,7 @@ pub struct Line {
     pub bytes: Arc<[u8]>,
     pub hash: u64,
     pub is_ascii: bool,
+    ending: Ending,
     /// Read since the last sweep. Set by every hit and every population, so a
     /// line has to go unread across two sweeps before it is evicted.
     used: AtomicBool,
@@ -122,12 +123,44 @@ pub struct Line {
 #[cfg(target_os = "linux")]
 const _: () = assert!(std::mem::size_of::<Line>() == 48);
 
+#[derive(Clone, Copy)]
+enum Ending {
+    None,
+    Lf,
+    CrLf,
+    Cr,
+}
+
+impl Ending {
+    fn new(carriage_return: bool, newline: bool) -> Self {
+        match (carriage_return, newline) {
+            (false, false) => Self::None,
+            (false, true) => Self::Lf,
+            (true, true) => Self::CrLf,
+            (true, false) => Self::Cr,
+        }
+    }
+
+    fn has_newline(self) -> bool {
+        matches!(self, Self::Lf | Self::CrLf)
+    }
+
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::None => b"",
+            Self::Lf => b"\n",
+            Self::CrLf => b"\r\n",
+            Self::Cr => b"\r",
+        }
+    }
+}
+
 impl Line {
     /// Takes whatever the caller already holds: splitting a document has a
     /// slice, an edit has the `Vec` it built. Going through a `Vec` when there
     /// is only a slice would allocate and copy twice, because an `Arc<[u8]>`
     /// cannot reuse a `Vec`'s allocation — its header precedes the data.
-    fn new(bytes: impl Into<Arc<[u8]>>) -> Arc<Line> {
+    fn new(bytes: impl Into<Arc<[u8]>>, ending: Ending) -> Arc<Line> {
         let bytes: Arc<[u8]> = bytes.into();
         let hash = xxh3_64(&bytes);
         let is_ascii = bytes.is_ascii();
@@ -135,9 +168,14 @@ impl Line {
             bytes,
             hash,
             is_ascii,
+            ending,
             used: AtomicBool::new(false),
             analysis: Mutex::new(None),
         })
+    }
+
+    pub fn ending(&self) -> &'static [u8] {
+        self.ending.bytes()
     }
 
     /// The same line under a fresh, empty cache. Shares the bytes.
@@ -146,6 +184,7 @@ impl Line {
             bytes: self.bytes.clone(),
             hash: self.hash,
             is_ascii: self.is_ascii,
+            ending: self.ending,
             used: AtomicBool::new(false),
             analysis: Mutex::new(None),
         })
@@ -526,24 +565,33 @@ fn apply_ranged(
 
     let head = &lines[first].bytes[..start_byte];
     let tail = &lines[last].bytes[end_byte..];
-    let mut region = Vec::with_capacity(head.len() + text.len() + tail.len());
+    let ending = lines[last].ending;
+    let mut region =
+        Vec::with_capacity(head.len() + text.len() + tail.len() + ending.bytes().len());
     region.extend_from_slice(head);
     region.extend_from_slice(text);
     region.extend_from_slice(tail);
+    region.extend_from_slice(ending.bytes());
 
     // An edit that neither spans nor introduces a line break rewrites one line;
     // moving the region into it skips the intermediate vector and its copies.
-    if first == last && !region.contains(&b'\n') {
-        // Trimmed the way `split_lines` trims, or an edit that ends a line with
-        // a carriage return would leave bytes `didOpen` of the same text never
-        // produces — a false checksum mismatch, and a stamp that cannot match.
-        let trimmed = region.strip_suffix(b"\r").map_or(region.len(), <[u8]>::len);
-        let mut region = region;
-        region.truncate(trimmed);
-        lines[first] = Line::new(region);
+    if first == last && !text.contains(&b'\n') {
+        let newline = ending.has_newline();
+        if newline {
+            region.pop();
+        }
+        let carriage_return = region.last() == Some(&b'\r');
+        if carriage_return {
+            region.pop();
+        }
+        lines[first] = Line::new(region, Ending::new(carriage_return, newline));
         return Ok(Edited::one(first));
     }
-    let replacement = split_lines(&region);
+    let mut replacement = split_lines(&region);
+    if ending.has_newline() {
+        // The final empty split belongs to the untouched next line.
+        replacement.pop();
+    }
     let grown = replacement.len() as i64 - (last - first + 1) as i64;
     let new_last = first + replacement.len() - 1;
     lines.splice(first..=last, replacement);
@@ -557,10 +605,14 @@ fn apply_ranged(
 /// Split raw bytes into lines on `\n`, stripping a trailing `\r`. Always yields at
 /// least one line (empty input → one empty line; a trailing `\n` → empty last line).
 fn split_lines(bytes: &[u8]) -> Vec<Arc<Line>> {
-    bytes
-        .split(|&b| b == b'\n')
-        .map(|line| Line::new(line.strip_suffix(b"\r").unwrap_or(line)))
-        .collect()
+    let mut parts = bytes.split(|&byte| byte == b'\n').peekable();
+    let mut lines = Vec::new();
+    while let Some(part) = parts.next() {
+        let content = part.strip_suffix(b"\r").unwrap_or(part);
+        let ending = Ending::new(content.len() != part.len(), parts.peek().is_some());
+        lines.push(Line::new(content, ending));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -586,6 +638,13 @@ mod tests {
 
     fn line_bytes(doc: &Document) -> Vec<Vec<u8>> {
         doc.lines.iter().map(|line| line.bytes.to_vec()).collect()
+    }
+
+    fn source_bytes(doc: &Document) -> Vec<u8> {
+        doc.lines
+            .iter()
+            .flat_map(|line| line.bytes.iter().chain(line.ending()).copied())
+            .collect()
     }
 
     fn ctx() -> Arc<Ctx> {
@@ -664,6 +723,55 @@ mod tests {
             line_bytes(&open(b"a\r\nb", 1)),
             vec![b"a".to_vec(), b"b".to_vec()]
         );
+    }
+
+    #[test]
+    fn line_endings_survive_edits_and_context_recycling() {
+        let mut doc = open(b"ab\r\ncd\nef\r\ngh\r", 1);
+        assert_eq!(source_bytes(&doc), b"ab\r\ncd\nef\r\ngh\r");
+        let original = doc.lines.clone();
+        for (version, change, expected) in [
+            (
+                2,
+                ranged(range(0, 1, 1, 1), "x\nY\r\nZ"),
+                "ax\nY\r\nZd\nef\r\ngh\r",
+            ),
+            (3, ranged(range(2, 2, 3, 2), "Q"), "ax\nY\r\nZdQ\r\ngh\r"),
+            (
+                4,
+                ranged(range(3, 1, 3, 2), "I\nJ"),
+                "ax\nY\r\nZdQ\r\ngI\nJ\r",
+            ),
+            (
+                5,
+                ranged(range(1, 1, 1, 1), "\r"),
+                "ax\nY\r\r\nZdQ\r\ngI\nJ\r",
+            ),
+        ] {
+            doc.apply_changes(&[change], version, UTF8).unwrap();
+            assert_eq!(source_bytes(&doc), expected.as_bytes());
+            doc.set_ctx(ctx());
+            assert_eq!(source_bytes(&doc), expected.as_bytes());
+        }
+        assert_eq!(original[0].ending(), b"\r\n");
+        assert_eq!(original[1].ending(), b"\n");
+        assert_eq!(original[3].ending(), b"\r");
+        doc.apply_changes(&[Change::Full(b"a\r\nb\n".to_vec())], 6, UTF8)
+            .unwrap();
+        assert_eq!(source_bytes(&doc), b"a\r\nb\n");
+        assert_eq!(doc.lines.last().unwrap().ending(), b"");
+        assert!(doc
+            .apply_changes(
+                &[
+                    ranged(range(0, 0, 1, 0), ""),
+                    ranged(range(99, 0, 99, 0), "x"),
+                ],
+                7,
+                UTF8,
+            )
+            .is_err());
+        assert_eq!(source_bytes(&doc), b"a\r\nb\n");
+        assert_eq!(doc.version, 6);
     }
 
     #[test]
@@ -789,6 +897,34 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn incremental_preserves_exact_source_bytes(
+            initial in "[a-z\r\n]{0,30}",
+            edits in prop::collection::vec(
+                (0usize..12, 0usize..12, 0usize..12, 0usize..12, "[A-Z\r\n]{0,10}"),
+                1..20,
+            ),
+        ) {
+            let mut expected = initial.into_bytes();
+            let mut doc = open(&expected, 1);
+            prop_assert_eq!(&source_bytes(&doc), &expected);
+            for (index, (start_line, start_ch, end_line, end_ch, text)) in edits.into_iter().enumerate() {
+                let parts: Vec<_> = expected.split(|&byte| byte == b'\n').collect();
+                let first = start_line.min(parts.len() - 1);
+                let last = end_line.min(parts.len() - 1).max(first);
+                let first_len = parts[first].strip_suffix(b"\r").unwrap_or(parts[first]).len();
+                let last_len = parts[last].strip_suffix(b"\r").unwrap_or(parts[last]).len();
+                let start = start_ch.min(first_len);
+                let end = end_ch.min(last_len).max(if first == last { start } else { 0 });
+                let from = parts[..first].iter().map(|part| part.len() + 1).sum::<usize>() + start;
+                let to = parts[..last].iter().map(|part| part.len() + 1).sum::<usize>() + end;
+                let change = ranged(range(first as u32, start as u32, last as u32, end as u32), &text);
+                expected.splice(from..to, text.bytes());
+                doc.apply_changes(&[change], index as i32 + 2, UTF8).unwrap();
+                prop_assert_eq!(&source_bytes(&doc), &expected);
+            }
+        }
+
         #[test]
         fn incremental_equals_fresh_split(
             init in prop::collection::vec("[a-z]{0,4}", 1..5),

@@ -33,17 +33,28 @@ pub fn negotiate_encoding(caps: &ClientCapabilities) -> PositionEncoding {
     }
 }
 
-/// A code action is an edit the client applies. Without literals we could only
-/// send a `Command`, which needs `executeCommand` (Stage 4d); without versioned
-/// edits we would send a repair with no protection against the text having
-/// moved. Either way the honest answer is to advertise nothing.
-fn offers_code_actions(caps: &ClientCapabilities) -> bool {
+/// Repairs require literals and versioned edits.
+pub(super) fn offers_code_actions(caps: &ClientCapabilities) -> bool {
     let literals = caps.text_document.as_ref().is_some_and(|doc| {
         doc.code_action
             .as_ref()
             .is_some_and(|action| action.code_action_literal_support.is_some())
     });
     literals && versioned_edits(caps)
+}
+
+pub(super) fn defers_action_edits(caps: &ClientCapabilities) -> bool {
+    offers_code_actions(caps)
+        && caps
+            .text_document
+            .as_ref()
+            .and_then(|doc| doc.code_action.as_ref())
+            .is_some_and(|action| {
+                action.data_support.unwrap_or(false)
+                    && action.resolve_support.as_ref().is_some_and(|resolve| {
+                        resolve.properties.iter().any(|property| property == "edit")
+                    })
+            })
 }
 
 /// Read by truth rather than by presence: a client that sends `false` is
@@ -188,12 +199,17 @@ pub fn initialize_result(encoding: PositionEncoding, caps: &ClientCapabilities) 
                     .into()
                 },
             ),
-            // No `resolveProvider`: a quickfix carries its edit already, and
-            // `source.fixAll` — the only thing that would be resolved — waits
-            // for the worker pool in Stage 4b.
+            // Resolved actions carry the same versioned edit shape.
             code_action_provider: offers_code_actions(caps).then(|| {
                 CodeActionOptions {
-                    code_action_kinds: Some(vec![CodeActionKind::QuickFix]),
+                    resolve_provider: defers_action_edits(caps).then_some(true),
+                    code_action_kinds: Some(vec![
+                        CodeActionKind::QuickFix,
+                        CodeActionKind::SourceFixAll,
+                    ]),
+                    work_done_progress_options: WorkDoneProgressOptions {
+                        work_done_progress: Some(true),
+                    },
                     ..Default::default()
                 }
                 .into()
@@ -284,10 +300,13 @@ mod tests {
     #[test]
     fn code_actions_are_offered_only_to_a_client_that_can_take_them() {
         let offered = provider(taking_actions()).expect("advertised");
-        assert_eq!(offered["codeActionKinds"], json!(["quickfix"]));
+        assert_eq!(
+            offered["codeActionKinds"],
+            json!(["quickfix", "source.fixAll"])
+        );
         assert!(
             offered.get("resolveProvider").is_none(),
-            "nothing is left unfilled until source.fixAll exists"
+            "edit resolution requires explicit client support"
         );
 
         assert_eq!(
@@ -306,6 +325,37 @@ mod tests {
             "literals, but the edit could not carry a version"
         );
         assert_eq!(provider(json!({})), None);
+    }
+
+    #[test]
+    fn action_resolution_requires_edit_and_data_support() {
+        for (data, properties, expected) in [
+            (None, None, false),
+            (Some(true), None, false),
+            (None, Some(json!(["edit"])), false),
+            (Some(false), Some(json!(["edit"])), false),
+            (Some(true), Some(json!([])), false),
+            (Some(true), Some(json!(["command"])), false),
+            (Some(true), Some(json!(["edit"])), true),
+            (Some(true), Some(json!(["command", "edit"])), true),
+        ] {
+            let mut value = taking_actions();
+            if let Some(data) = data {
+                value["textDocument"]["codeAction"]["dataSupport"] = json!(data);
+            }
+            if let Some(properties) = properties {
+                value["textDocument"]["codeAction"]["resolveSupport"] =
+                    json!({"properties": properties});
+            }
+            let offered = provider(value.clone()).unwrap();
+            assert_eq!(
+                offered.get("resolveProvider"),
+                expected.then_some(&json!(true)),
+                "{value}"
+            );
+            value["workspace"]["workspaceEdit"]["documentChanges"] = json!(false);
+            assert!(!defers_action_edits(&caps(value)));
+        }
     }
 
     /// One shape or the other. A client with the viewport path keeps it and is

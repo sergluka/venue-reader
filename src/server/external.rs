@@ -164,6 +164,8 @@ pub(super) struct ProjectSnapshot {
 /// Committed effective configuration and runtime state for an open document.
 #[derive(Clone)]
 pub(super) struct DocumentConfig {
+    /// Invalidates unresolved repairs when their configuration inputs change.
+    pub repair_generation: u64,
     /// Effective configuration and warnings committed for the document.
     pub resolved: Resolved,
     /// Filesystem-backed state retained for incremental preparation.

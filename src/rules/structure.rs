@@ -2,15 +2,40 @@
 //!
 //! Resolution failures are explicit facts, independent of rule settings.
 
-use super::{Diag, LineCtx, Precondition, Rule};
+use super::{Diag, DiagnosticKind, Fixability, LineCtx, Precondition, Rule};
 use crate::codec::ResolutionIssue;
 use crate::config::Severity;
 use crate::tag;
+
+fn resolution_kind(issue: ResolutionIssue) -> DiagnosticKind {
+    let reason = match issue {
+        ResolutionIssue::MissingBeginString | ResolutionIssue::UnsupportedBeginString => {
+            "Cannot choose protocol identity"
+        }
+        ResolutionIssue::InvalidSelector(_) => "Cannot infer selector value",
+        ResolutionIssue::DuplicateSelector(_) => "Original identity and scope are not certified",
+        ResolutionIssue::MissingApplication | ResolutionIssue::UnregisteredApplication => {
+            "Dictionary selection requires user judgment"
+        }
+        ResolutionIssue::SelectorInGroup(_) | ResolutionIssue::AmbiguousSelector(_) => {
+            "Field ownership is unresolved"
+        }
+        ResolutionIssue::ProhibitedSelector(_) => "Cannot infer intended message identity",
+    };
+    DiagnosticKind {
+        code: "unknownVersion".into(),
+        fixability: Fixability::RequiresJudgment(reason.into()),
+    }
+}
 
 /// An explicit failure to resolve the message's transport or application.
 pub struct UnknownVersion;
 
 impl Rule for UnknownVersion {
+    fn repair_policy(&self) -> super::repair::RepairPolicy {
+        super::repair::RepairPolicy::DiagnosticOnly
+    }
+
     fn id(&self) -> &'static str {
         "unknownVersion"
     }
@@ -60,7 +85,9 @@ impl Rule for UnknownVersion {
                     .unwrap_or_default();
                 (
                     tag::BEGIN_STRING,
-                    format!("Missing application version{message_context}. Set ApplVerID(1128), defaultApplVerID, or select an application dictionary."),
+                    format!(
+                        "Missing application version{message_context}. Set ApplVerID(1128), defaultApplVerID, or select an application dictionary."
+                    ),
                 )
             }
             ResolutionIssue::UnregisteredApplication => (
@@ -96,7 +123,7 @@ impl Rule for UnknownVersion {
             return Vec::new();
         };
         vec![Diag {
-            code: self.id(),
+            kind: resolution_kind(issue),
             rule: self.id(),
             start: field.tag_start,
             end: field.value_end(),
@@ -110,6 +137,10 @@ impl Rule for UnknownVersion {
 pub struct DictionaryVersion;
 
 impl Rule for DictionaryVersion {
+    fn repair_policy(&self) -> super::repair::RepairPolicy {
+        super::repair::RepairPolicy::DiagnosticOnly
+    }
+
     fn id(&self) -> &'static str {
         "dictionaryVersion"
     }
@@ -138,11 +169,18 @@ impl Rule for DictionaryVersion {
             return Vec::new();
         };
         vec![Diag {
-            code: self.id(),
+            kind: DiagnosticKind {
+                code: "dictionaryVersion".into(),
+                fixability: Fixability::RequiresJudgment(
+                    "Dictionary selection requires user judgment".into(),
+                ),
+            },
             rule: self.id(),
             start: field.tag_start,
             end: field.value_end(),
-            message: format!("Selected dictionary version {selected} does not match resolved message version {resolved}"),
+            message: format!(
+                "Selected dictionary version {selected} does not match resolved message version {resolved}"
+            ),
             severity,
             document_key: Some(ctx.message.version.clone()),
         }]
@@ -248,7 +286,7 @@ mod tests {
         let found = diags(line);
         let unknown = found
             .iter()
-            .find(|d| d.code == "unknownVersion")
+            .find(|d| d.kind.code.as_ref() == "unknownVersion")
             .expect("reported");
         assert_eq!((unknown.start, unknown.end), (byte(0), byte(9)));
         assert_eq!(
@@ -280,7 +318,7 @@ mod tests {
         ] {
             let line = format!("8={version}|9=1|35=0|10=001|");
             assert!(
-                !codes(&line).contains(&"unknownVersion"),
+                !codes(&line).contains(&"unknownVersion".into()),
                 "{version} reported"
             );
         }
@@ -309,7 +347,7 @@ mod tests {
             message.resolution.issue = Some(issue);
             let found = UnknownVersion.check(&LineCtx::new(line, message), Severity::Warning);
             assert_eq!(found.len(), 1, "{issue:?}");
-            assert_eq!(found[0].code, "unknownVersion");
+            assert_eq!(found[0].kind.code.as_ref(), "unknownVersion");
             assert_eq!(found[0].rule, "unknownVersion");
         }
     }
@@ -343,7 +381,7 @@ mod tests {
 
         let diagnostic = found
             .iter()
-            .find(|diagnostic| diagnostic.code == "unknownVersion")
+            .find(|diagnostic| diagnostic.kind.code.as_ref() == "unknownVersion")
             .unwrap();
 
         assert_eq!(diagnostic.message, "Duplicate ApplVerID(1128)");

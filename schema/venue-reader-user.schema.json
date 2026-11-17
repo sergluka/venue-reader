@@ -385,7 +385,7 @@
         "rangeLines": {
           "type": "integer",
           "default": 2000,
-          "description": "Largest span of lines any ranged request will answer about: a code action, an inlay hint, an expanded selection, a coloured viewport. Each request decides for itself what happens past it.",
+          "description": "Largest span of lines a ranged request will answer about: a range quickfix, an inlay hint, an expanded selection, a coloured viewport. Each request decides what happens past it. Whole-document source.fixAll ignores this limit.",
           "minimum": 0
         },
         "decodeResultBytes": {

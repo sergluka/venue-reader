@@ -372,7 +372,7 @@ fn as_lsp(line: LineNo, diag: &Diag, columns: (Column, Column)) -> serde_json::V
             "end": { "line": line, "character": columns.1 },
         },
         "severity": lsp_severity(diag.severity),
-        "code": diag.code,
+        "code": diag.kind.code.as_ref(),
         "source": "fix",
         "message": diag.message,
         // The rule, not the code: it is the `diagnostics.rules` key that governs
@@ -1132,6 +1132,9 @@ mod tests {
     struct Rendering;
 
     impl crate::rules::Rule for Rendering {
+        fn repair_policy(&self) -> crate::rules::repair::RepairPolicy {
+            crate::rules::repair::RepairPolicy::DiagnosticOnly
+        }
         fn id(&self) -> &'static str {
             "rendering"
         }
@@ -1148,7 +1151,12 @@ mod tests {
         ) -> Vec<Diag> {
             RENDERED.fetch_add(1, Ordering::Relaxed);
             vec![Diag {
-                code: self.id(),
+                kind: crate::rules::DiagnosticKind {
+                    code: self.id().into(),
+                    fixability: crate::rules::Fixability::RequiresJudgment(
+                        "Synthetic diagnostic".into(),
+                    ),
+                },
                 rule: self.id(),
                 start: crate::codec::ByteOffset::new(0),
                 end: crate::codec::ByteOffset::new(1),

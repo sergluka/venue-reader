@@ -591,8 +591,8 @@ pub struct Limits {
     /// against 400 ms. Linear, with no cliff between them; 20 000 would be
     /// 269 MB, which is where it stops being free.
     pub diagnostics_per_document: usize,
-    /// Largest span of lines **any** ranged request will answer about: a code
-    /// action, an inlay hint, an expanded selection, a coloured viewport, and
+    /// Largest span of lines a ranged request will answer about: a range
+    /// quickfix, an inlay hint, an expanded selection, a coloured viewport, and
     /// whatever comes next.
     ///
     /// One number rather than one per request, because they are one question —
@@ -602,10 +602,11 @@ pub struct Limits {
     ///
     /// **It bounds the span, not the answer.** Each request keeps its own
     /// behaviour at the boundary, which is a different question and settled in
-    /// each handler: a code action is refused, hints and colours answer `[]`
+    /// each handler: a range quickfix is refused, hints and colours answer `[]`
     /// with one log line, an expanded selection still answers every position
     /// but with its own line only. Whole-document limits are elsewhere —
     /// `codeLensLines` and `documentSymbolItems` bound answers, not spans.
+    /// Whole-document `source.fixAll` ignores this limit.
     pub range_lines: usize,
     /// Compact JSON result byte cap for `fix.decode`, excluding its envelope.
     pub decode_result_bytes: usize,

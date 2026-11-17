@@ -272,10 +272,10 @@ fn utf16_addressable(line: &Line) -> Option<&str> {
 mod tests {
     use super::*;
 
-    use crate::document::Line;
+    use crate::document::{Ending, Line};
 
     fn line(text: &str) -> std::sync::Arc<Line> {
-        Line::new(text.as_bytes())
+        Line::new(text.as_bytes(), Ending::None)
     }
 
     use crate::codec::byte;

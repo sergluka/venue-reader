@@ -1,16 +1,43 @@
 //! Missing definitions are checked only against known source owners.
 //! Standard-status wording is shared with hover.
 
-use super::{Diag, LineCtx, Precondition, Rule};
+use super::{Diag, DiagnosticKind, Fixability, LineCtx, Precondition, Rule};
 use crate::codec::Field;
 use crate::config::Severity;
 use crate::dictionary::{standard, Dict, StandardDef, Version};
 use crate::tag;
 
+enum Cause {
+    UnknownTag,
+    MissingMsgType,
+    UnknownMsgType,
+}
+
+impl From<Cause> for DiagnosticKind {
+    fn from(cause: Cause) -> Self {
+        let (code, reason) = match cause {
+            Cause::UnknownTag => (
+                "unknownTag",
+                "Missing dictionary definitions do not prove incorrect data",
+            ),
+            Cause::MissingMsgType => ("missingMsgType", "Cannot invent a message type"),
+            Cause::UnknownMsgType => ("unknownMsgType", "Cannot invent a message type"),
+        };
+        Self {
+            code: code.into(),
+            fixability: Fixability::RequiresJudgment(reason.into()),
+        }
+    }
+}
+
 /// Unresolved ownership cannot establish that a tag definition is missing.
 pub struct UnknownTag;
 
 impl Rule for UnknownTag {
+    fn repair_policy(&self) -> super::repair::RepairPolicy {
+        super::repair::RepairPolicy::DiagnosticOnly
+    }
+
     fn id(&self) -> &'static str {
         "unknownTag"
     }
@@ -26,7 +53,7 @@ impl Rule for UnknownTag {
     fn check(&self, ctx: &LineCtx, severity: Severity) -> Vec<Diag> {
         undefined(ctx)
             .map(|field| Diag {
-                code: self.id(),
+                kind: Cause::UnknownTag.into(),
                 rule: self.id(),
                 start: field.tag_start,
                 end: field.tag_end(),
@@ -46,6 +73,10 @@ impl Rule for UnknownTag {
 pub struct UnknownMsgType;
 
 impl Rule for UnknownMsgType {
+    fn repair_policy(&self) -> super::repair::RepairPolicy {
+        super::repair::RepairPolicy::DiagnosticOnly
+    }
+
     fn id(&self) -> &'static str {
         "unknownMsgType"
     }
@@ -64,7 +95,7 @@ impl Rule for UnknownMsgType {
                 .message
                 .first(tag::BEGIN_STRING)
                 .map(|field| Diag {
-                    code: "missingMsgType",
+                    kind: Cause::MissingMsgType.into(),
                     rule: self.id(),
                     start: field.tag_start,
                     end: field.value_end(),
@@ -77,7 +108,7 @@ impl Rule for UnknownMsgType {
         }
         unlisted(ctx)
             .map(|(field, dict)| Diag {
-                code: self.id(),
+                kind: Cause::UnknownMsgType.into(),
                 rule: self.id(),
                 start: field.value_start(),
                 end: field.value_end(),
@@ -252,8 +283,14 @@ mod tests {
         let selected = Ctx::for_test_selected("FIX.4.4");
         let line = "8=FIX.4.4|35=D|55=X|1328=x|9000=x|";
         let cases = [
-            ("55", "\"desk\" does not define Symbol(55); standard FIX.4.4"),
-            ("1328", "\"desk\" does not define RejectText(1328); not in FIX.4.4, introduced in FIX.5.0SP1"),
+            (
+                "55",
+                "\"desk\" does not define Symbol(55); standard FIX.4.4",
+            ),
+            (
+                "1328",
+                "\"desk\" does not define RejectText(1328); not in FIX.4.4, introduced in FIX.5.0SP1",
+            ),
             ("9000", "\"desk\" does not define tag 9000"),
         ];
         for (tag, expected) in cases {
@@ -330,7 +367,7 @@ mod tests {
             },
         );
         assert_eq!(checked.diags.len(), 1);
-        assert_eq!(checked.diags[0].code, "missingMsgType");
+        assert_eq!(checked.diags[0].kind.code.as_ref(), "missingMsgType");
         assert_eq!(checked.diags[0].rule, "unknownMsgType");
         assert_eq!(checked.diags[0].severity, Severity::Error);
 

@@ -446,6 +446,7 @@ impl ServerState {
         let mut diagnostics = Vec::new();
         let mut held_edits = Vec::new();
         let base_unchanged = self.config.base == prepared.base.config;
+        let rules_unchanged = self.config.base.diagnostics == prepared.base.config.diagnostics;
         self.config.user = prepared.user;
         self.config.client = prepared.client;
         self.config.base = prepared.base.config.clone();
@@ -487,6 +488,8 @@ impl ServerState {
             let (render, bad_templates) = crate::render::Options::from_config(&self.config.base);
             self.render = Arc::new(render);
             self.base_bad_templates = Arc::new(bad_templates);
+        }
+        if !rules_unchanged {
             self.rules = Arc::new(crate::rules::Registry::from_config(
                 &self.config.base.diagnostics,
             ));
@@ -516,21 +519,18 @@ impl ServerState {
                 &document.project.registry,
                 document.choice.as_ref(),
             );
-            let ctx = if fingerprint == self.ctx.fingerprint() {
+            let unchanged_ctx =
+                previous.filter(|previous| previous.ctx.fingerprint() == fingerprint);
+            let ctx = if let Some(previous) = unchanged_ctx {
+                previous.ctx.clone()
+            } else if fingerprint == self.ctx.fingerprint() {
                 self.ctx.clone()
             } else {
-                previous
-                    .filter(|previous| previous.ctx.fingerprint() == fingerprint)
-                    .map_or_else(
-                        || {
-                            Ctx::with_choice(
-                                &document.resolved.config,
-                                document.project.registry.clone(),
-                                document.choice.clone(),
-                            )
-                        },
-                        |previous| previous.ctx.clone(),
-                    )
+                Ctx::with_choice(
+                    &document.resolved.config,
+                    document.project.registry.clone(),
+                    document.choice.clone(),
+                )
             };
             let base_config = document.resolved.config == self.config.base;
             let (render, invalid_templates) = if base_config {
@@ -555,31 +555,35 @@ impl ServerState {
                     origin,
                 ));
             }
-            let rules = if document.resolved.config.diagnostics == self.config.base.diagnostics
+            // Preserve rule identity so unchanged configuration does not invalidate repairs.
+            let unchanged_rules = previous.filter(|previous| {
+                previous.resolved.config.diagnostics == document.resolved.config.diagnostics
+                    && previous.ctx.selected_version() == ctx.selected_version()
+            });
+            let rules = if let Some(previous) = unchanged_rules {
+                previous.rules.clone()
+            } else if document.resolved.config.diagnostics == self.config.base.diagnostics
                 && ctx.selected_version().is_none()
             {
                 self.rules.clone()
             } else {
-                previous
-                    .filter(|previous| {
-                        previous.resolved.config.diagnostics == document.resolved.config.diagnostics
-                            && previous.ctx.selected_version() == ctx.selected_version()
-                    })
-                    .map_or_else(
-                        || {
-                            Arc::new(crate::rules::Registry::with_selected_version(
-                                &document.resolved.config.diagnostics,
-                                ctx.selected_version(),
-                            ))
-                        },
-                        |previous| previous.rules.clone(),
-                    )
+                Arc::new(crate::rules::Registry::with_selected_version(
+                    &document.resolved.config.diagnostics,
+                    ctx.selected_version(),
+                ))
             };
             let names = Arc::new(crate::ctx::DictionaryNames::new(
                 &document.project.registry,
                 document.choice.as_ref(),
             ));
+            let repair_generation = previous.map_or(0, |previous| {
+                let changed = !Arc::ptr_eq(&previous.ctx, &ctx)
+                    || !Arc::ptr_eq(&previous.rules, &rules)
+                    || !previous.names.same_as(&names);
+                previous.repair_generation + u64::from(changed)
+            });
             let document = Arc::new(DocumentConfig {
+                repair_generation,
                 resolved: document.resolved,
                 project: document.project,
                 ctx,
@@ -637,7 +641,8 @@ impl ServerState {
                 self.encoding,
             );
             self.set_configuration_diagnostics(&input.uri, warnings);
-            self.config.documents.insert(input.uri, document);
+            self.config.documents.insert(input.uri.clone(), document);
+            self.invalidate_background_repairs(&input.uri);
         }
         let messages = self
             .config
@@ -880,8 +885,7 @@ enum Refresh {
     Documents,
 }
 
-/// Build the standard LSP error returned for rejected configuration commands.
-pub(super) fn request_failed(message: &str) -> ResponseError {
+pub(super) fn request_failed(message: impl Into<String>) -> ResponseError {
     ResponseError {
         code: ErrorCode::RequestFailed as i32,
         message: message.into(),
@@ -939,6 +943,26 @@ mod tests {
     use super::*;
     use crate::ctx::Ctx;
     use crate::document::Document;
+
+    #[test]
+    fn repair_generation_tracks_only_repair_configuration_changes() {
+        let (mut state, uri) =
+            crate::server::testing::state_with(crate::server::testing::HEARTBEAT);
+        let mut expected = state.config.documents[&uri].repair_generation;
+        for (settings, changed) in [
+            (json!({}), false),
+            (json!({"hover":{"enabled":false}}), false),
+            (json!({"limits":{"rangeLines":17}}), false),
+            (json!({"diagnostics":{"rules":{"integrity":false}}}), true),
+            (json!({"diagnostics":{"rules":{"integrity":false}}}), false),
+            (json!({"defaultApplVerID":"FIX.5.0SP2"}), true),
+        ] {
+            state.on_did_change_configuration(json!({"settings":{"fix":settings}}));
+            crate::server::testing::settle(&mut state);
+            expected += u64::from(changed);
+            assert_eq!(state.config.documents[&uri].repair_generation, expected);
+        }
+    }
 
     /// `file:///a.fix` has no drive letter, so on Windows it converts to no
     /// path; its modeline is read all the same, and a non-file scheme's is not.

@@ -121,7 +121,12 @@ mod tests {
 
     fn diag(severity: Severity, start: u32) -> Diag {
         Diag {
-            code: "test",
+            kind: crate::rules::DiagnosticKind {
+                code: "test".into(),
+                fixability: crate::rules::Fixability::RequiresJudgment(
+                    "Synthetic diagnostic".into(),
+                ),
+            },
             rule: "test",
             start: crate::codec::ByteOffset::new(start),
             end: crate::codec::ByteOffset::new(start + 1),

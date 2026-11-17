@@ -1,7 +1,7 @@
 //! Envelope presence and arithmetic share one configuration control.
 //! Repairs keep BodyLength(9) and CheckSum(10) consistent without guessing BeginString(8).
 
-use super::{Diag, Edit, LineCtx, Precondition, Repair, Rule};
+use super::{Diag, DiagnosticKind, Edit, Fixability, LineCtx, Precondition, Repair, Rule};
 use crate::codec::tokenize;
 use crate::config::Severity;
 use crate::tag;
@@ -9,9 +9,49 @@ use crate::tag;
 /// Arithmetic and repairs need more than a single field to describe a message.
 const MIN_FIELDS: usize = 2;
 
+#[derive(Clone, Copy)]
+enum Cause {
+    MissingBeginString,
+    MissingBodyLength,
+    IncorrectBodyLength,
+    MissingCheckSum,
+    IncorrectCheckSum,
+}
+
+impl From<Cause> for DiagnosticKind {
+    fn from(cause: Cause) -> Self {
+        let (code, fixability) = match cause {
+            Cause::MissingBeginString => (
+                "beginString",
+                Fixability::RequiresJudgment("Cannot invent protocol identity".into()),
+            ),
+            Cause::MissingBodyLength | Cause::IncorrectBodyLength => {
+                ("bodyLength", Fixability::Automatic)
+            }
+            Cause::MissingCheckSum | Cause::IncorrectCheckSum => {
+                ("checkSum", Fixability::Automatic)
+            }
+        };
+        Self {
+            code: code.into(),
+            fixability,
+        }
+    }
+}
+
 pub struct Integrity;
 
 impl Rule for Integrity {
+    fn repair_policy(&self) -> super::repair::RepairPolicy {
+        super::repair::RepairPolicy::Safe(super::repair::Provider {
+            repair,
+            eligible,
+            claims: |_, _| true,
+            dependencies: &[],
+            finalizer: true,
+        })
+    }
+
     fn id(&self) -> &'static str {
         "integrity"
     }
@@ -34,7 +74,7 @@ impl Rule for Integrity {
         let mut found = Vec::new();
         if begin_string.is_none() {
             found.push(Diag {
-                code: "beginString",
+                kind: Cause::MissingBeginString.into(),
                 rule: self.id(),
                 start: first.tag_start,
                 end: last.value_end(),
@@ -43,18 +83,18 @@ impl Rule for Integrity {
                 document_key: None,
             });
         }
-        for (code, name, tag, anchor) in [
+        for (cause, name, tag, anchor) in [
             (
-                "bodyLength",
+                Cause::MissingBodyLength,
                 "BodyLength",
                 tag::BODY_LENGTH,
                 begin_string.unwrap_or(first),
             ),
-            ("checkSum", "CheckSum", tag::CHECK_SUM, last),
+            (Cause::MissingCheckSum, "CheckSum", tag::CHECK_SUM, last),
         ] {
             if ctx.message.first(tag).is_none() {
                 found.push(Diag {
-                    code,
+                    kind: cause.into(),
                     rule: self.id(),
                     start: anchor.tag_start,
                     end: anchor.value_end(),
@@ -70,7 +110,7 @@ impl Rule for Integrity {
         let facts = ctx.integrity();
         found.extend(
             Claim {
-                code: "bodyLength",
+                cause: Cause::IncorrectBodyLength,
                 name: "BodyLength",
                 at: facts.body_length_field,
                 expected: &facts.body_length.to_string(),
@@ -81,7 +121,7 @@ impl Rule for Integrity {
         );
         found.extend(
             Claim {
-                code: "checkSum",
+                cause: Cause::IncorrectCheckSum,
                 name: "CheckSum",
                 at: facts.check_sum_field,
                 expected: &format!("{:03}", facts.check_sum),
@@ -94,11 +134,32 @@ impl Rule for Integrity {
     }
 }
 
+fn eligible(ctx: &LineCtx) -> bool {
+    if ctx.message.fields.len() < MIN_FIELDS || ctx.message.first(tag::BEGIN_STRING).is_none() {
+        return false;
+    }
+    let facts = ctx.integrity();
+    // A preceding trailer leaves the message boundary ambiguous.
+    if facts
+        .check_sum_field
+        .zip(facts.begin_string)
+        .is_some_and(|(check_sum, begin_string)| check_sum < begin_string)
+    {
+        return false;
+    }
+    facts.body_length_field.is_some()
+        || ctx
+            .message
+            .fields
+            .get(facts.begin_string.map_or(0, |at| at + 1) as usize)
+            .is_some()
+}
+
 /// Edits in field order; BeginString(8) is never inserted or guessed.
 pub fn repair(ctx: &LineCtx) -> Option<Repair> {
     let fields = &ctx.message.fields;
     // Presence findings on fragments do not provide enough information for a repair.
-    if fields.len() < MIN_FIELDS || ctx.message.first(tag::BEGIN_STRING).is_none() {
+    if !eligible(ctx) {
         return None;
     }
     let facts = ctx.integrity();
@@ -146,7 +207,7 @@ pub fn repair(ctx: &LineCtx) -> Option<Repair> {
             // separator when there is one, and bringing its own when there is
             // not. Taken from the bytes rather than from the line length, which
             // a log suffix would make wrong.
-            edits.push(match ctx.bytes.get(after_last.index()) {
+            let trailer = match ctx.bytes.get(after_last.index()) {
                 Some(&byte) if byte == separator as u8 => Edit {
                     start: after_last + 1,
                     end: after_last + 1,
@@ -157,7 +218,13 @@ pub fn repair(ctx: &LineCtx) -> Option<Repair> {
                     end: after_last,
                     text: format!("{separator}10={expected}"),
                 },
-            });
+            };
+            // Keep dependent edits atomic when BodyLength(9) ends at the insertion point.
+            if let Some(length_edit) = edits.last_mut().filter(|edit| edit.end == trailer.start) {
+                length_edit.text.push_str(&trailer.text);
+            } else {
+                edits.push(trailer);
+            }
         }
     }
 
@@ -230,7 +297,7 @@ fn replacing(ctx: &LineCtx, at: u32, text: String) -> Edit {
 
 /// A value check, separate from presence checking on incomplete fragments.
 struct Claim<'a> {
-    code: &'static str,
+    cause: Cause,
     name: &'a str,
     /// Where the tag is written, when it is.
     at: Option<u32>,
@@ -246,7 +313,7 @@ impl Claim<'_> {
         };
         let field = &ctx.message.fields[at as usize];
         Some(Diag {
-            code: self.code,
+            kind: self.cause.into(),
             rule: Integrity.id(),
             start: field.value_start(),
             end: field.value_end(),
@@ -294,10 +361,16 @@ mod tests {
     #[test]
     fn both_wrong_values_are_reported_over_their_own_spans() {
         let found = diags(BAD_BOTH);
-        let length = found.iter().find(|d| d.code == "bodyLength").unwrap();
+        let length = found
+            .iter()
+            .find(|d| d.kind.code.as_ref() == "bodyLength")
+            .unwrap();
         assert_eq!((length.start, length.end), (byte(12), byte(13)));
         assert_eq!(length.message, "BodyLength is 7, expected 139");
-        let sum = found.iter().find(|d| d.code == "checkSum").unwrap();
+        let sum = found
+            .iter()
+            .find(|d| d.kind.code.as_ref() == "checkSum")
+            .unwrap();
         assert_eq!((sum.start, sum.end), (byte(156), byte(159)));
         assert_eq!(sum.message, "CheckSum is 001, expected 213");
     }
@@ -315,7 +388,7 @@ mod tests {
         let line = "8=FIX.4.4|35=0|34=1|49=CLIENT1|56=BROKER1|52=20251026-09:02:00.000|10=171|";
         let found = diags(line);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].code, "bodyLength");
+        assert_eq!(found[0].kind.code.as_ref(), "bodyLength");
         assert_eq!((found[0].start, found[0].end), (byte(0), byte(9)));
         assert_eq!(found[0].message, "Missing BodyLength (tag 9)");
     }
@@ -326,7 +399,7 @@ mod tests {
             "8=FIX.4.4|9=69|35=A|34=1|49=CLIENT1|56=BROKER1|52=20251026-09:00:00.000|98=0|108=30|";
         let found = diags(line);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].code, "checkSum");
+        assert_eq!(found[0].kind.code.as_ref(), "checkSum");
         assert_eq!(found[0].message, "Missing CheckSum (tag 10)");
         let last = line.rfind("108=30").unwrap() as u32;
         assert_eq!((found[0].start, found[0].end), (byte(last), byte(last + 6)));
@@ -517,10 +590,10 @@ mod tests {
             "10=001|",
             "35=0|34=1|49=CLIENT1|56=BROKER1|10=001|",
         ] {
-            let reported: Vec<&str> = diags(line)
-                .iter()
+            let reported: Vec<_> = diags(line)
+                .into_iter()
                 .filter(|diag| diag.rule == "integrity")
-                .map(|diag| diag.code)
+                .map(|diag| diag.kind.code)
                 .collect();
             assert!(!reported.is_empty(), "{line}");
             assert_eq!(repair_of(line), None, "{line}");

@@ -621,6 +621,135 @@ fn fatal_configuration_with_pending_commands_exits_even_if_responses_are_not_flu
 }
 
 #[test]
+fn fix_all_refuses_non_utf8_input_over_stdio() {
+    let mut client = StdioClient::start("fix-all-non-utf8", None, None);
+    let text = format!("8=FIX.4.4|9=1|35=0|58=caf{RAW_BYTE_MARKER}|10=000|");
+    let original = b"8=FIX.4.4|9=1|35=0|58=caf\xe9|10=000|";
+    let uri = client.write_workspace("latin1.fix", original);
+    client.request(
+        "initialize",
+        json!({
+            "rootUri": client.root_uri(),
+            "capabilities": {
+                "general": {"positionEncodings": ["utf-8"]},
+                "workspace": {"workspaceEdit": {"documentChanges": true}},
+                "textDocument": {"codeAction": {
+                    "codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["source.fixAll"]}},
+                    "dataSupport": true,
+                    "resolveSupport": {"properties": ["edit"]}
+                }}
+            }
+        }),
+    );
+    client.notify("initialized", json!({}));
+    let mut body = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri, "languageId": "fix", "version": 1, "text": text}}
+    }))
+    .unwrap();
+    replace_marker_with_raw_byte(&mut body, RAW_BYTE_MARKER.as_bytes(), 0xe9);
+    client.send_raw_body(&body);
+    let params = json!({
+        "textDocument": {"uri": uri},
+        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+        "context": {"diagnostics": [], "only": ["source.fixAll"], "triggerKind": 1}
+    });
+    let actions = client.request("textDocument/codeAction", params.clone());
+    assert_eq!(actions.as_array().unwrap().len(), 1);
+    let error = client
+        .request_result("codeAction/resolve", actions[0].clone())
+        .unwrap_err();
+    assert_eq!(error["code"], -32803);
+    assert_eq!(error["message"], "Line 1: Cannot repair a non-UTF-8 line");
+    assert!(client.shutdown_and_exit().success());
+}
+
+#[test]
+fn fix_all_progress_finishes_before_its_single_response_over_stdio() {
+    let mut client = StdioClient::start("fix-all-progress", None, None);
+    let text = vec!["8=FIX.4.4|35=0|"; 120].join("\n");
+    let uri = client.write_workspace("synthetic.fix", text.as_bytes());
+    let initialized = client.request(
+        "initialize",
+        json!({
+            "rootUri": client.root_uri(),
+            "capabilities": {
+                "general": {"positionEncodings": ["utf-8"]},
+                "workspace": {"workspaceEdit": {"documentChanges": true}},
+                "textDocument": {"codeAction": {"codeActionLiteralSupport": {
+                    "codeActionKind": {"valueSet": ["quickfix", "source.fixAll"]}
+                }}}
+            }
+        }),
+    );
+    assert_eq!(
+        initialized["capabilities"]["codeActionProvider"]["workDoneProgress"],
+        true
+    );
+    client.notify("initialized", json!({}));
+    client.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {
+            "uri": uri, "languageId": "fix", "version": 1, "text": text
+        }}),
+    );
+    let identifier = json!("fix-all-with-progress");
+    client.send_value(&json!({"jsonrpc": "2.0", "id": identifier,
+        "method": "textDocument/codeAction", "params": {
+            "textDocument": {"uri": uri},
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+            "context": {"diagnostics": [], "only": ["source.fixAll"], "triggerKind": 1},
+            "workDoneToken": "repair-work", "partialResultToken": "repair-partial"
+        }
+    }));
+    let (response, before_response) = client.response_collecting(&identifier);
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(response["result"].as_array().unwrap().len(), 1);
+    assert_eq!(response["result"][0]["kind"], "source.fixAll");
+    assert!(
+        !response["result"][0]["edit"]["documentChanges"][0]["edits"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let progress: Vec<_> = before_response
+        .iter()
+        .filter(|message| {
+            message["method"] == "$/progress" && message["params"]["token"] == "repair-work"
+        })
+        .map(|message| &message["params"]["value"])
+        .collect();
+    assert_eq!(progress.first().expect("begin")["kind"], "begin");
+    assert_eq!(progress.last().expect("end before response")["kind"], "end");
+    for kind in ["begin", "end"] {
+        assert_eq!(
+            progress
+                .iter()
+                .filter(|value| value["kind"] == kind)
+                .count(),
+            1
+        );
+    }
+    let percentages: Vec<_> = progress
+        .iter()
+        .filter_map(|value| value["percentage"].as_u64())
+        .collect();
+    assert_eq!(percentages.first(), Some(&0));
+    assert_eq!(percentages.last(), Some(&100));
+    assert!(percentages.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert!(percentages.iter().all(|percentage| *percentage <= 100));
+    assert!(before_response
+        .iter()
+        .all(|message| message["params"]["token"] != "repair-partial"));
+    assert!(client.shutdown_and_exit().success());
+    assert!(client.received_after_exit().iter().all(|message| {
+        message["id"] != identifier
+            && message["params"]["token"] != "repair-work"
+            && message["params"]["token"] != "repair-partial"
+    }));
+}
+
+#[test]
 fn document_symbol_chunks_preserve_encoded_unicode_and_oversized_roots_over_stdio() {
     let mut client = StdioClient::start("symbol-chunks", None, None);
     let value = "SYNTHETIC_\"\\🙂".repeat(10_000);

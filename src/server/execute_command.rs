@@ -163,7 +163,7 @@ impl<'a> ListedDictionary<'a> {
 
 fn dictionary_list(registry: &Registry, cap: usize) -> HandlerResult {
     let too_large = || {
-        super::config_pull::request_failed(&format!(
+        super::config_pull::request_failed(format!(
             "{LIST_DICTIONARIES}: result exceeds {cap} bytes"
         ))
     };
@@ -411,7 +411,7 @@ impl ServerState {
             PendingRequest::DescribeTag { tag, value } => {
                 match hover::describe(tag, value.as_deref(), &self.render) {
                     Some(text) => Ok(json!(text)),
-                    None => Err(super::config_pull::request_failed(&format!(
+                    None => Err(super::config_pull::request_failed(format!(
                         "{DESCRIBE_TAG}: no bundled dictionary defines tag {tag}"
                     ))),
                 }
@@ -443,13 +443,13 @@ fn invalid(message: String) -> ResponseError {
 }
 
 fn selection_too_large(cap: usize) -> ResponseError {
-    super::config_pull::request_failed(&format!(
+    super::config_pull::request_failed(format!(
         "selection is over {cap} lines; select fewer, or raise fix.limits.rangeLines"
     ))
 }
 
 fn result_too_large(cap: usize) -> ResponseError {
-    super::config_pull::request_failed(&format!(
+    super::config_pull::request_failed(format!(
         "{DECODE}: result is over {cap} bytes; select less, or raise fix.limits.decodeResultBytes"
     ))
 }
