@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.0] - 2026-11-18
+
+### Added
+
+- repair all eligible issues through background fix-all
 ## [0.3.0] - 2026-11-11
 
 ### Added
