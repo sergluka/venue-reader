@@ -213,7 +213,7 @@ Apache License 2.0 (Apache-2.0)
 
 Boost Software License 1.0 (BSL-1.0)
 ----------------------------------------
-- xxhash-rust 0.8.19
+- xxhash-rust 0.8.20
 
 Boost Software License - Version 1.0 - August 17th, 2003
 
@@ -306,7 +306,7 @@ DEALINGS IN THE SOFTWARE.
 
 MIT License (MIT)
 ----------------------------------------
-- log 0.4.34
+- log 0.4.35
 - regex-automata 0.4.18
 - regex-syntax 0.8.11
 
@@ -401,10 +401,10 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ----------------------------------------
 - serde_spanned 1.1.2
-- toml 1.1.8+spec-1.1.0
+- toml 1.2.0+spec-1.1.0
 - toml_datetime 1.1.2+spec-1.1.0
 - toml_parser 1.1.5+spec-1.1.0
-- toml_writer 1.1.3+spec-1.1.0
+- toml_writer 1.2.0+spec-1.1.0
 
 Copyright (c) Individual contributors
 
