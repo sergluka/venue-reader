@@ -14,7 +14,7 @@ use crate::codec::ByteOffset;
 use crate::config::InlayHints;
 use crate::document::{Column, Columns, LineNo, LineRange};
 use crate::render::hint;
-use crate::render::summary::{structured, SummaryPart};
+use crate::render::summary::{structured, StructuredSummary};
 
 /// What a hint needs from configuration, gathered where the config lives so the
 /// task carries a value rather than a borrow.
@@ -129,16 +129,16 @@ fn answer(params: &InlayHintParams, wanted: &Wanted, snapshot: &Snapshot) -> Han
 
         let mut wants: Vec<Want> = Vec::new();
         if wanted.summary {
-            let parts = structured(
+            let summary = structured(
                 &line.bytes,
                 message,
                 &snapshot.render,
                 wanted.summary_tokens,
             );
-            if !parts.is_empty() {
+            if !summary.parts.is_empty() {
                 wants.push(Want {
                     byte: ByteOffset::new(0),
-                    what: What::Summary(parts),
+                    what: What::Summary(summary),
                 });
             }
         }
@@ -184,7 +184,7 @@ fn answer(params: &InlayHintParams, wanted: &Wanted, snapshot: &Snapshot) -> Han
                 continue;
             }
             out.push(match what {
-                What::Summary(parts) => summary_hint(parts, number, wanted.summary_tokens),
+                What::Summary(summary) => summary_hint(summary, number, wanted.summary_tokens),
                 What::Field { kind, at, label } => field_hint(
                     line,
                     message,
@@ -215,7 +215,7 @@ struct Want {
 /// `usize::MAX` and an empty string that were safe only as long as the
 /// dispatch never handed a summary to the field builder.
 enum What {
-    Summary(Vec<SummaryPart>),
+    Summary(StructuredSummary),
     Field {
         kind: Kind,
         at: usize,
@@ -301,8 +301,12 @@ fn field_hint(
     out
 }
 
-fn summary_hint(parts: Vec<SummaryPart>, line: LineNo, metadata: bool) -> Value {
-    let mut data = json!({ "kind": "summary" });
+fn summary_hint(summary: StructuredSummary, line: LineNo, metadata: bool) -> Value {
+    let StructuredSummary {
+        parts,
+        template_parts,
+    } = summary;
+    let mut data = json!({ "kind": "summary", "templateParts": template_parts });
     if metadata {
         // `tokens[i]` describes `label[i]`; `null` is base styling.
         let tokens = parts
