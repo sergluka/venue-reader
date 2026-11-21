@@ -309,8 +309,12 @@ fn a_range_ending_at_column_zero_excludes_that_line() {
 /// The summary rides the same channel when asked to, at column zero.
 #[test]
 fn the_summary_is_its_own_hint_when_the_channel_is_on() {
-    let settings = json!({ "messageSummary": { "channels": { "inlayHints": true } } });
-    let mut client = open_with(settings, plain_caps(), HEARTBEAT);
+    let settings = json!({ "messageSummary": {
+        "channels": { "inlayHints": true },
+        "template": "{34} {35.valueName}",
+        "details": true,
+    } });
+    let mut client = open_with(settings, plain_caps(), "8=FIX.4.2|35=8|34=2|150=2|");
     let hints = over(&mut client, (0, 0), (0, 400));
     let summary = hints
         .iter()
@@ -318,7 +322,13 @@ fn the_summary_is_its_own_hint_when_the_channel_is_on() {
         .expect("a summary hint");
     assert_eq!(summary["position"]["character"], 0);
     assert_eq!(summary["paddingRight"], true);
-    assert!(!hint_labels(std::slice::from_ref(summary))[0].is_empty());
+    assert_eq!(summary["data"]["templateParts"], 3);
+    assert!(summary["data"].get("tokens").is_none());
+    assert_eq!(summary["label"][3]["value"], " | ");
+    assert_eq!(
+        hint_labels(std::slice::from_ref(summary)),
+        ["2 ExecutionReport | FILL"]
+    );
     client.shutdown();
 }
 

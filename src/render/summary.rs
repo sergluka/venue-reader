@@ -73,16 +73,24 @@ pub fn summary_joined(
     (!out.is_empty()).then_some(out)
 }
 
+pub struct StructuredSummary {
+    pub parts: Vec<SummaryPart>,
+    pub template_parts: usize,
+}
+
 /// The summary as label parts, carrying styles when `styled`.
 pub fn structured(
     line: &[u8],
     analysis: &MessageAnalysis,
     options: &Options,
     styled: bool,
-) -> Vec<SummaryPart> {
-    let mut out = Vec::with_capacity(16);
-    Scene::new(line, analysis, styled).summary(&mut out, options);
-    out
+) -> StructuredSummary {
+    let mut parts = Vec::with_capacity(16);
+    let template_parts = Scene::new(line, analysis, styled).summary(&mut parts, options);
+    StructuredSummary {
+        parts,
+        template_parts,
+    }
 }
 
 /// One template against one message. Shared with the outline, which renders a
@@ -112,15 +120,15 @@ impl<'a> Scene<'a> {
 
     /// The main template, then the built-in detail behind a separator when
     /// both say something.
-    fn summary(&self, out: &mut impl Output, options: &Options) {
+    fn summary(&self, out: &mut impl Output, options: &Options) -> usize {
         self.render(out, &options.template, None);
+        let main = out.len();
         if !options.details || options.template.mentions_details() {
-            return;
+            return main;
         }
         let Some(template) = detail_template(self.analysis) else {
-            return;
+            return main;
         };
-        let main = out.len();
         if main > 0 {
             out.write(SEPARATOR, || None);
         }
@@ -129,6 +137,7 @@ impl<'a> Scene<'a> {
         if out.len() == before {
             out.truncate(main);
         }
+        main
     }
 
     /// `literal` is the style of the literals in this template: the marker
@@ -477,8 +486,11 @@ mod tests {
         // Both: an order has details to say, behind one more separator than
         // the default template spells itself.
         let (bytes, message) = message_of(ORDER);
-        let parts = structured(&bytes, &message, &Options::default(), false);
-        let main_only = structured(&bytes, &message, &options(DEFAULT_TEMPLATE, false), false);
+        let summary = structured(&bytes, &message, &Options::default(), false);
+        let parts = summary.parts;
+        let main_only =
+            structured(&bytes, &message, &options(DEFAULT_TEMPLATE, false), false).parts;
+        assert_eq!(&parts[..summary.template_parts], main_only);
         assert_eq!(separators(&parts), separators(&main_only) + 1, "{parts:?}");
         assert!(parts.iter().all(|part| !part.value.is_empty()));
         assert_eq!(
@@ -488,18 +500,22 @@ mod tests {
 
         // Details alone: nothing in the template, but an order still has them,
         // and no separator leads them.
-        let parts = structured(&bytes, &message, &empty(), false);
+        let summary = structured(&bytes, &message, &empty(), false);
+        assert_eq!(summary.template_parts, 0);
+        let parts = summary.parts;
         assert_eq!(separators(&parts), 0, "{parts:?}");
         assert_eq!(Some(text_of(&parts)), details_of(ORDER));
 
         // Main alone: a session message has no second half to its summary.
         let (bytes, message) = message_of(HEARTBEAT);
-        let parts = structured(&bytes, &message, &Options::default(), false);
+        let parts = structured(&bytes, &message, &Options::default(), false).parts;
         assert_eq!(text_of(&parts), main_of(HEARTBEAT));
 
         // Neither: nothing at all, rather than an empty part LSP forbids.
         let nothing = options("", false);
-        assert!(structured(&bytes, &message, &nothing, false).is_empty());
+        assert!(structured(&bytes, &message, &nothing, false)
+            .parts
+            .is_empty());
         assert_eq!(summary_joined(&bytes, &message, &nothing), None);
     }
 
@@ -635,7 +651,7 @@ mod tests {
             r#"{sender}=>{target}{43="Y"?" [POSS DUP]{38}"}{43 in "Y"?" also"}{43?" present"}{43 in "Y","N"?" boolean"}{43="N"?"":" not N"}"#,
             true,
         );
-        let parts = structured(&bytes, &message, &options, true);
+        let parts = structured(&bytes, &message, &options, true).parts;
         assert_eq!(
             Some(text_of(&parts)),
             summary_joined(&bytes, &message, &options)
@@ -668,6 +684,7 @@ mod tests {
         assert_ne!(mods_of("ALPHA") & tokens::Mod::Peer1.bit(), 0);
         assert_ne!(mods_of("BETA") & tokens::Mod::Peer2.bit(), 0);
         assert!(structured(&bytes, &message, &options, false)
+            .parts
             .iter()
             .all(|part| part.style.is_none()));
     }
@@ -679,15 +696,9 @@ mod tests {
             Some("Trade @ ClOrdId= ExecId=")
         );
         let (line, message) = message_of("8=FIX.4.4|35=5|58=bye|");
-        assert_eq!(
-            text_of(&structured(
-                &line,
-                &message,
-                &options(r#"{58?"{details}"}"#, true),
-                true
-            )),
-            "bye"
-        );
+        let summary = structured(&line, &message, &options(r#"{58?"{details}"}"#, true), true);
+        assert_eq!(summary.template_parts, summary.parts.len());
+        assert_eq!(text_of(&summary.parts), "bye");
     }
     #[test]
     fn optional_quotes_keep_quoted_and_bare_templates_equivalent() {
