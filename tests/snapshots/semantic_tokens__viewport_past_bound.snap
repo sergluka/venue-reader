@@ -1,0 +1,5 @@
+---
+source: tests/semantic_tokens.rs
+expression: answer
+---
+{"data": []}

@@ -1,0 +1,89 @@
+---
+source: tests/code_action.rs
+expression: offered
+---
+[
+  {
+    "diagnostics": [
+      {
+        "code": "bodyLength",
+        "data": {
+          "rule": "integrity"
+        },
+        "message": "BodyLength is 7, expected 139",
+        "range": {
+          "end": {
+            "character": 13,
+            "line": 0
+          },
+          "start": {
+            "character": 12,
+            "line": 0
+          }
+        },
+        "severity": 1,
+        "source": "fix"
+      },
+      {
+        "code": "checkSum",
+        "data": {
+          "rule": "integrity"
+        },
+        "message": "CheckSum is 001, expected 213",
+        "range": {
+          "end": {
+            "character": 159,
+            "line": 0
+          },
+          "start": {
+            "character": 156,
+            "line": 0
+          }
+        },
+        "severity": 1,
+        "source": "fix"
+      }
+    ],
+    "edit": {
+      "documentChanges": [
+        {
+          "edits": [
+            {
+              "newText": "139",
+              "range": {
+                "end": {
+                  "character": 13,
+                  "line": 0
+                },
+                "start": {
+                  "character": 12,
+                  "line": 0
+                }
+              }
+            },
+            {
+              "newText": "213",
+              "range": {
+                "end": {
+                  "character": 159,
+                  "line": 0
+                },
+                "start": {
+                  "character": 156,
+                  "line": 0
+                }
+              }
+            }
+          ],
+          "textDocument": {
+            "uri": "file:///a.fix",
+            "version": 1
+          }
+        }
+      ]
+    },
+    "isPreferred": true,
+    "kind": "quickfix",
+    "title": "Fix BodyLength and CheckSum"
+  }
+]

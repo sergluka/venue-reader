@@ -1,0 +1,20 @@
+---
+source: tests/hover.rs
+expression: "desk_hover(&mut client, \"55=\")"
+---
+{
+  "contents": {
+    "kind": "markdown",
+    "value": "**Symbol** (55) — STRING\n\n*Standard FIX.4.4*\n\n---\n\nValue: `X`\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/4.4/tagNum_55.html)"
+  },
+  "range": {
+    "end": {
+      "character": 19,
+      "line": 0
+    },
+    "start": {
+      "character": 15,
+      "line": 0
+    }
+  }
+}

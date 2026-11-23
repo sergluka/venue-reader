@@ -1,0 +1,20 @@
+---
+source: tests/hover.rs
+expression: "at(&mut client, LINE.find(tag).unwrap() as u32)"
+---
+{
+  "contents": {
+    "kind": "markdown",
+    "value": "**Side** (54) — char\n\nSide of order (see Volume : \"Glossary\" for value definitions)\n\n*Introduced in FIX.2.7*\n\n---\n\nValue: `1` — **Buy**\n\n*Introduced in FIX.2.7*\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/5.0.SP2/tagNum_54.html)"
+  },
+  "range": {
+    "end": {
+      "character": 37,
+      "line": 0
+    },
+    "start": {
+      "character": 33,
+      "line": 0
+    }
+  }
+}

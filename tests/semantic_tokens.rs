@@ -72,44 +72,7 @@ fn a_client_is_offered_the_shape_it_declared_and_not_the_other() {
 fn the_legend_goes_out_in_wire_order() {
     let (client, result) = open("full", 1);
     let legend = &provider(&result)["legend"];
-    assert_eq!(
-        legend["tokenTypes"],
-        json!([
-            "property",
-            "enumMember",
-            "number",
-            "price",
-            "quantity",
-            "money",
-            "string",
-            "keyword",
-            "namespace",
-            "comment",
-            "timestamp",
-            "group",
-            "flag",
-        ])
-    );
-    assert_eq!(
-        legend["tokenModifiers"],
-        json!([
-            "deprecated",
-            "header",
-            "trailer",
-            "session",
-            "possDup",
-            "unknown",
-            "count",
-            "group1a",
-            "group1b",
-            "group2a",
-            "group2b",
-            "group3a",
-            "group3b",
-            "peer1",
-            "peer2",
-        ])
-    );
+    insta::assert_compact_json_snapshot!("legend", legend);
     client.shutdown();
 }
 
@@ -271,7 +234,7 @@ fn a_viewport_past_the_bound_is_answered_empty_and_says_why() {
             }}),
         )
         .expect("answered");
-    assert_eq!(answer["data"], json!([]), "{answer}");
+    insta::assert_compact_json_snapshot!("viewport_past_bound", answer);
     client.wait_for_log("rangeLines");
     client.shutdown();
 }

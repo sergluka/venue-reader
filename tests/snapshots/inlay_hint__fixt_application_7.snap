@@ -1,0 +1,21 @@
+---
+source: tests/inlay_hint.rs
+expression: hint_labels(&hints)
+---
+[
+  "NewOrderSingle (D) | Buy Day Limit 2 SYNTHETIC @ 10",
+  "(BeginString)",
+  "(MsgType)",
+  "(NewOrderSingle)",
+  "(ApplVerID)",
+  "(FIX50)",
+  "(Side)",
+  "(Buy)",
+  "(OrderQty)",
+  "(Symbol)",
+  "(OrdType)",
+  "(Limit)",
+  "(TimeInForce)",
+  "(Day)",
+  "(Price)"
+]

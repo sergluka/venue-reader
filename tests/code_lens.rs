@@ -44,11 +44,8 @@ fn a_lens_marks_every_message_line_and_only_those() {
     let text = format!("# a comment\n\n{HEARTBEAT}\nnot a fix line at all\n{HEARTBEAT}");
     let mut client = open(&text);
     let found = lenses(&mut client);
-    let lines: Vec<u64> = found
-        .iter()
-        .map(|lens| lens["range"]["start"]["line"].as_u64().unwrap())
-        .collect();
-    assert_eq!(lines, vec![2, 4], "{found:#?}");
+    let ranges: Vec<_> = found.iter().map(|lens| &lens["range"]).collect();
+    insta::assert_compact_json_snapshot!("message_line_ranges", ranges);
     client.shutdown();
 }
 
@@ -57,10 +54,12 @@ fn a_lens_marks_every_message_line_and_only_those() {
 fn the_list_carries_no_command() {
     let mut client = open(HEARTBEAT);
     let found = lenses(&mut client);
-    assert_eq!(found.len(), 1);
-    assert!(found[0].get("command").is_none(), "{:#?}", found[0]);
-    assert_eq!(found[0]["data"]["line"], 0);
-    assert_eq!(found[0]["data"]["version"], 1);
+    let hash = found[0]["data"]["hash"].as_str().expect("a hex hash");
+    assert_eq!(hash.len(), 16);
+    assert!(hash.bytes().all(|digit| digit.is_ascii_hexdigit()));
+    insta::assert_compact_json_snapshot!("unresolved_lens", found, {
+        "[].data.hash" => "[line hash]",
+    });
     client.shutdown();
 }
 
@@ -275,12 +274,7 @@ fn resolve_fills_the_title_with_the_summary() {
     let mut client = open(HEARTBEAT);
     let lens = lenses(&mut client)[0].clone();
     let resolved = client.request("codeLens/resolve", lens).expect("answered");
-    let title = resolved["command"]["title"].as_str().expect("a title");
-    assert!(!title.is_empty(), "{resolved}");
-    assert_eq!(
-        resolved["command"]["command"], "",
-        "a title with no command is how a lens becomes a label"
-    );
+    insta::assert_compact_json_snapshot!("resolved_command", resolved["command"]);
     client.shutdown();
 }
 
@@ -389,11 +383,7 @@ fn a_client_that_loses_the_lens_channel_is_told_which_setting_restores_it() {
         "textDocument": { "codeLens": { "resolveSupport": { "properties": ["range"] } } },
     }));
     let logged = client.wait_for("window/logMessage");
-    let text = logged["message"].as_str().expect("text");
-    assert!(
-        text.contains("messageSummary.channels.inlayHints"),
-        "{text}"
-    );
+    insta::assert_compact_json_snapshot!("channel_warning", logged);
     client.shutdown();
 
     // And nothing is said to a client that keeps the channel.

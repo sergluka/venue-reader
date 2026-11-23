@@ -1,0 +1,20 @@
+---
+source: tests/hover.rs
+expression: "at(&mut client, LINE.find(tag).unwrap() as u32)"
+---
+{
+  "contents": {
+    "kind": "markdown",
+    "value": "**PartyID** (448) — String\n\nParty identifier/code. See PartyIDSource (447) and PartyRole (452).\n\n*Introduced in FIX.4.3*\n\n---\n\nValue: `P`\n\nGroup: `NoPartyIDs/1/PartyID`\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/5.0.SP2/tagNum_448.html)"
+  },
+  "range": {
+    "end": {
+      "character": 49,
+      "line": 0
+    },
+    "start": {
+      "character": 44,
+      "line": 0
+    }
+  }
+}

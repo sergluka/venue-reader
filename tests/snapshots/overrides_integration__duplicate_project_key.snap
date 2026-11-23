@@ -1,0 +1,15 @@
+---
+source: tests/overrides_integration.rs
+expression: warnings
+---
+[
+  {
+    "key": "projectConfig",
+    "message": "TOML parse error at line 2, column 7\n  |\n2 | hover.enabled = true\n  |       ^^^^^^^\nduplicate key\n",
+    "severity": "error",
+    "source": {
+      "layer": "project",
+      "source": "file:///workspace/logs/.venue-reader.toml"
+    }
+  }
+]

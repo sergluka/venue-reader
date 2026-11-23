@@ -1,0 +1,19 @@
+---
+source: tests/overrides_integration.rs
+expression: selected
+---
+{
+  "application": {
+    "customVersion": null,
+    "extensionPack": null,
+    "source": "<workspace>/dict.xml",
+    "version": "FIX.4.4"
+  },
+  "name": "venue",
+  "source": "<workspace>/dict.xml",
+  "transport": {
+    "source": "<workspace>/dict.xml",
+    "version": "FIX.4.4"
+  },
+  "version": "FIX.4.4"
+}

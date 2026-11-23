@@ -111,25 +111,7 @@ fn fragments_report_presence_without_guessing_envelope_values() {
     let mut client = TestClient::start();
     open(&mut client, &lines.join("\n"));
     let published = client.wait_for("textDocument/publishDiagnostics");
-    let diagnostics = published["diagnostics"].as_array().unwrap();
-    for (line, expected) in [
-        (0, vec!["beginString", "bodyLength", "checkSum"]),
-        (1, vec!["bodyLength", "checkSum"]),
-        (2, vec!["beginString"]),
-        (3, vec![]),
-        (4, vec![]),
-    ] {
-        let mut actual: Vec<_> = diagnostics
-            .iter()
-            .filter(|diagnostic| {
-                diagnostic["range"]["start"]["line"] == line
-                    && diagnostic["data"]["rule"] == "integrity"
-            })
-            .map(|diagnostic| diagnostic["code"].as_str().unwrap())
-            .collect();
-        actual.sort();
-        assert_eq!(actual, expected, "{}", lines[line]);
-    }
+    insta::assert_json_snapshot!("fragment_presence", published);
     client.shutdown();
 }
 
@@ -140,25 +122,14 @@ fn integrity_severity_and_disable_govern_all_three_envelope_codes() {
     client.answer_base_pull();
     client.did_open(URI, "55=X|", 1);
     let published = client.wait_for("textDocument/publishDiagnostics");
-    assert_eq!(codes(&published).len(), 3);
-    for diagnostic in published["diagnostics"].as_array().unwrap() {
-        assert_eq!(diagnostic["severity"], 1);
-        assert_eq!(diagnostic["data"]["rule"], "integrity");
-    }
+    insta::assert_json_snapshot!("default_integrity", published);
 
     pull(
         &mut client,
         json!({"diagnostics": {"rules": {"integrity": {"severity": "hint"}}}}),
     );
     let published = last_publish(&client.drain_notifications(QUIET), URI).expect("regraded");
-    assert_eq!(published["version"], 1);
-    let mut found = codes(&published);
-    found.sort();
-    assert_eq!(found, ["beginString", "bodyLength", "checkSum"]);
-    for diagnostic in published["diagnostics"].as_array().unwrap() {
-        assert_eq!(diagnostic["severity"], 4);
-        assert_eq!(diagnostic["data"]["rule"], "integrity");
-    }
+    insta::assert_json_snapshot!("regraded_integrity", published);
 
     pull(
         &mut client,
@@ -175,17 +146,7 @@ fn opening_a_document_publishes_its_problems() {
     let mut client = TestClient::start();
     open(&mut client, BAD_BOTH);
     let params = client.wait_for("textDocument/publishDiagnostics");
-    assert_eq!(params["uri"], URI);
-    assert_eq!(params["version"], 1);
-    let mut found = codes(&params);
-    found.sort();
-    assert_eq!(found, vec!["bodyLength", "checkSum"]);
-    let first = &params["diagnostics"][0];
-    assert_eq!(first["source"], "fix");
-    assert_eq!(
-        first["data"]["rule"], "integrity",
-        "the rule that governs it, not the code"
-    );
+    insta::assert_json_snapshot!("open_problems", params);
     client.shutdown();
 }
 
@@ -197,8 +158,7 @@ fn a_sound_document_is_published_as_clean_exactly_once() {
     let mut client = TestClient::start();
     open(&mut client, SOUND);
     let first = client.wait_for("textDocument/publishDiagnostics");
-    assert_eq!(first["version"], 1);
-    assert_eq!(codes(&first), Vec::<String>::new());
+    insta::assert_json_snapshot!("clean_publish", first);
 
     client.did_change_full(URI, SOUND, 2);
     let notes = client.drain_notifications(QUIET);
@@ -220,8 +180,7 @@ fn an_edit_republishes_at_the_new_version() {
     client.did_change_full(URI, SOUND, 2);
     let notes = client.drain_notifications(QUIET);
     let last = last_publish(&notes, URI).expect("the fix is published too");
-    assert_eq!(last["version"], 2);
-    assert_eq!(codes(&last), Vec::<String>::new(), "the problems are gone");
+    insta::assert_json_snapshot!("edit_clears_problems", last);
     client.shutdown();
 }
 
@@ -256,7 +215,7 @@ fn closing_a_document_clears_its_marks_once() {
         .filter(|(m, p)| m == "textDocument/publishDiagnostics" && p["uri"] == URI)
         .collect();
     assert_eq!(publishes.len(), 1, "{publishes:?}");
-    assert_eq!(codes(&publishes[0].1), Vec::<String>::new());
+    insta::assert_json_snapshot!("close_clears_marks", publishes[0].1);
     client.shutdown();
 }
 
@@ -317,14 +276,7 @@ fn a_severity_change_republishes_at_the_same_version() {
 
     let notes = client.drain_notifications(QUIET);
     let last = last_publish(&notes, URI).expect("republished");
-    assert_eq!(last["version"], 1, "the document did not move");
-    let regraded = last["diagnostics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|d| d["code"] == "bodyLength")
-        .expect("still reported");
-    assert_eq!(regraded["severity"], 4, "hint");
+    insta::assert_json_snapshot!("hint_severity", last);
     client.shutdown();
 }
 
@@ -345,17 +297,7 @@ fn the_cap_says_how_many_it_left_out() {
 
     let notes = client.drain_notifications(QUIET);
     let last = last_publish(&notes, URI).expect("published");
-    let mut found = codes(&last);
-    found.sort();
-    assert_eq!(found.len(), 2, "one problem plus the count: {found:?}");
-    assert!(found.contains(&"truncated".to_owned()), "{found:?}");
-    let more = last["diagnostics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|d| d["code"] == "truncated")
-        .unwrap();
-    assert_eq!(more["message"], "5 more problems not shown");
+    insta::assert_json_snapshot!("truncated_publish", last);
 
     // The diagnostic marks the file; the log message names the setting that
     // would show the rest. A user looking at a document that stops being
@@ -370,13 +312,7 @@ fn the_cap_says_how_many_it_left_out() {
                 .is_some_and(|text| text.contains("diagnosticsPerDocument"))
         })
         .expect("the cap is reported to the client's log");
-    assert_eq!(
-        logged["type"], 3,
-        "info: a log too large for the cap is ordinary, not a defect"
-    );
-    let text = logged["message"].as_str().unwrap();
-    assert!(text.contains("showing 1 problems of 6"), "{text}");
-    assert!(text.contains("diagnosticsPerDocument"), "{text}");
+    insta::assert_json_snapshot!("truncation_log", logged);
     client.shutdown();
 }
 
@@ -395,22 +331,6 @@ fn pull(client: &mut TestClient, settings: Value) {
     answer(client, settings);
 }
 
-/// `(code, severity, start line)` of every diagnostic in a publish.
-fn shown(publish: &Value) -> Vec<(String, u64, u64)> {
-    publish["diagnostics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|diagnostic| {
-            (
-                diagnostic["code"].as_str().unwrap().to_owned(),
-                diagnostic["severity"].as_u64().unwrap(),
-                diagnostic["range"]["start"]["line"].as_u64().unwrap(),
-            )
-        })
-        .collect()
-}
-
 /// The message of the `code` diagnostic in a publish that mentions `needle`.
 fn message_on(publish: &Value, code: &str, needle: &str) -> String {
     publish["diagnostics"]
@@ -421,13 +341,6 @@ fn message_on(publish: &Value, code: &str, needle: &str) -> String {
         .map(|diagnostic| diagnostic["message"].as_str().unwrap().to_owned())
         .find(|message| message.contains(needle))
         .unwrap_or_else(|| panic!("{code} on {needle}: {publish}"))
-}
-
-/// The message of the last diagnostic, which the cap's `truncated` always is.
-fn truncated_message(publish: &Value) -> &str {
-    publish["diagnostics"].as_array().unwrap().last().unwrap()["message"]
-        .as_str()
-        .unwrap()
 }
 
 /// Findings regraded to hint fill the cap first; the errors further down still
@@ -450,15 +363,7 @@ fn the_cap_keeps_the_most_severe_problems() {
 
     let notes = client.drain_notifications(QUIET);
     let last = last_publish(&notes, URI).expect("published");
-    assert_eq!(
-        shown(&last),
-        [
-            ("bodyLength".to_owned(), 1, 2),
-            ("checkSum".to_owned(), 1, 2),
-            ("truncated".to_owned(), 3, 0),
-        ]
-    );
-    assert_eq!(truncated_message(&last), "2 more problems not shown");
+    insta::assert_json_snapshot!("severe_findings_take_precedence", last);
     client.shutdown();
 }
 
@@ -595,13 +500,7 @@ fn unsupported_dictionary_names_on_the_wire_publish_no_unknown_message_types() {
     );
     let published = client.wait_for("textDocument/publishDiagnostics");
     assert_eq!(unknown_findings(&published), []);
-    assert_eq!(
-        codes(&published)
-            .iter()
-            .filter(|code| code.as_str() == "unknownVersion")
-            .count(),
-        4
-    );
+    insta::assert_json_snapshot!("unsupported_version_codes", codes(&published));
     client.shutdown();
 }
 
@@ -615,21 +514,7 @@ fn an_application_only_custom_dictionary_publishes_unknown_message_types() {
     let mut client = workspace.client(workspace.desk_dictionary(dictionary));
     client.did_open(URI, "8=FIX.4.4|35=U1|", 1);
     let published = client.wait_for("textDocument/publishDiagnostics");
-    assert_eq!(unknown_findings(&published), [finding("unknownMsgType", 1)]);
-    assert_eq!(
-        message_on(&published, "unknownMsgType", "U1"),
-        "\"desk\" does not define MsgType(35) = U1"
-    );
-    let diagnostic = published["diagnostics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|diagnostic| diagnostic["code"] == "unknownMsgType")
-        .unwrap();
-    assert_eq!(
-        diagnostic["range"],
-        json!({ "start": { "line": 0, "character": 13 }, "end": { "line": 0, "character": 15 } })
-    );
+    insta::assert_json_snapshot!("custom_unknown_message", published);
 
     client.did_change_full(URI, "8=FIX.4.4|35=D|", 2);
     let published = client.wait_for("textDocument/publishDiagnostics");
@@ -862,16 +747,7 @@ fn info_findings_never_keep_an_error_out() {
     client.did_open(URI, &text, 1);
 
     let last = last_publish(&client.drain_notifications(QUIET), URI).expect("published");
-    assert_eq!(
-        shown(&last),
-        [
-            ("bodyLength".to_owned(), 1, 2),
-            ("checkSum".to_owned(), 1, 2),
-            ("unknownMsgType".to_owned(), 1, 3),
-            ("truncated".to_owned(), 3, 0),
-        ]
-    );
-    assert_eq!(truncated_message(&last), "6 more problems not shown");
+    insta::assert_json_snapshot!("errors_displace_info", last);
     client.shutdown();
 }
 
@@ -1041,17 +917,7 @@ fn fixt_application_tables_publish_unknown_types_without_a_session_layer() {
         "8=FIXT.1.1|35=U1|1128=7|\n8=FIXT.1.1|35=U1|1128=8|\n8=FIXT.1.1|35=U1|1128=9|",
     );
     let published = client.wait_for("textDocument/publishDiagnostics");
-    assert_eq!(
-        unknown_findings(&published),
-        [
-            finding("unknownMsgType", 1),
-            finding("unknownMsgType", 1),
-            finding("unknownMsgType", 1)
-        ]
-    );
-    assert!(!codes(&published)
-        .iter()
-        .any(|code| code == "unknownVersion"));
+    insta::assert_json_snapshot!("fixt_application_codes", published);
     client.shutdown();
 }
 
@@ -1069,8 +935,7 @@ fn a_logon_does_not_supply_an_application_default_to_another_line() {
         .iter()
         .filter(|diagnostic| diagnostic["code"] == "unknownVersion")
         .collect();
-    assert_eq!(version_problems.len(), 1);
-    assert_eq!(version_problems[0]["range"]["start"]["line"], 1);
+    insta::assert_json_snapshot!("logon_application_default", version_problems);
     client.shutdown();
 }
 
@@ -1084,10 +949,7 @@ fn administrative_selectors_are_reported_without_an_application_default() {
         .iter()
         .find(|diagnostic| diagnostic["code"] == "unknownVersion")
         .unwrap();
-    assert_eq!(
-        problem["message"],
-        "ApplVerID(1128) is prohibited on an administrative message"
-    );
+    insta::assert_json_snapshot!("admin_selector", problem);
     assert_eq!(unknown_findings(&published), []);
     client.shutdown();
 }
@@ -1099,31 +961,14 @@ fn missing_message_type_and_integrity_fields_keep_their_existing_rule_controls()
     client.answer_base_pull();
     client.did_open(URI, "8=FIX.4.4|55=X|", 1);
     let published = client.wait_for("textDocument/publishDiagnostics");
-    let mut found = codes(&published);
-    found.sort();
-    assert_eq!(found, ["bodyLength", "checkSum", "missingMsgType"]);
-    let problem = published["diagnostics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|diagnostic| diagnostic["code"] == "missingMsgType")
-        .unwrap();
-    assert_eq!(problem["data"]["rule"], "unknownMsgType");
-    assert_eq!(problem["severity"], 1, "missing MsgType(35) is an error");
+    insta::assert_json_snapshot!("missing_message_type", published);
     pull(
         &mut client,
         json!({"diagnostics": {"rules": {"unknownMsgType": {"severity": "info"}}}}),
     );
     let notes = client.drain_notifications(QUIET);
     let published = last_publish(&notes, URI).expect("republished");
-    assert_eq!(
-        shown(&published),
-        [
-            ("bodyLength".to_owned(), 1, 0),
-            ("checkSum".to_owned(), 1, 0),
-            ("missingMsgType".to_owned(), 3, 0),
-        ]
-    );
+    insta::assert_json_snapshot!("regraded_missing_message_type", published);
     pull(
         &mut client,
         json!({"diagnostics": {"rules": {"unknownMsgType": false}}}),
@@ -1180,9 +1025,6 @@ fn invalid_and_repeated_selectors_publish_resolution_errors_without_body_guesses
         .iter()
         .filter(|diagnostic| diagnostic["code"] == "unknownVersion")
         .collect();
-    assert_eq!(version_problems.len(), lines.len());
-    for (line, problem) in version_problems.iter().enumerate() {
-        assert_eq!(problem["range"]["start"]["line"], line);
-    }
+    insta::assert_json_snapshot!("invalid_selectors", version_problems);
     client.shutdown();
 }

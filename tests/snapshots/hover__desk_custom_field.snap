@@ -1,0 +1,20 @@
+---
+source: tests/hover.rs
+expression: "desk_hover(&mut client, \"20001=\")"
+---
+{
+  "contents": {
+    "kind": "markdown",
+    "value": "**DeskMode** (20001) — INT\n\n*Custom field, introduced in \"desk\"*\n\n---\n\nValue: `1` — **ALPHA**"
+  },
+  "range": {
+    "end": {
+      "character": 34,
+      "line": 0
+    },
+    "start": {
+      "character": 27,
+      "line": 0
+    }
+  }
+}

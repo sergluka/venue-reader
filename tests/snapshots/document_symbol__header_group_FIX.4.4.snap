@@ -1,0 +1,58 @@
+---
+source: tests/document_symbol.rs
+expression: hierarchy(outline(&mut client))
+---
+[
+  {
+    "children": [
+      {
+        "kind": 8,
+        "name": "BeginString (8) = FIX.4.4"
+      },
+      {
+        "kind": 8,
+        "name": "MsgType (35) = 0 (Heartbeat)"
+      },
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "kind": 8,
+                "name": "HopCompID (628) = A"
+              },
+              {
+                "kind": 8,
+                "name": "HopRefID (630) = 1"
+              }
+            ],
+            "kind": 23,
+            "name": "[1]"
+          },
+          {
+            "children": [
+              {
+                "kind": 8,
+                "name": "HopCompID (628) = B"
+              },
+              {
+                "kind": 8,
+                "name": "HopRefID (630) = 2"
+              }
+            ],
+            "kind": 23,
+            "name": "[2]"
+          }
+        ],
+        "kind": 18,
+        "name": "NoHops (627) = 2"
+      },
+      {
+        "kind": 8,
+        "name": "TestReqID (112) = T"
+      }
+    ],
+    "kind": 19,
+    "name": "# → Heartbeat (0)"
+  }
+]

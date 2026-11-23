@@ -1,0 +1,20 @@
+---
+source: tests/hover.rs
+expression: "at(&mut client, LINE.find(field).unwrap() as u32)"
+---
+{
+  "contents": {
+    "kind": "markdown",
+    "value": "**ApplicationSide** (54) — CHAR\n\n*Standard FIX.5.0SP2*\n\n---\n\nValue: `1` — **APPLICATION_VALUE**\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/5.0.SP2/tagNum_54.html)"
+  },
+  "range": {
+    "end": {
+      "character": 32,
+      "line": 0
+    },
+    "start": {
+      "character": 28,
+      "line": 0
+    }
+  }
+}

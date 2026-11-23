@@ -11,3 +11,5 @@ __pycache__/
 # Developer-local direnv setup.
 .envrc
 nvim.log
+
+*.snap.new

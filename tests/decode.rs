@@ -59,20 +59,7 @@ fn every_range_and_empty_source_row_keeps_its_identity() {
         ]),
     )
     .unwrap();
-    assert_eq!(
-        answer,
-        json!({
-            "textDocument":{"uri":URI,"version":1},
-            "results":[
-                {"rangeIndex":0,"lines":[{"line":4,"text":DECODED_TYPE}]},
-                {"rangeIndex":1,"lines":[{"line":1,"text":""}]},
-                {"rangeIndex":2,"lines":[{"line":0,"text":""}]},
-                {"rangeIndex":3,"lines":[{"line":3,"text":""}]},
-                {"rangeIndex":4,"lines":[{"line":0,"text":DECODED_TYPE}]},
-                {"rangeIndex":5,"lines":[{"line":0,"text":DECODED_TYPE}]}
-            ]
-        })
-    );
+    insta::assert_json_snapshot!("requested_ranges", answer);
     assert_eq!(
         decode(&mut client, json!([range(3, 0, 0, 10)])).unwrap(),
         result(&[DECODED_TYPE, "", "", ""])
@@ -92,10 +79,8 @@ fn every_range_and_empty_source_row_keeps_its_identity() {
 #[test]
 fn an_empty_document_has_one_explicit_empty_row() {
     let mut client = start("", json!({}));
-    assert_eq!(
-        decode(&mut client, json!([range(0, 0, 0, 0)])).unwrap(),
-        result(&[""])
-    );
+    let answer = decode(&mut client, json!([range(0, 0, 0, 0)])).unwrap();
+    insta::assert_json_snapshot!("empty_document", answer);
     client.shutdown();
 }
 
@@ -121,9 +106,8 @@ fn unicode_selections_use_the_negotiated_encoding_and_existing_field_spelling() 
             range(0, type_start, 0, type_start + 1),
             range(0, emoji_start, 0, emoji_end)
         ]);
-        let answer = decode(&mut client, ranges.clone()).unwrap();
-        assert_eq!(answer["results"][0]["lines"][0]["text"], DECODED_TYPE);
-        assert_eq!(answer["results"][1]["lines"][0]["text"], "58(Text)=é😀");
+        let answer = decode(&mut client, ranges).unwrap();
+        insta::assert_json_snapshot!(format!("unicode_selection_{encoding}"), answer);
         client.shutdown();
     }
 }
@@ -209,11 +193,7 @@ fn edits_close_and_reopen_return_the_snapshot_data_and_version() {
     let mut client = start(HEARTBEAT, json!({}));
     client.did_change_full(URI, "8=FIX.4.4|35=1|", 2);
     let current = decode(&mut client, json!([range(0, 10, 0, 14)])).unwrap();
-    assert_eq!(current["textDocument"], json!({"uri":URI,"version":2}));
-    assert_eq!(
-        current["results"][0]["lines"][0]["text"],
-        "35(MsgType)=1(TestRequest)"
-    );
+    insta::assert_json_snapshot!("edited_document", current);
     client.did_close(URI);
     assert_eq!(
         decode(&mut client, json!([range(0, 10, 0, 14)])),
@@ -221,8 +201,7 @@ fn edits_close_and_reopen_return_the_snapshot_data_and_version() {
     );
     client.did_open(URI, HEARTBEAT, 7);
     let reopened = decode(&mut client, json!([range(0, 10, 0, 14)])).unwrap();
-    assert_eq!(reopened["textDocument"], json!({"uri":URI,"version":7}));
-    assert_eq!(reopened["results"][0]["lines"][0]["text"], DECODED_TYPE);
+    insta::assert_json_snapshot!("reopened_document", reopened);
     client.shutdown();
 }
 
@@ -290,14 +269,14 @@ fn empty_metadata_and_large_values_cannot_bypass_the_result_limit() {
 
 #[test]
 fn unknown_fields_group_paths_and_fixt_fields_have_explicit_rendering() {
-    for (message,expected) in [
-        ("8=FIX.4.4|35=0|9999=synthetic|", "8(BeginString)=FIX.4.4|35(MsgType)=0(Heartbeat)|9999=synthetic"),
-        ("8=FIX.4.4|35=W|268=1|269=0|270=1|", "8(BeginString)=FIX.4.4|35(MsgType)=W(MarketDataSnapshotFullRefresh)|268(NoMDEntries)=1|269(NoMDEntries/1/MDEntryType)=0(Bid)|270(NoMDEntries/1/MDEntryPx)=1"),
-        ("8=FIXT.1.1|35=D|1128=7|54=1|", "8(BeginString)=FIXT.1.1|35(MsgType)=D(NewOrderSingle)|1128(ApplVerID)=7(FIX50)|54(Side)=1(Buy)"),
+    for (name, message) in [
+        ("unknown_field", "8=FIX.4.4|35=0|9999=synthetic|"),
+        ("repeating_group", "8=FIX.4.4|35=W|268=1|269=0|270=1|"),
+        ("transport_and_application", "8=FIXT.1.1|35=D|1128=7|54=1|"),
     ] {
         let mut client = start(message, json!({}));
-        let answer = decode(&mut client, json!([range(0,0,0,u32::MAX)])).unwrap();
-        assert_eq!(answer, result(&[expected]));
+        let answer = decode(&mut client, json!([range(0, 0, 0, u32::MAX)])).unwrap();
+        insta::assert_json_snapshot!(name, answer);
         client.shutdown();
     }
 }
@@ -316,11 +295,7 @@ fn a_committed_render_change_applies_without_a_document_version_change() {
     );
     client.wait_effective(URI, "inlayHints.tagNames.format", json!("[{}]"));
     let answer = decode(&mut client, ranges).unwrap();
-    assert_eq!(answer["textDocument"]["version"], 1);
-    assert_eq!(
-        answer["results"][0]["lines"][0]["text"],
-        "35[MsgType]=0(Heartbeat)"
-    );
+    insta::assert_json_snapshot!("updated_render", answer);
     client.shutdown();
 }
 
@@ -376,9 +351,9 @@ fn cancellation_after_dispatch_produces_no_duplicate_response() {
     let responses = client.responses_through_barrier(&barrier);
     assert_eq!(responses.len(), 2);
     assert_eq!(responses[0].id, request);
-    assert_eq!(
-        responses[0].response_result.as_ref().unwrap(),
-        &result(&[DECODED_TYPE])
+    insta::assert_json_snapshot!(
+        "dispatched_result",
+        responses[0].response_result.as_ref().unwrap()
     );
     assert_eq!(responses[1].id, barrier);
     client.notify("$/cancelRequest", json!({"id":request}));

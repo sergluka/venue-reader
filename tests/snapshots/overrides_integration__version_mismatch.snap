@@ -1,0 +1,25 @@
+---
+source: tests/overrides_integration.rs
+expression: mismatches
+---
+[
+  {
+    "code": "dictionaryVersion",
+    "data": {
+      "rule": "dictionaryVersion"
+    },
+    "message": "Selected dictionary version FIX.4.2 does not match resolved message version FIX.4.4",
+    "range": {
+      "end": {
+        "character": 9,
+        "line": 1
+      },
+      "start": {
+        "character": 0,
+        "line": 1
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  }
+]

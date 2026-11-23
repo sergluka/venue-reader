@@ -1,0 +1,14 @@
+---
+source: tests/fix_versions.rs
+expression: "select(&mut client, \"FIXT.1.1\")"
+---
+{
+  "application": null,
+  "name": "FIXT.1.1",
+  "source": "FIXT.1.1",
+  "transport": {
+    "source": "FIXT.1.1",
+    "version": "FIXT.1.1"
+  },
+  "version": "FIXT.1.1"
+}

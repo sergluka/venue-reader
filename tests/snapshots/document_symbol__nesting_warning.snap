@@ -1,0 +1,8 @@
+---
+source: tests/document_symbol.rs
+expression: logged
+---
+{
+  "message": "venue-reader: this client advertises no `textDocument.documentSymbol.hierarchicalDocumentSymbolSupport`, so no document-symbol provider is offered; the outline is only produced nested",
+  "type": 3
+}

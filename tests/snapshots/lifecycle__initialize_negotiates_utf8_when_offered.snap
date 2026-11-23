@@ -1,0 +1,70 @@
+---
+source: tests/lifecycle.rs
+expression: "res[\"capabilities\"]"
+---
+{
+  "codeLensProvider": {
+    "resolveProvider": true
+  },
+  "executeCommandProvider": {
+    "commands": [
+      "fix.decode",
+      "fix.useDictionary",
+      "fix.listDictionaries",
+      "fix.describeOverrides",
+      "fix.describeTag"
+    ]
+  },
+  "hoverProvider": true,
+  "inlayHintProvider": {
+    "resolveProvider": true
+  },
+  "positionEncoding": "utf-8",
+  "selectionRangeProvider": true,
+  "semanticTokensProvider": {
+    "full": {
+      "delta": true
+    },
+    "legend": {
+      "tokenModifiers": [
+        "deprecated",
+        "header",
+        "trailer",
+        "session",
+        "possDup",
+        "unknown",
+        "count",
+        "group1a",
+        "group1b",
+        "group2a",
+        "group2b",
+        "group3a",
+        "group3b",
+        "peer1",
+        "peer2"
+      ],
+      "tokenTypes": [
+        "property",
+        "enumMember",
+        "number",
+        "price",
+        "quantity",
+        "money",
+        "string",
+        "keyword",
+        "namespace",
+        "comment",
+        "timestamp",
+        "group",
+        "flag"
+      ]
+    }
+  },
+  "textDocumentSync": 2,
+  "workspace": {
+    "workspaceFolders": {
+      "changeNotifications": true,
+      "supported": true
+    }
+  }
+}

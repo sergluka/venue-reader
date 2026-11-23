@@ -1,0 +1,44 @@
+---
+source: tests/fix_versions.rs
+expression: findings
+---
+[
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Duplicate ApplVerID(1128)",
+    "range": {
+      "end": {
+        "character": 34,
+        "line": 0
+      },
+      "start": {
+        "character": 28,
+        "line": 0
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Duplicate MsgType(35)",
+    "range": {
+      "end": {
+        "character": 24,
+        "line": 1
+      },
+      "start": {
+        "character": 20,
+        "line": 1
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  }
+]

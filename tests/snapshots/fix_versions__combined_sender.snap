@@ -1,0 +1,5 @@
+---
+source: tests/fix_versions.rs
+expression: "hover(&mut client, &text, line, field)"
+---
+"**SenderCompID** (49) — STRING\n\n*Standard FIXT.1.1*\n\n---\n\nValue: `X` — **SYNTHETIC_TRANSPORT**\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/fixt1.1/tagNum_49.html)"

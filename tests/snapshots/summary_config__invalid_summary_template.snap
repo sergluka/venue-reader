@@ -1,0 +1,8 @@
+---
+source: tests/summary_config.rs
+expression: "warnings[0].1"
+---
+{
+  "message": "client: messageSummary.template: unknown reference \"nope\" at byte 0",
+  "type": 2
+}

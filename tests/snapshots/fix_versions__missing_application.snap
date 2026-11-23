@@ -1,0 +1,82 @@
+---
+source: tests/fix_versions.rs
+expression: findings
+---
+[
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Missing application version for MsgType(35)=D. Set ApplVerID(1128), defaultApplVerID, or select an application dictionary.",
+    "range": {
+      "end": {
+        "character": 10,
+        "line": 0
+      },
+      "start": {
+        "character": 0,
+        "line": 0
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Missing application version for MsgType(35)=6. Set ApplVerID(1128), defaultApplVerID, or select an application dictionary.",
+    "range": {
+      "end": {
+        "character": 10,
+        "line": 1
+      },
+      "start": {
+        "character": 0,
+        "line": 1
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Missing application version. Set ApplVerID(1128), defaultApplVerID, or select an application dictionary.",
+    "range": {
+      "end": {
+        "character": 10,
+        "line": 3
+      },
+      "start": {
+        "character": 0,
+        "line": 3
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "missingMsgType",
+    "data": {
+      "rule": "unknownMsgType"
+    },
+    "message": "Missing MsgType(35)",
+    "range": {
+      "end": {
+        "character": 10,
+        "line": 3
+      },
+      "start": {
+        "character": 0,
+        "line": 3
+      }
+    },
+    "severity": 1,
+    "source": "fix"
+  }
+]

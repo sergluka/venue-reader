@@ -1,0 +1,20 @@
+---
+source: tests/hover.rs
+expression: "at(&mut client, LINE.find(field).unwrap() as u32)"
+---
+{
+  "contents": {
+    "kind": "markdown",
+    "value": "**TransportSender** (49) — STRING\n\n*Standard FIXT.1.1*\n\n---\n\nValue: `S`\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/fixt1.1/tagNum_49.html)"
+  },
+  "range": {
+    "end": {
+      "character": 27,
+      "line": 0
+    },
+    "start": {
+      "character": 23,
+      "line": 0
+    }
+  }
+}

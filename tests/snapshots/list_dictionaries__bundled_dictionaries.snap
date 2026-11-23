@@ -1,0 +1,163 @@
+---
+source: tests/list_dictionaries.rs
+expression: choices
+---
+[
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.4.0",
+      "version": "FIX.4.0"
+    },
+    "definedIn": null,
+    "kind": "bundled",
+    "label": "FIX.4.0 (bundled)",
+    "name": "FIX.4.0",
+    "source": "FIX.4.0",
+    "transport": {
+      "source": "FIX.4.0",
+      "version": "FIX.4.0"
+    },
+    "version": "FIX.4.0"
+  },
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.4.1",
+      "version": "FIX.4.1"
+    },
+    "definedIn": null,
+    "kind": "bundled",
+    "label": "FIX.4.1 (bundled)",
+    "name": "FIX.4.1",
+    "source": "FIX.4.1",
+    "transport": {
+      "source": "FIX.4.1",
+      "version": "FIX.4.1"
+    },
+    "version": "FIX.4.1"
+  },
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.4.2",
+      "version": "FIX.4.2"
+    },
+    "definedIn": null,
+    "kind": "bundled",
+    "label": "FIX.4.2 (bundled)",
+    "name": "FIX.4.2",
+    "source": "FIX.4.2",
+    "transport": {
+      "source": "FIX.4.2",
+      "version": "FIX.4.2"
+    },
+    "version": "FIX.4.2"
+  },
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.4.3",
+      "version": "FIX.4.3"
+    },
+    "definedIn": null,
+    "kind": "bundled",
+    "label": "FIX.4.3 (bundled)",
+    "name": "FIX.4.3",
+    "source": "FIX.4.3",
+    "transport": {
+      "source": "FIX.4.3",
+      "version": "FIX.4.3"
+    },
+    "version": "FIX.4.3"
+  },
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.4.4",
+      "version": "FIX.4.4"
+    },
+    "definedIn": null,
+    "kind": "bundled",
+    "label": "FIX.4.4 (bundled)",
+    "name": "FIX.4.4",
+    "source": "FIX.4.4",
+    "transport": {
+      "source": "FIX.4.4",
+      "version": "FIX.4.4"
+    },
+    "version": "FIX.4.4"
+  },
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.5.0",
+      "version": "FIX.5.0"
+    },
+    "definedIn": null,
+    "kind": "bundled",
+    "label": "FIX.5.0 (bundled)",
+    "name": "FIX.5.0",
+    "source": "FIX.5.0",
+    "transport": {
+      "source": "FIXT.1.1",
+      "version": "FIXT.1.1"
+    },
+    "version": "FIX.5.0"
+  },
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.5.0SP1",
+      "version": "FIX.5.0SP1"
+    },
+    "definedIn": null,
+    "kind": "bundled",
+    "label": "FIX.5.0SP1 (bundled)",
+    "name": "FIX.5.0SP1",
+    "source": "FIX.5.0SP1",
+    "transport": {
+      "source": "FIXT.1.1",
+      "version": "FIXT.1.1"
+    },
+    "version": "FIX.5.0SP1"
+  },
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.5.0SP2",
+      "version": "FIX.5.0SP2"
+    },
+    "definedIn": null,
+    "kind": "bundled",
+    "label": "FIX.5.0SP2 (bundled)",
+    "name": "FIX.5.0SP2",
+    "source": "FIX.5.0SP2",
+    "transport": {
+      "source": "FIXT.1.1",
+      "version": "FIXT.1.1"
+    },
+    "version": "FIX.5.0SP2"
+  },
+  {
+    "application": null,
+    "definedIn": null,
+    "kind": "bundled",
+    "label": "FIXT.1.1 (bundled)",
+    "name": "FIXT.1.1",
+    "source": "FIXT.1.1",
+    "transport": {
+      "source": "FIXT.1.1",
+      "version": "FIXT.1.1"
+    },
+    "version": "FIXT.1.1"
+  }
+]

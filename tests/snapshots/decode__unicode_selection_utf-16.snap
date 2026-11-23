@@ -1,0 +1,30 @@
+---
+source: tests/decode.rs
+expression: answer
+---
+{
+  "results": [
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": "35(MsgType)=0(Heartbeat)"
+        }
+      ],
+      "rangeIndex": 0
+    },
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": "58(Text)=é😀"
+        }
+      ],
+      "rangeIndex": 1
+    }
+  ],
+  "textDocument": {
+    "uri": "file:///decode.fix",
+    "version": 1
+  }
+}

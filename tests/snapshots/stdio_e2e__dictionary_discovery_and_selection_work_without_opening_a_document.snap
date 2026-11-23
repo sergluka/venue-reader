@@ -1,0 +1,22 @@
+---
+source: tests/stdio_e2e.rs
+expression: entry
+---
+{
+  "application": {
+    "customVersion": null,
+    "extensionPack": null,
+    "source": "FIX.4.4",
+    "version": "FIX.4.4"
+  },
+  "definedIn": null,
+  "kind": "bundled",
+  "label": "FIX.4.4 (bundled)",
+  "name": "FIX.4.4",
+  "source": "FIX.4.4",
+  "transport": {
+    "source": "FIX.4.4",
+    "version": "FIX.4.4"
+  },
+  "version": "FIX.4.4"
+}

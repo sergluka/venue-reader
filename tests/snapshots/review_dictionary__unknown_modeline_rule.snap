@@ -1,0 +1,23 @@
+---
+source: tests/review_dictionary.rs
+expression: warning
+---
+{
+  "key": "diagnostics.rules.integritY",
+  "message": "unknown diagnostic rule \"integritY\"; setting is ignored",
+  "severity": "error",
+  "source": {
+    "layer": "modeline",
+    "range": {
+      "end": {
+        "character": 40,
+        "line": 1
+      },
+      "start": {
+        "character": 7,
+        "line": 1
+      }
+    },
+    "source": "file:///workspace/orders.fix"
+  }
+}

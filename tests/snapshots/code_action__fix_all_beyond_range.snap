@@ -1,0 +1,35 @@
+---
+source: tests/code_action.rs
+expression: offered
+---
+[
+  {
+    "edit": {
+      "documentChanges": [
+        {
+          "edits": [
+            {
+              "newText": "139|35=D|34=2|49=CLIENT1|56=BROKER1|52=20251026-09:00:02.000|11=ORDER123|21=1|55=BTCUSD|54=1|38=10|40=2|44=65000|59=0|60=20251026-09:00:02.000|10=213|\n8=FIX.4.4|9=57|35=0|34=1|49=CLIENT1|56=BROKER1|52=20251026-09:02:00.000|10=171|\n8=FIX.4.4|9=139|35=D|34=2|49=CLIENT1|56=BROKER1|52=20251026-09:00:02.000|11=ORDER123|21=1|55=BTCUSD|54=1|38=10|40=2|44=65000|59=0|60=20251026-09:00:02.000|10=213|\n# untouched\n8=FIX.4.4|9=139|35=D|34=2|49=CLIENT1|56=BROKER1|52=20251026-09:00:02.000|11=ORDER123|21=1|55=BTCUSD|54=1|38=10|40=2|44=65000|59=0|60=20251026-09:00:02.000|10=213",
+              "range": {
+                "end": {
+                  "character": 159,
+                  "line": 4
+                },
+                "start": {
+                  "character": 12,
+                  "line": 0
+                }
+              }
+            }
+          ],
+          "textDocument": {
+            "uri": "file:///a.fix",
+            "version": 1
+          }
+        }
+      ]
+    },
+    "kind": "source.fixAll",
+    "title": "Fix all"
+  }
+]

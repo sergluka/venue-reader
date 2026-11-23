@@ -1,0 +1,38 @@
+---
+source: tests/semantic_tokens.rs
+expression: legend
+---
+{
+  "tokenModifiers": [
+    "deprecated",
+    "header",
+    "trailer",
+    "session",
+    "possDup",
+    "unknown",
+    "count",
+    "group1a",
+    "group1b",
+    "group2a",
+    "group2b",
+    "group3a",
+    "group3b",
+    "peer1",
+    "peer2"
+  ],
+  "tokenTypes": [
+    "property",
+    "enumMember",
+    "number",
+    "price",
+    "quantity",
+    "money",
+    "string",
+    "keyword",
+    "namespace",
+    "comment",
+    "timestamp",
+    "group",
+    "flag"
+  ]
+}

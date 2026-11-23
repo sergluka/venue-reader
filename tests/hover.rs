@@ -39,18 +39,7 @@ fn a_hover_anywhere_in_a_field_answers_about_that_field() {
     assert_eq!(on_tag, on_value);
     assert_eq!(on_tag, last_byte);
 
-    assert!(on_tag["contents"]["value"]
-        .as_str()
-        .expect("markdown")
-        .starts_with("**SenderCompID** (49)"));
-    assert_eq!(
-        on_tag["range"]["start"],
-        json!({ "line": 0, "character": start })
-    );
-    assert_eq!(
-        on_tag["range"]["end"],
-        json!({ "line": 0, "character": end })
-    );
+    insta::assert_json_snapshot!("sender_comp_id", on_tag);
     client.shutdown();
 }
 
@@ -62,22 +51,8 @@ fn a_tag_the_dictionary_does_not_define_is_still_hovered() {
     const LINE: &str = "8=FIXT.1.1|9=57|35=D|1128=7|1328=Bad price|10=171|";
     let mut client = open(LINE);
     let start = LINE.find("1328=").expect("the field is there") as u32;
-    let end = start + "1328=Bad price".len() as u32;
     let answer = at(&mut client, start + 2);
-    let markdown = answer["contents"]["value"].as_str().expect("markdown");
-    assert!(markdown.starts_with("**RejectText** (1328)"), "{markdown}");
-    assert!(
-        markdown.contains("*Not in FIX.5.0, introduced in FIX.5.0SP1*"),
-        "{markdown}"
-    );
-    assert_eq!(
-        answer["range"]["start"],
-        json!({ "line": 0, "character": start })
-    );
-    assert_eq!(
-        answer["range"]["end"],
-        json!({ "line": 0, "character": end })
-    );
+    insta::assert_json_snapshot!("undefined_tag", answer);
     client.shutdown();
 }
 
@@ -89,14 +64,7 @@ fn a_pack_dated_tag_is_dated_by_its_release_on_the_wire() {
     const SP2: &str = "8=FIXT.1.1|9=57|35=D|1128=9|1328=x|10=171|";
     let mut client = open(SP2);
     let at_1328 = SP2.find("1328=x").expect("the field is there") as u32;
-    let markdown = at(&mut client, at_1328)["contents"]["value"]
-        .as_str()
-        .expect("markdown")
-        .to_owned();
-    assert!(
-        markdown.contains("*Introduced in FIX.5.0SP1*"),
-        "{markdown}"
-    );
+    insta::assert_json_snapshot!("pack_dated_tag", at(&mut client, at_1328));
     client.shutdown();
 }
 
@@ -111,12 +79,7 @@ fn a_restored_enum_label_reaches_the_client() {
     let mut client = open(PARTIES);
     let at_803 = PARTIES.find("803=1").expect("the field is there") as u32;
     let answer = at(&mut client, at_803);
-    let markdown = answer["contents"]["value"].as_str().expect("markdown");
-    assert!(
-        markdown.starts_with("**PartySubIDType** (803)"),
-        "{markdown}"
-    );
-    assert!(markdown.contains("Value: `1` — **Firm**"), "{markdown}");
+    insta::assert_json_snapshot!("restored_enum", answer);
 }
 
 #[test]
@@ -270,10 +233,8 @@ fn open_desk(extra: Value) -> (TestClient, Workspace) {
     (client, workspace)
 }
 
-fn markdown_at(client: &mut TestClient, field: &str) -> String {
-    client
-        .hover_markdown(URI, 0, DESK_LINE, field)
-        .expect("markdown")
+fn desk_hover(client: &mut TestClient, field: &str) -> Value {
+    at(client, DESK_LINE.find(field).unwrap() as u32)
 }
 
 /// The configured dictionary name reaches the "not defined by" line through
@@ -286,12 +247,7 @@ fn a_tag_the_desk_dictionary_lacks_names_the_desk() {
     client.did_open(OTHER, LINE, 1);
     let start = LINE.find("54=").expect("the field is there") as u32;
     let answer = client.hover(OTHER, 0, start).expect("answered");
-    let markdown = answer["contents"]["value"].as_str().expect("markdown");
-    assert!(markdown.starts_with("**Side** (54)"), "{markdown}");
-    assert!(
-        markdown.contains("*Not defined by \"desk\"*\n\n*Standard FIX.4.4*"),
-        "{markdown}"
-    );
+    insta::assert_json_snapshot!("desk_missing_field", answer);
     client.shutdown();
 }
 
@@ -301,27 +257,9 @@ fn a_tag_the_desk_dictionary_lacks_names_the_desk() {
 fn a_custom_dictionary_is_measured_against_standard_fix() {
     let (mut client, _workspace) = open_desk(json!({}));
 
-    let custom = markdown_at(&mut client, "20001=");
-    assert!(
-        custom.contains("*Custom field, introduced in \"desk\"*"),
-        "{custom}"
-    );
-    assert!(custom.contains("Value: `1` — **ALPHA**"), "{custom}");
-    assert!(!custom.contains("[FIX Reference"), "{custom}");
-
-    let later = markdown_at(&mut client, "1328=");
-    assert!(
-        later.contains("*Not in FIX.4.4, introduced in FIX.5.0SP1*"),
-        "{later}"
-    );
-    assert!(!later.contains("[FIX Reference"), "{later}");
-
-    let standard = markdown_at(&mut client, "55=");
-    assert!(standard.contains("*Standard FIX.4.4*"), "{standard}");
-    assert!(
-        standard.ends_with("(https://www.onixs.biz/fix-dictionary/4.4/tagNum_55.html)"),
-        "{standard}"
-    );
+    insta::assert_json_snapshot!("desk_custom_field", desk_hover(&mut client, "20001="));
+    insta::assert_json_snapshot!("desk_later_field", desk_hover(&mut client, "1328="));
+    insta::assert_json_snapshot!("desk_standard_field", desk_hover(&mut client, "55="));
     client.shutdown();
 }
 
@@ -331,15 +269,7 @@ fn a_custom_dictionary_is_measured_against_standard_fix() {
 fn a_flat_reference_url_still_links_a_custom_tag() {
     let (mut client, _workspace) =
         open_desk(json!({ "documentLink": { "url": "https://fix.internal/t{tag}" } }));
-    let custom = markdown_at(&mut client, "20001=");
-    assert!(
-        custom.contains("*Custom field, introduced in \"desk\"*"),
-        "{custom}"
-    );
-    assert!(
-        custom.ends_with("[FIX Reference: fix.internal](https://fix.internal/t20001)"),
-        "{custom}"
-    );
+    insta::assert_json_snapshot!("custom_reference", desk_hover(&mut client, "20001="));
     client.shutdown();
 }
 
@@ -347,21 +277,19 @@ fn a_flat_reference_url_still_links_a_custom_tag() {
 /// and under `8=FIXT.1.1`, whose header comes from FIXT11.
 #[test]
 fn a_field_in_a_header_group_names_its_group_path() {
-    for line in [
-        "8=FIX.4.4|35=0|627=2|628=A|630=1|628=B|630=2|",
-        "8=FIXT.1.1|35=0|627=2|628=A|630=1|628=B|630=2|",
+    for (case, line) in [
+        (
+            "fix44_header_group",
+            "8=FIX.4.4|35=0|627=2|628=A|630=1|628=B|630=2|",
+        ),
+        (
+            "fixt11_header_group",
+            "8=FIXT.1.1|35=0|627=2|628=A|630=1|628=B|630=2|",
+        ),
     ] {
         let mut client = open(line);
         let second = line.find("628=B").expect("the second hop") as u32;
-        let markdown = at(&mut client, second)["contents"]["value"]
-            .as_str()
-            .expect("markdown")
-            .to_owned();
-        assert!(markdown.starts_with("**HopCompID** (628)"), "{markdown}");
-        assert!(
-            markdown.contains("Group: `NoHops/2/HopCompID`"),
-            "{line}: {markdown}"
-        );
+        insta::assert_json_snapshot!(case, at(&mut client, second));
         client.shutdown();
     }
 }
@@ -370,34 +298,14 @@ fn a_field_in_a_header_group_names_its_group_path() {
 fn fixt_hover_uses_each_fields_source_and_the_application_message() {
     const LINE: &str = "8=FIXT.1.1|35=D|1128=9|49=SENDER|54=1|453=1|448=P|447=D|452=1|";
     let mut client = open(LINE);
-    for (tag, name, version) in [
-        ("49=", "SenderCompID", "fixt1.1"),
-        ("54=", "Side", "5.0.SP2"),
+    for (tag, case) in [
+        ("49=", "fixt_sender"),
+        ("54=", "fixt_side"),
+        ("35=", "fixt_order"),
+        ("448=", "fixt_party"),
     ] {
-        let answer = at(&mut client, LINE.find(tag).unwrap() as u32);
-        let markdown = answer["contents"]["value"].as_str().expect("markdown");
-        assert!(markdown.starts_with(&format!("**{name}**")), "{markdown}");
-        assert!(
-            markdown.contains(&format!("/fix-dictionary/{version}/")),
-            "{markdown}"
-        );
+        insta::assert_json_snapshot!(case, at(&mut client, LINE.find(tag).unwrap() as u32));
     }
-    let answer = at(&mut client, LINE.find("35=").unwrap() as u32);
-    let markdown = answer["contents"]["value"].as_str().expect("markdown");
-    assert!(
-        markdown.contains("Value: `D` — **NewOrderSingle**"),
-        "{markdown}"
-    );
-    assert!(
-        markdown.contains("The NewOrderSingle(35=D) message"),
-        "{markdown}"
-    );
-    let answer = at(&mut client, LINE.find("448=").unwrap() as u32);
-    let markdown = answer["contents"]["value"].as_str().expect("markdown");
-    assert!(
-        markdown.contains("Group: `NoPartyIDs/1/PartyID`"),
-        "{markdown}"
-    );
     client.shutdown();
 }
 
@@ -440,21 +348,13 @@ fn paired_sources_keep_field_types_enums_and_message_names_independent() {
     }));
     const LINE: &str = "8=FIXT.1.1|35=D|1128=9|49=S|54=1|";
     client.did_open(URI, LINE, 1);
-    for (field, expected) in [
-        ("49=", "**TransportSender** (49) — STRING"),
-        ("54=", "**ApplicationSide** (54) — CHAR"),
-        ("35=", "Value: `D` — **SyntheticOrder**"),
+    for (field, case) in [
+        ("49=", "transport_sender"),
+        ("54=", "application_side"),
+        ("35=", "application_message"),
     ] {
-        let answer = at(&mut client, LINE.find(field).unwrap() as u32);
-        let markdown = answer["contents"]["value"].as_str().expect("markdown");
-        assert!(markdown.contains(expected), "{markdown}");
-        assert!(!markdown.contains("TRANSPORT_VALUE"), "{markdown}");
+        insta::assert_json_snapshot!(case, at(&mut client, LINE.find(field).unwrap() as u32));
     }
-    let answer = at(&mut client, LINE.find("54=").unwrap() as u32);
-    assert!(answer["contents"]["value"]
-        .as_str()
-        .unwrap()
-        .contains("APPLICATION_VALUE"));
     let hints = client.request("textDocument/inlayHint", json!({
         "textDocument": {"uri": URI},
         "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 100}},

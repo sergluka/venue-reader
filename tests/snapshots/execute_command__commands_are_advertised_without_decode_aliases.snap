@@ -1,0 +1,13 @@
+---
+source: tests/execute_command.rs
+expression: "result[\"capabilities\"][\"executeCommandProvider\"]"
+---
+{
+  "commands": [
+    "fix.decode",
+    "fix.useDictionary",
+    "fix.listDictionaries",
+    "fix.describeOverrides",
+    "fix.describeTag"
+  ]
+}

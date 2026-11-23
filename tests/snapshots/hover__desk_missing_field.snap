@@ -1,0 +1,20 @@
+---
+source: tests/hover.rs
+expression: answer
+---
+{
+  "contents": {
+    "kind": "markdown",
+    "value": "**Side** (54)\n\n*Not defined by \"desk\"*\n\n*Standard FIX.4.4*\n\n---\n\nValue: `1`\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/4.4/tagNum_54.html)"
+  },
+  "range": {
+    "end": {
+      "character": 19,
+      "line": 0
+    },
+    "start": {
+      "character": 15,
+      "line": 0
+    }
+  }
+}

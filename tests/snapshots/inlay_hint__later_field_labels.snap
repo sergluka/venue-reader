@@ -1,0 +1,11 @@
+---
+source: tests/inlay_hint.rs
+expression: hint_labels(&hints)
+---
+[
+  "<BeginString>",
+  "<MsgType>",
+  "<ApplVerID>",
+  "<RejectText?>",
+  "<CheckSum>"
+]

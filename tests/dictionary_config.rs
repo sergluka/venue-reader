@@ -4,7 +4,6 @@ use harness::{TestClient, Workspace};
 use serde_json::{json, Value};
 
 const WARNING: i64 = 2;
-const ERROR: i64 = 1;
 
 fn custom_root_uri() -> String {
     format!("file://{}/xml/custom/synthetic", env!("CARGO_MANIFEST_DIR"))
@@ -82,11 +81,7 @@ fn an_invalid_config_is_reported_once_not_on_every_pull() {
     assert!(res.is_ok(), "server still answers");
     let shown = shows(&notes);
     assert_eq!(shown.len(), 1, "one warning for two pulls: {notes:?}");
-    assert_eq!(shown[0]["type"], ERROR);
-    assert!(shown[0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("dictionaries"));
+    insta::assert_json_snapshot!("invalid_dictionaries", shown);
     client.shutdown();
 }
 
@@ -180,9 +175,7 @@ fn a_dictionary_entry_without_a_name_is_reported() {
     );
 
     let shown = shows(&notes);
-    assert_eq!(shown.len(), 1, "exactly one showMessage: {notes:?}");
-    let text = shown[0]["message"].as_str().expect("text");
-    assert!(text.contains("name"), "it says which key: {text}");
+    insta::assert_json_snapshot!("missing_name", shown);
     client.shutdown();
 }
 
@@ -201,10 +194,7 @@ fn a_blank_name_rejects_initial_configuration_until_a_valid_update() {
     );
     assert_eq!(result, Err(harness::REQUEST_FAILED));
     let shown = shows(&notes);
-    assert_eq!(shown.len(), 1, "{notes:?}");
-    let text = shown[0]["message"].as_str().expect("text");
-    assert_eq!(shown[0]["type"], ERROR);
-    assert!(text.contains("name") && text.contains("blank"), "{text}");
+    insta::assert_json_snapshot!("blank_name", shown);
     client.notify(
         "workspace/didChangeConfiguration",
         json!({ "settings": { "fix": {} } }),
@@ -254,6 +244,22 @@ const MISSPELT: &str = "<fix major='4' minor='4'><messages>\
     <message name='MarketDataRequest' msgtype='V' msgcat='app'><field name='PriceAggregation'/></message></messages><fields>\
     <field number='9001' name='MisspeltField' type='STRING'/></fields></fix>";
 
+fn dictionary_notice(notes: &[(String, Value)], fixture: &Workspace, filename: &str) -> Value {
+    let shown = shows(notes);
+    assert_eq!(shown.len(), 1);
+    let mut notice = shown[0].clone();
+    let message = notice["message"].as_str().expect("dictionary message");
+    let path = fixture.0.join(filename);
+    let quoted_path = format!("{path:?}");
+    assert!(message.contains(&quoted_path), "{message}");
+    let stable_path = format!("<workspace>/{filename}");
+    let canonical = path.canonicalize().unwrap();
+    notice["message"] = json!(message
+        .replace(&quoted_path, &format!("{stable_path:?}"))
+        .replace(canonical.to_str().unwrap(), &stable_path));
+    notice
+}
+
 /// Hover text over tag 9001 on `8=FIX.4.4|35=0|9001=x|`.
 fn hover_9001(client: &mut TestClient, uri: &str) -> String {
     client.did_open(uri, "8=FIX.4.4|35=0|9001=x|", 1);
@@ -271,14 +277,9 @@ fn a_refused_dictionary_is_an_error_and_a_sound_one_beside_it_applies() {
     ] }));
     assert!(hover_9001(&mut client, "untitled:orders").contains("SoundField"));
     let (_, notes) = client.request_collecting("shutdown", Value::Null);
-    let shown = shows(&notes);
-    assert_eq!(shown.len(), 1, "{notes:?}");
-    assert_eq!(shown[0]["type"], ERROR);
-    let text = shown[0]["message"].as_str().unwrap();
-    assert!(
-        text.contains("not loaded")
-            && text.contains("message NewOrderSingle refers to component \"Instrumnt\""),
-        "{text}"
+    insta::assert_json_snapshot!(
+        "refused_dictionary",
+        dictionary_notice(&notes, &fixture, "broken.xml")
     );
 }
 
@@ -288,16 +289,9 @@ fn a_dictionary_with_a_doubled_message_type_applies_and_is_reported_as_an_error(
     let mut client = fixture.client(fixture.desk_dictionary(DOUBLED));
     assert!(hover_9001(&mut client, "untitled:orders").contains("DoubledField"));
     let (_, notes) = client.request_collecting("shutdown", Value::Null);
-    let shown = shows(&notes);
-    assert_eq!(shown.len(), 1, "{notes:?}");
-    assert_eq!(shown[0]["type"], ERROR);
-    let text = shown[0]["message"].as_str().unwrap();
-    assert!(
-        text.ends_with(
-            "loaded with an error: message NewOrderSingle, MsgType(35) = D, \
-             is defined twice, also as OrderSingle; merged into one under NewOrderSingle"
-        ),
-        "{text}"
+    insta::assert_json_snapshot!(
+        "duplicate_message_type",
+        dictionary_notice(&notes, &fixture, "desk.xml")
     );
 }
 
@@ -309,16 +303,9 @@ fn a_message_defined_twice_under_one_name_is_reported_as_a_warning() {
     );
     assert!(hover_9001(&mut client, "untitled:orders").contains("DoubledField"));
     let (_, notes) = client.request_collecting("shutdown", Value::Null);
-    let shown = shows(&notes);
-    assert_eq!(shown.len(), 1, "{notes:?}");
-    assert_eq!(shown[0]["type"], WARNING);
-    let text = shown[0]["message"].as_str().unwrap();
-    assert!(
-        text.ends_with(
-            "loaded with a warning: message NewOrderSingle, MsgType(35) = D, \
-             is defined twice; merged into one"
-        ),
-        "{text}"
+    insta::assert_json_snapshot!(
+        "duplicate_message_name",
+        dictionary_notice(&notes, &fixture, "desk.xml")
     );
 }
 
@@ -328,15 +315,8 @@ fn a_dictionary_with_an_undefined_field_applies_and_is_reported_as_an_error() {
     let mut client = fixture.client(fixture.desk_dictionary(MISSPELT));
     assert!(hover_9001(&mut client, "untitled:orders").contains("MisspeltField"));
     let (_, notes) = client.request_collecting("shutdown", Value::Null);
-    let shown = shows(&notes);
-    assert_eq!(shown.len(), 1, "{notes:?}");
-    assert_eq!(shown[0]["type"], ERROR);
-    let text = shown[0]["message"].as_str().unwrap();
-    assert!(
-        text.ends_with(
-            "loaded with an error: message MarketDataRequest refers to field \
-             \"PriceAggregation\", which the file does not define; skipped"
-        ),
-        "{text}"
+    insta::assert_json_snapshot!(
+        "missing_field",
+        dictionary_notice(&notes, &fixture, "desk.xml")
     );
 }

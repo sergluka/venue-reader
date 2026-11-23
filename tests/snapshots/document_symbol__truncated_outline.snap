@@ -1,0 +1,54 @@
+---
+source: tests/document_symbol.rs
+expression: found
+---
+[
+  {
+    "kind": 19,
+    "name": "#1 CLIENT1→BROKER1 Heartbeat (0)",
+    "range": {
+      "end": {
+        "character": 54,
+        "line": 0
+      },
+      "start": {
+        "character": 0,
+        "line": 0
+      }
+    },
+    "selectionRange": {
+      "end": {
+        "character": 19,
+        "line": 0
+      },
+      "start": {
+        "character": 15,
+        "line": 0
+      }
+    }
+  },
+  {
+    "kind": 15,
+    "name": "… 2 more messages",
+    "range": {
+      "end": {
+        "character": 0,
+        "line": 1
+      },
+      "start": {
+        "character": 0,
+        "line": 1
+      }
+    },
+    "selectionRange": {
+      "end": {
+        "character": 0,
+        "line": 1
+      },
+      "start": {
+        "character": 0,
+        "line": 1
+      }
+    }
+  }
+]

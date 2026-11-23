@@ -1,0 +1,15 @@
+---
+source: tests/review_dictionary.rs
+expression: "report[\"warnings\"]"
+---
+[
+  {
+    "key": "diagnostics.rules.integritY",
+    "message": "unknown diagnostic rule \"integritY\"; setting is ignored",
+    "severity": "error",
+    "source": {
+      "layer": "client",
+      "source": "client"
+    }
+  }
+]

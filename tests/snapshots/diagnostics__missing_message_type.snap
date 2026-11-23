@@ -1,0 +1,67 @@
+---
+source: tests/diagnostics.rs
+expression: published
+---
+{
+  "diagnostics": [
+    {
+      "code": "bodyLength",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing BodyLength (tag 9)",
+      "range": {
+        "end": {
+          "character": 9,
+          "line": 0
+        },
+        "start": {
+          "character": 0,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "checkSum",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing CheckSum (tag 10)",
+      "range": {
+        "end": {
+          "character": 14,
+          "line": 0
+        },
+        "start": {
+          "character": 10,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "missingMsgType",
+      "data": {
+        "rule": "unknownMsgType"
+      },
+      "message": "Missing MsgType(35)",
+      "range": {
+        "end": {
+          "character": 9,
+          "line": 0
+        },
+        "start": {
+          "character": 0,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    }
+  ],
+  "uri": "file:///a.fix",
+  "version": 1
+}

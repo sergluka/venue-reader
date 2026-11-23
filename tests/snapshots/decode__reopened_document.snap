@@ -1,0 +1,21 @@
+---
+source: tests/decode.rs
+expression: reopened
+---
+{
+  "results": [
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": "35(MsgType)=0(Heartbeat)"
+        }
+      ],
+      "rangeIndex": 0
+    }
+  ],
+  "textDocument": {
+    "uri": "file:///decode.fix",
+    "version": 7
+  }
+}

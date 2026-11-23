@@ -1,0 +1,20 @@
+---
+source: tests/hover.rs
+expression: answer
+---
+{
+  "contents": {
+    "kind": "markdown",
+    "value": "**PartySubIDType** (803) — int\n\nType of PartySubID(523) value.\n\n*Introduced in FIX.4.4*\n\n---\n\nValue: `1` — **Firm**\n\n*Introduced in FIX.4.4*\n\nGroup: `NoPartyIDs/1/NoPartySubIDs/1/PartySubIDType`\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/4.4/tagNum_803.html)"
+  },
+  "range": {
+    "end": {
+      "character": 62,
+      "line": 0
+    },
+    "start": {
+      "character": 57,
+      "line": 0
+    }
+  }
+}

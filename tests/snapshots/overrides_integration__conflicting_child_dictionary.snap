@@ -1,0 +1,15 @@
+---
+source: tests/overrides_integration.rs
+expression: warnings
+---
+[
+  {
+    "key": "dictionaries",
+    "message": "dictionary name \"venue\" rejected: file:///workspace/logs/.venue-reader.toml conflicts with file:///workspace/.venue-reader.toml (parent.xml)",
+    "severity": "error",
+    "source": {
+      "layer": "project",
+      "source": "file:///workspace/logs/.venue-reader.toml"
+    }
+  }
+]

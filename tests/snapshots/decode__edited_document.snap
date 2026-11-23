@@ -1,0 +1,21 @@
+---
+source: tests/decode.rs
+expression: current
+---
+{
+  "results": [
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": "35(MsgType)=1(TestRequest)"
+        }
+      ],
+      "rangeIndex": 0
+    }
+  ],
+  "textDocument": {
+    "uri": "file:///decode.fix",
+    "version": 2
+  }
+}

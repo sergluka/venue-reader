@@ -1,0 +1,25 @@
+---
+source: tests/overrides_integration.rs
+expression: warnings
+---
+[
+  {
+    "key": "dictionary",
+    "message": "dictionary \"./doubled-same-name.xml\" loaded with a warning: message NewOrderSingle, MsgType(35) = D, is defined twice; merged into one",
+    "severity": "warning",
+    "source": {
+      "layer": "modeline",
+      "range": {
+        "end": {
+          "character": 41,
+          "line": 0
+        },
+        "start": {
+          "character": 7,
+          "line": 0
+        }
+      },
+      "source": "file:///workspace/logs/harmless.fix"
+    }
+  }
+]

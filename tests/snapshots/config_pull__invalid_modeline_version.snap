@@ -1,0 +1,23 @@
+---
+source: tests/config_pull.rs
+expression: "warnings[0]"
+---
+{
+  "key": "defaultApplVerID",
+  "message": "defaultApplVerID: expected ApplicationVersion",
+  "severity": "warning",
+  "source": {
+    "layer": "modeline",
+    "range": {
+      "end": {
+        "character": 25,
+        "line": 0
+      },
+      "start": {
+        "character": 7,
+        "line": 0
+      }
+    },
+    "source": "file:///workspace/orders.fix"
+  }
+}

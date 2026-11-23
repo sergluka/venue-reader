@@ -1,0 +1,18 @@
+---
+source: tests/review_dictionary.rs
+expression: source
+---
+{
+  "layer": "modeline",
+  "range": {
+    "end": {
+      "character": 25,
+      "line": 11
+    },
+    "start": {
+      "character": 7,
+      "line": 11
+    }
+  },
+  "source": "file:///workspace/orders.fix"
+}

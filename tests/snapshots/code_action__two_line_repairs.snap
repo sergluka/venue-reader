@@ -1,0 +1,62 @@
+---
+source: tests/code_action.rs
+expression: edit_sets
+---
+[
+  [
+    {
+      "newText": "139",
+      "range": {
+        "end": {
+          "character": 13,
+          "line": 0
+        },
+        "start": {
+          "character": 12,
+          "line": 0
+        }
+      }
+    },
+    {
+      "newText": "213",
+      "range": {
+        "end": {
+          "character": 159,
+          "line": 0
+        },
+        "start": {
+          "character": 156,
+          "line": 0
+        }
+      }
+    }
+  ],
+  [
+    {
+      "newText": "139",
+      "range": {
+        "end": {
+          "character": 13,
+          "line": 2
+        },
+        "start": {
+          "character": 12,
+          "line": 2
+        }
+      }
+    },
+    {
+      "newText": "213",
+      "range": {
+        "end": {
+          "character": 159,
+          "line": 2
+        },
+        "start": {
+          "character": 156,
+          "line": 2
+        }
+      }
+    }
+  ]
+]

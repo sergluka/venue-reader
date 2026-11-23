@@ -15,6 +15,26 @@ fn refresh(client: &TestClient, settings: Value) {
     );
 }
 
+fn warnings_from(report: &Value, source_uri: &str, relative_path: &str) -> Vec<Value> {
+    let mut warnings = report["warnings"].as_array().unwrap().clone();
+    for warning in &mut warnings {
+        let source = &mut warning["source"]["source"];
+        assert_eq!(*source, source_uri);
+        *source = json!(format!("file:///workspace/{relative_path}"));
+    }
+    warnings
+}
+
+fn normalize_warning_location(warning: &mut Value, location: &str, portable: &str) {
+    let message = warning["message"].as_str().unwrap();
+    assert!(message.contains(location), "{message}");
+    warning["message"] = json!(message.replace(location, portable));
+}
+
+fn canonical_uri(fixture: &Workspace, relative: &str) -> String {
+    file_uri(&fixture.0.join(relative).canonicalize().unwrap())
+}
+
 fn dictionary_xml(field_name: &str) -> String {
     format!(
         r#"<fix type="FIX" major="4" minor="4">
@@ -46,9 +66,16 @@ fn conflicting_child_dictionary_name_is_an_error_before_the_child_path_is_read()
     let document = fixture.uri("logs/orders.fix");
     let report = client.did_open(&document, "8=FIX.4.4|35=D|9001=x|", 1);
     assert_eq!(report["effective"]["dictionary"], json!("venue"));
-    let warnings = report["warnings"].as_array().unwrap();
-    assert!(warnings.iter().any(|warning| warning["severity"] == "error"
-        && warning["message"].as_str().unwrap().contains("venue")));
+    let relative = "logs/.venue-reader.toml";
+    let mut warnings = warnings_from(&report, &canonical_uri(&fixture, relative), relative);
+    for path in [relative, ".venue-reader.toml"] {
+        normalize_warning_location(
+            &mut warnings[0],
+            &canonical_uri(&fixture, path),
+            &format!("file:///workspace/{path}"),
+        );
+    }
+    insta::assert_json_snapshot!("conflicting_child_dictionary", warnings);
     assert!(client
         .hover(&document, 0, 16)
         .unwrap()
@@ -154,17 +181,15 @@ fn a_dictionary_selected_by_path_reports_a_refusal_and_a_fault_as_errors() {
     let refused = fixture.uri("logs/refused.fix");
     let report = client.did_open(&refused, MESSAGE, 1);
     assert_eq!(report["effective"]["dictionary"], Value::Null);
-    let warnings = report["warnings"].as_array().unwrap();
-    assert!(
-        warnings.iter().any(|warning| {
-            let message = warning["message"].as_str().unwrap();
-            warning["severity"] == "error"
-                && message.contains("./broken.xml")
-                && message.contains("not loaded")
-                && message.contains(r#"refers to component "Instrumnt""#)
-        }),
-        "{warnings:?}"
+    let relative = "logs/.venue-reader.toml";
+    let mut warnings = warnings_from(&report, &canonical_uri(&fixture, relative), relative);
+    let broken = fixture.0.join("logs/broken.xml").canonicalize().unwrap();
+    normalize_warning_location(
+        &mut warnings[0],
+        &broken.to_string_lossy(),
+        "<workspace>/logs/broken.xml",
     );
+    insta::assert_json_snapshot!("refused_dictionary", warnings);
 
     let faulty = fixture.uri("logs/faulty.fix");
     let report = client.did_open(
@@ -173,17 +198,8 @@ fn a_dictionary_selected_by_path_reports_a_refusal_and_a_fault_as_errors() {
         1,
     );
     assert_eq!(report["effective"]["dictionary"], json!("./doubled.xml"));
-    let warnings = report["warnings"].as_array().unwrap();
-    assert!(
-        warnings.iter().any(|warning| {
-            warning["severity"] == "error"
-                && warning["message"].as_str().unwrap().ends_with(
-                    "loaded with an error: message NewOrderSingle, MsgType(35) = D, \
-                     is defined twice, also as OrderSingle; merged into one under NewOrderSingle",
-                )
-        }),
-        "{warnings:?}"
-    );
+    let warnings = warnings_from(&report, &faulty, "logs/faulty.fix");
+    insta::assert_json_snapshot!("faulty_dictionary", warnings);
     assert!(client
         .hover(&faulty, 1, 16)
         .unwrap()
@@ -197,17 +213,8 @@ fn a_dictionary_selected_by_path_reports_a_refusal_and_a_fault_as_errors() {
         "# fix: dictionary=./doubled-same-name.xml\n8=FIX.4.4|35=D|9001=x|",
         1,
     );
-    let warnings = report["warnings"].as_array().unwrap();
-    assert!(
-        warnings.iter().any(|warning| {
-            warning["severity"] == "warning"
-                && warning["message"].as_str().unwrap().ends_with(
-                    "loaded with a warning: message NewOrderSingle, MsgType(35) = D, \
-                     is defined twice; merged into one",
-                )
-        }),
-        "{warnings:?}"
-    );
+    let warnings = warnings_from(&report, &harmless, "logs/harmless.fix");
+    insta::assert_json_snapshot!("duplicate_dictionary_message", warnings);
     client.shutdown();
 }
 
@@ -222,14 +229,9 @@ fn project_dictionary_definitions_are_refused_without_filesystem_permission() {
     fixture.initialize(&mut client, json!({"diagnostics":{"enabled":false}}));
     let document = fixture.uri("orders.fix");
     let report = client.did_open(&document, MESSAGE, 1);
-    assert!(report["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|warning| {
-            let message = warning["message"].as_str().unwrap();
-            message.contains("allowDictionaryPath") && message.contains("blocked-venue")
-        }));
+    let relative = ".venue-reader.toml";
+    let warnings = warnings_from(&report, &canonical_uri(&fixture, relative), relative);
+    insta::assert_json_snapshot!("blocked_dictionary", warnings);
     client.shutdown();
 }
 
@@ -257,18 +259,19 @@ fn selecting_a_global_name_does_not_reload_its_xml() {
         .unwrap()
         .to_string()
         .contains("BeforeReload"));
-    let selected = client
+    let mut selected = client
         .request(
             "workspace/executeCommand",
             json!({"command":"fix.useDictionary","arguments":["venue"]}),
         )
         .unwrap();
-    assert_eq!(selected["name"], json!("venue"));
-    assert_eq!(selected["version"], json!("FIX.4.4"));
-    assert_eq!(
-        selected["source"],
-        json!(path.canonicalize().unwrap().to_string_lossy())
-    );
+    let canonical = json!(path.canonicalize().unwrap());
+    for pointer in ["/source", "/transport/source", "/application/source"] {
+        let source = selected.pointer_mut(pointer).unwrap();
+        assert_eq!(*source, canonical);
+        *source = json!("<workspace>/dict.xml");
+    }
+    insta::assert_json_snapshot!("selected_global_dictionary", selected);
     for document in [&first, &second] {
         client.wait_effective(document, "dictionary", json!("venue"));
         assert!(client
@@ -374,14 +377,7 @@ fn a_removed_session_name_does_not_reappear_automatically() {
         json!({"allowDictionaryPath":true,"diagnostics":{"enabled":false}}),
     );
     let removed = client.wait_effective(&document, "dictionary", Value::Null);
-    assert!(removed["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|warning| {
-            warning["severity"] == "warning"
-                && warning["message"].as_str().unwrap().contains("venue")
-        }));
+    insta::assert_json_snapshot!("removed_session_dictionary", removed["warnings"]);
     assert!(!client
         .hover(&document, 0, 16)
         .unwrap()
@@ -441,8 +437,7 @@ fn dictionary_version_mismatch_uses_normal_rule_gates_and_one_finding_per_versio
         .iter()
         .filter(|entry| entry["code"] == "dictionaryVersion")
         .collect();
-    assert_eq!(mismatches.len(), 1, "{report}");
-    assert_eq!(mismatches[0]["severity"], json!(2));
+    insta::assert_json_snapshot!("version_mismatch", mismatches);
     client.did_change_full(&document, &format!("# fix: dictionary=FIX.4.2 diagnostics.rules.dictionaryVersion=false\n{MESSAGE}\n{MESSAGE}"), 2);
     client.wait_effective(
         &document,
@@ -500,31 +495,23 @@ fn all_layers_merge_sparsely_and_describe_reports_effective_values() {
     );
     client.did_open(&first, &format!("# fix: hover.enabled=true\n{MESSAGE}"), 1);
     client.did_open(&second, MESSAGE, 1);
-    let first_report = client.describe(&first).unwrap();
+    let mut first_report = client.describe(&first).unwrap();
     let second_report = client.describe(&second).unwrap();
-    assert_eq!(first_report["effective"]["hover.enabled"], json!(true));
     assert_eq!(second_report["effective"]["hover.enabled"], json!(false));
-    assert_eq!(
-        first_report["effective"]["inlayHints.tagNames.enabled"],
-        json!(false)
-    );
-    assert_eq!(
-        first_report["effective"]["inlayHints.enumValues.enabled"],
-        json!(true)
-    );
-    assert_eq!(
-        first_report["effective"]["diagnostics.enabled"],
-        json!(false)
-    );
-    assert_eq!(
-        first_report["effective"]["allowDictionaryPath"],
-        json!(false)
-    );
-    assert_eq!(
-        first_report["sources"]["hover.enabled"]["layer"],
-        json!("modeline")
-    );
     assert!(!first_report.to_string().contains("formatter"));
+    for (key, relative) in [
+        ("diagnostics.enabled", "personal/venue-reader/config.toml"),
+        ("inlayHints.tagNames.enabled", "logs/.venue-reader.toml"),
+        ("inlayHints.enumValues.enabled", ".venue-reader.toml"),
+    ] {
+        let source = &mut first_report["sources"][key]["source"];
+        assert_eq!(*source, canonical_uri(&fixture, relative));
+        *source = json!(format!("file:///workspace/{relative}"));
+    }
+    let modeline = &mut first_report["sources"]["hover.enabled"]["source"];
+    assert_eq!(*modeline, first);
+    *modeline = json!("file:///workspace/logs/one.fix");
+    insta::assert_json_snapshot!("layered_overrides", first_report);
     assert!(!client.hover(&first, 1, 12).unwrap().is_null());
     assert!(client.hover(&second, 0, 12).unwrap().is_null());
     client.shutdown();
@@ -551,10 +538,11 @@ fn removing_a_client_leaf_reveals_personal_defaults_without_erasing_other_values
         report["effective"]["inlayHints.tagNames.enabled"],
         json!(true)
     );
-    assert_eq!(
-        report["sources"]["hover.enabled"]["layer"],
-        json!("userFile")
-    );
+    let mut origin = report["sources"]["hover.enabled"].clone();
+    let relative = "personal/venue-reader/config.toml";
+    assert_eq!(origin["source"], canonical_uri(&fixture, relative));
+    origin["source"] = json!(format!("file:///workspace/{relative}"));
+    insta::assert_json_snapshot!("restored_personal_origin", origin);
     client.shutdown();
 }
 
@@ -649,12 +637,9 @@ fn duplicate_modeline_settings_fall_through_and_repair_clears_errors_with_rules_
     );
     let report = client.describe(&document).unwrap();
     assert_eq!(report["effective"]["hover.enabled"], json!(true));
-    assert!(report["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|warning| warning["severity"] == "error"
-            && warning["message"].as_str().unwrap().contains("duplicate")));
+    let mut warnings = warnings_from(&report, &document, "orders.fix");
+    normalize_warning_location(&mut warnings[0], &document, "file:///workspace/orders.fix");
+    insta::assert_json_snapshot!("duplicate_modeline", warnings);
     let diagnostic = client.wait_for("textDocument/publishDiagnostics");
     assert!(diagnostic["diagnostics"]
         .as_array()
@@ -687,11 +672,9 @@ fn duplicate_toml_keys_reject_one_file_and_keep_valid_parent_values() {
     let document = fixture.uri("logs/orders.fix");
     let report = client.did_open(&document, MESSAGE, 1);
     assert_eq!(report["effective"]["hover.enabled"], json!(false));
-    assert!(report["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|warning| warning["severity"] == "error"));
+    let relative = "logs/.venue-reader.toml";
+    let warnings = warnings_from(&report, &canonical_uri(&fixture, relative), relative);
+    insta::assert_json_snapshot!("duplicate_project_key", warnings);
     client.shutdown();
 }
 
@@ -720,7 +703,19 @@ fn document_sources_cannot_enable_filesystem_dictionaries_or_change_global_url()
         .as_str()
         .unwrap()
         .contains("onixs.biz"));
-    assert!(!report["warnings"].as_array().unwrap().is_empty());
+    let project = ".venue-reader.toml";
+    let mut warnings = report["warnings"].as_array().unwrap().clone();
+    for warning in &mut warnings {
+        let origin = &mut warning["source"];
+        let (uri, relative) = match origin["layer"].as_str().unwrap() {
+            "project" => (canonical_uri(&fixture, project), project),
+            "modeline" => (document.clone(), "orders.fix"),
+            layer => panic!("unexpected warning layer {layer}"),
+        };
+        assert_eq!(origin["source"], uri);
+        origin["source"] = json!(format!("file:///workspace/{relative}"));
+    }
+    insta::assert_json_snapshot!("global_only_document_warnings", warnings);
     client.shutdown();
 }
 

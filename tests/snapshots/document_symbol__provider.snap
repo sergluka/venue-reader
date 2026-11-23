@@ -1,0 +1,5 @@
+---
+source: tests/document_symbol.rs
+expression: "result[\"capabilities\"][\"documentSymbolProvider\"]"
+---
+{"workDoneProgress": true}

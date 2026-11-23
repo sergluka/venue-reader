@@ -1,0 +1,22 @@
+---
+source: tests/inlay_hint.rs
+expression: hints
+---
+[
+  {
+    "data": {
+      "kind": "summary",
+      "templateParts": 1
+    },
+    "label": [
+      {
+        "value": "D"
+      }
+    ],
+    "paddingRight": true,
+    "position": {
+      "character": 0,
+      "line": 0
+    }
+  }
+]

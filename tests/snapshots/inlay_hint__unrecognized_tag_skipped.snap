@@ -1,0 +1,66 @@
+---
+source: tests/inlay_hint.rs
+expression: hints
+---
+[
+  {
+    "data": {
+      "kind": "tag",
+      "line": 0,
+      "offset": 0,
+      "tag": 8,
+      "uri": "file:///a.fix",
+      "version": 1
+    },
+    "kind": 1,
+    "label": "<BeginString>",
+    "position": {
+      "character": 1,
+      "line": 0
+    },
+    "tooltip": {
+      "kind": "markdown",
+      "value": "**BeginString** (8) — String\n\nIdentifies beginning of new message and session protocol version by means of a session profile identifier (see FIX Session Layer for details). ALWAYS FIRST FIELD IN MESSAGE. (Always unencrypted).\n\n*Introduced in FIX.2.7*\n\n---\n\nValue: `FIX.4.4`\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/4.4/tagNum_8.html)"
+    }
+  },
+  {
+    "data": {
+      "kind": "tag",
+      "line": 0,
+      "offset": 10,
+      "tag": 35,
+      "uri": "file:///a.fix",
+      "version": 1
+    },
+    "kind": 1,
+    "label": "<MsgType>",
+    "position": {
+      "character": 12,
+      "line": 0
+    },
+    "tooltip": {
+      "kind": "markdown",
+      "value": "**MsgType** (35) — String\n\nDefines message type ALWAYS THIRD FIELD IN MESSAGE. (Always unencrypted)\n\n*Introduced in FIX.2.7*\n\n---\n\nValue: `0` — **Heartbeat**\n\n*Introduced in FIX.2.7*\n\nThe Heartbeat monitors the status of the communication link and identifies when the last of a string of messages was not received.\n\n*Category: Session*\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/4.4/tagNum_35.html)"
+    }
+  },
+  {
+    "data": {
+      "kind": "tag",
+      "line": 0,
+      "offset": 22,
+      "tag": 10,
+      "uri": "file:///a.fix",
+      "version": 1
+    },
+    "kind": 1,
+    "label": "<CheckSum>",
+    "position": {
+      "character": 24,
+      "line": 0
+    },
+    "tooltip": {
+      "kind": "markdown",
+      "value": "**CheckSum** (10) — String\n\nThree byte, simple checksum (see Volume 2: \"Checksum Calculation\" for description). ALWAYS LAST FIELD IN MESSAGE; i.e. serves, with the trailing <SOH>, as the end-of-message delimiter. Always defined as three characters. (Always unencrypted)\n\n*Introduced in FIX.2.7*\n\n---\n\nValue: `1`\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/4.4/tagNum_10.html)"
+    }
+  }
+]

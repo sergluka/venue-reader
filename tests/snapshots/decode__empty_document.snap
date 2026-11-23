@@ -1,0 +1,21 @@
+---
+source: tests/decode.rs
+expression: answer
+---
+{
+  "results": [
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": ""
+        }
+      ],
+      "rangeIndex": 0
+    }
+  ],
+  "textDocument": {
+    "uri": "file:///decode.fix",
+    "version": 1
+  }
+}

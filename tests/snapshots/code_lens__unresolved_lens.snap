@@ -1,0 +1,24 @@
+---
+source: tests/code_lens.rs
+expression: found
+---
+[
+  {
+    "data": {
+      "hash": "[line hash]",
+      "line": 0,
+      "uri": "file:///a.fix",
+      "version": 1
+    },
+    "range": {
+      "end": {
+        "character": 0,
+        "line": 0
+      },
+      "start": {
+        "character": 0,
+        "line": 0
+      }
+    }
+  }
+]

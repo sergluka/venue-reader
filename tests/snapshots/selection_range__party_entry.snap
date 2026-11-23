@@ -1,0 +1,66 @@
+---
+source: tests/selection_range.rs
+expression: found
+---
+[
+  {
+    "parent": {
+      "parent": {
+        "parent": {
+          "parent": {
+            "range": {
+              "end": {
+                "character": 93,
+                "line": 0
+              },
+              "start": {
+                "character": 0,
+                "line": 0
+              }
+            }
+          },
+          "range": {
+            "end": {
+              "character": 88,
+              "line": 0
+            },
+            "start": {
+              "character": 15,
+              "line": 0
+            }
+          }
+        },
+        "range": {
+          "end": {
+            "character": 38,
+            "line": 0
+          },
+          "start": {
+            "character": 21,
+            "line": 0
+          }
+        }
+      },
+      "range": {
+        "end": {
+          "character": 26,
+          "line": 0
+        },
+        "start": {
+          "character": 21,
+          "line": 0
+        }
+      }
+    },
+    "range": {
+      "end": {
+        "character": 26,
+        "line": 0
+      },
+      "start": {
+        "character": 25,
+        "line": 0
+      }
+    }
+  }
+]

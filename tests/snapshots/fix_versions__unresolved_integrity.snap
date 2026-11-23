@@ -1,0 +1,120 @@
+---
+source: tests/fix_versions.rs
+expression: findings
+---
+[
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Missing application version for MsgType(35)=D. Set ApplVerID(1128), defaultApplVerID, or select an application dictionary.",
+    "range": {
+      "end": {
+        "character": 10,
+        "line": 0
+      },
+      "start": {
+        "character": 0,
+        "line": 0
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "bodyLength",
+    "data": {
+      "rule": "integrity"
+    },
+    "message": "BodyLength is 999, expected 10",
+    "range": {
+      "end": {
+        "character": 16,
+        "line": 0
+      },
+      "start": {
+        "character": 13,
+        "line": 0
+      }
+    },
+    "severity": 1,
+    "source": "fix"
+  },
+  {
+    "code": "checkSum",
+    "data": {
+      "rule": "integrity"
+    },
+    "message": "CheckSum is 999, expected 009",
+    "range": {
+      "end": {
+        "character": 33,
+        "line": 0
+      },
+      "start": {
+        "character": 30,
+        "line": 0
+      }
+    },
+    "severity": 1,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Unsupported BeginString(8) = FIX.5.0SP2; no dictionary interpretation",
+    "range": {
+      "end": {
+        "character": 12,
+        "line": 1
+      },
+      "start": {
+        "character": 0,
+        "line": 1
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "bodyLength",
+    "data": {
+      "rule": "integrity"
+    },
+    "message": "BodyLength is 999, expected 10",
+    "range": {
+      "end": {
+        "character": 18,
+        "line": 1
+      },
+      "start": {
+        "character": 15,
+        "line": 1
+      }
+    },
+    "severity": 1,
+    "source": "fix"
+  },
+  {
+    "code": "checkSum",
+    "data": {
+      "rule": "integrity"
+    },
+    "message": "CheckSum is 999, expected 141",
+    "range": {
+      "end": {
+        "character": 35,
+        "line": 1
+      },
+      "start": {
+        "character": 32,
+        "line": 1
+      }
+    },
+    "severity": 1,
+    "source": "fix"
+  }
+]

@@ -178,14 +178,7 @@ fn shared_text_outside_message_scope_keeps_application_definition() {
     let mut client = open(&workspace, json!({}), &text);
     assert!(diagnostics(&mut client).is_empty());
     let description = hover(&mut client, &text, 0, "58=");
-    assert!(
-        description.contains("**Text** (58) — String"),
-        "{description}"
-    );
-    assert!(
-        description.contains("/5.0.SP2/tagNum_58.html"),
-        "{description}"
-    );
+    insta::assert_json_snapshot!("application_text", description);
     let shown = labels(&mut client, &text, 0);
     assert!(shown.contains(&"(Text)".into()), "{shown:?}");
     assert!(!shown.contains(&"(Text?)".into()), "{shown:?}");
@@ -219,27 +212,7 @@ fn fixt_without_application_identity_keeps_transport_and_raw_application_values(
     .join("\n");
     let mut client = open(&workspace, json!({}), &text);
     let findings = diagnostics(&mut client);
-    assert_eq!(codes_on(&findings, 0), ["unknownVersion"]);
-    assert_eq!(codes_on(&findings, 1), ["unknownVersion"]);
-    assert!(codes_on(&findings, 2).is_empty());
-    assert_eq!(codes_on(&findings, 3), ["missingMsgType", "unknownVersion"]);
-    for (line, message_context) in [
-        (0, " for MsgType(35)=D"),
-        (1, " for MsgType(35)=6"),
-        (3, ""),
-    ] {
-        let diagnostic = findings
-            .iter()
-            .find(|diagnostic| {
-                diagnostic["range"]["start"]["line"] == line
-                    && diagnostic["code"] == "unknownVersion"
-            })
-            .unwrap();
-        assert_eq!(
-            diagnostic["message"],
-            format!("Missing application version{message_context}. Set ApplVerID(1128), defaultApplVerID, or select an application dictionary.")
-        );
-    }
+    insta::assert_json_snapshot!("missing_application", findings);
     assert!(hover(&mut client, &text, 0, "49=").contains("fixt1.1"));
     let side = hover(&mut client, &text, 0, "54=");
     assert!(side.contains("Value: `1`"), "{side}");
@@ -279,9 +252,9 @@ fn fix5_dictionary_names_are_rejected_as_wire_begin_strings_even_when_selected()
         .join("\n");
     let mut client = open(&workspace, json!({}), &text);
     let findings = diagnostics(&mut client);
+    insta::assert_json_snapshot!("wire_version_rejection", findings);
     select(&mut client, "FIX.5.0SP2");
     for line in 0..3 {
-        assert_eq!(codes_on(&findings, line), ["unknownVersion"]);
         assert!(!hover(&mut client, &text, line, "54=").contains("**Buy**"));
         assert!(!labels(&mut client, &text, line).contains(&"(Buy)".into()));
     }
@@ -316,12 +289,7 @@ fn integrity_is_checked_when_application_or_transport_cannot_resolve() {
     .join("\n");
     let mut client = open(&workspace, json!({}), &text);
     let findings = diagnostics(&mut client);
-    for line in 0..2 {
-        assert_eq!(
-            codes_on(&findings, line),
-            ["bodyLength", "checkSum", "unknownVersion"]
-        );
-    }
+    insta::assert_json_snapshot!("unresolved_integrity", findings);
     client.shutdown();
 }
 
@@ -362,7 +330,7 @@ fn prohibited_application_selectors_do_not_disable_administrative_decoding() {
     let workspace = Workspace::new("version-admin");
     let text = frame("FIXT.1.1", "35=A|1128=9|98=0|108=30|1137=9|");
     let mut client = open(&workspace, json!({}), &text);
-    assert_eq!(codes_on(&diagnostics(&mut client), 0), ["unknownVersion"]);
+    insta::assert_json_snapshot!("prohibited_selector", diagnostics(&mut client));
     assert!(hover(&mut client, &text, 0, "35=").contains("**Logon**"));
     assert!(hover(&mut client, &text, 0, "98=").contains("**None"));
     assert!(labels(&mut client, &text, 0).contains(&"(Logon)".into()));
@@ -420,15 +388,8 @@ fn identical_repeated_selectors_are_rejected_without_using_a_default() {
     .join("\n");
     let mut client = open(&workspace, json!({"defaultApplVerID": "FIX.5.0SP2"}), &text);
     let findings = diagnostics(&mut client);
+    insta::assert_json_snapshot!("duplicate_selectors", findings);
     for line in 0..2 {
-        assert_eq!(codes_on(&findings, line), ["unknownVersion"]);
-        assert!(findings
-            .iter()
-            .any(|diagnostic| diagnostic["range"]["start"]["line"] == line
-                && diagnostic["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Duplicate")));
         assert!(!hover(&mut client, &text, line, "54=").contains("**Buy**"));
     }
     client.shutdown();
@@ -549,19 +510,14 @@ fn combined_fixt_path_decodes_both_roles_using_declared_application_identity() {
     );
     let mut client = open(&workspace, settings, &text);
     assert!(diagnostics(&mut client).is_empty());
-    assert!(hover(&mut client, &text, 1, "35=").contains("**SyntheticHeartbeat**"));
-    let sender = hover(&mut client, &text, 1, "49=");
-    assert!(
-        sender.contains("SYNTHETIC_TRANSPORT") && sender.contains("/fixt1.1/"),
-        "{sender}"
-    );
-    let side = hover(&mut client, &text, 2, "54=");
-    assert!(
-        side.contains(" — INT\n") && side.contains("/5.0.SP2/tagNum_54.html"),
-        "{side}"
-    );
-    assert!(side.contains("SYNTHETIC_COMBINED_SIDE"), "{side}");
-    assert!(hover(&mut client, &text, 2, "35=").contains("**SyntheticOrder**"));
+    for (line, field, case) in [
+        (1, "35=", "combined_heartbeat"),
+        (1, "49=", "combined_sender"),
+        (2, "54=", "combined_side"),
+        (2, "35=", "combined_order"),
+    ] {
+        insta::assert_json_snapshot!(case, hover(&mut client, &text, line, field));
+    }
     assert!(labels(&mut client, &text, 2).contains(&"(SYNTHETIC_COMBINED_SIDE)".into()));
     client.shutdown();
 }
@@ -673,13 +629,9 @@ fn transport_family_retains_its_source_while_application_changes_per_message() {
     );
     let mut client = open(&workspace, settings, &text);
     assert!(diagnostics(&mut client).is_empty());
-    for (line, version) in [(1, "5.0"), (2, "5.0.SP2")] {
+    for (line, case) in [(1, "family_fix50_side"), (2, "family_fix50sp2_side")] {
         assert!(hover(&mut client, &text, line, "49=").contains("SYNTHETIC_TRANSPORT"));
-        let side = hover(&mut client, &text, line, "54=");
-        assert!(
-            side.contains("**Buy**") && side.contains(&format!("/{version}/")),
-            "{side}"
-        );
+        insta::assert_json_snapshot!(case, hover(&mut client, &text, line, "54="));
         assert!(labels(&mut client, &text, line).contains(&"(NewOrderSingle)".into()));
     }
     client.shutdown();
@@ -695,45 +647,30 @@ fn selection_command_reports_exact_application_identity_and_both_source_roles() 
     let application = workspace.0.join("application.xml").canonicalize().unwrap();
     let text = frame("FIXT.1.1", "35=0|");
     let mut client = open(&workspace, settings, &text);
-    assert_eq!(
-        select(&mut client, "synthetic-pair"),
-        json!({
-            "name": "synthetic-pair", "version": "FIX.5.0SP2", "source": application,
-            "transport": {"version": "FIXT.1.1", "source": transport},
-            "application": {"version": "FIX.5.0SP2", "extensionPack": 42,
-                "customVersion": "SYNTHETIC_PROFILE", "source": application}
-        })
-    );
+    let selected = select(&mut client, "synthetic-pair");
+    assert_eq!(selected["source"], json!(application));
+    assert_eq!(selected["transport"]["source"], json!(transport));
+    assert_eq!(selected["application"]["source"], json!(application));
+    insta::assert_json_snapshot!("selected_pair", selected, {
+        ".source" => "<workspace>/application.xml",
+        ".transport.source" => "<workspace>/transport.xml",
+        ".application.source" => "<workspace>/application.xml",
+    });
     let report = client
         .describe(URI)
         .expect("committed dictionary definitions");
-    assert_eq!(
-        report["dictionaries"],
-        json!([{
-            "name": "synthetic-pair", "version": "FIX.5.0SP2",
-            "path": application, "source": "client",
-            "transport": {"version": "FIXT.1.1", "source": transport},
-            "application": {"version": "FIX.5.0SP2", "extensionPack": 42,
-                "customVersion": "SYNTHETIC_PROFILE", "source": application}
-        }])
-    );
-    assert_eq!(
-        select(&mut client, "FIXT.1.1"),
-        json!({
-            "name": "FIXT.1.1", "version": "FIXT.1.1", "source": "FIXT.1.1",
-            "transport": {"version": "FIXT.1.1", "source": "FIXT.1.1"},
-            "application": null
-        })
-    );
-    assert_eq!(
-        select(&mut client, "FIX.5.0SP2"),
-        json!({
-            "name": "FIX.5.0SP2", "version": "FIX.5.0SP2", "source": "FIX.5.0SP2",
-            "transport": {"version": "FIXT.1.1", "source": "FIXT.1.1"},
-            "application": {"version": "FIX.5.0SP2", "extensionPack": null,
-                "customVersion": null, "source": "FIX.5.0SP2"}
-        })
-    );
+    let entries = report["dictionaries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["path"], json!(application));
+    assert_eq!(entries[0]["transport"], selected["transport"]);
+    assert_eq!(entries[0]["application"], selected["application"]);
+    insta::assert_json_snapshot!("configured_pair", entries[0], {
+        ".path" => "<workspace>/application.xml",
+        ".transport.source" => "<workspace>/transport.xml",
+        ".application.source" => "<workspace>/application.xml",
+    });
+    insta::assert_json_snapshot!("selected_transport", select(&mut client, "FIXT.1.1"));
+    insta::assert_json_snapshot!("selected_application", select(&mut client, "FIX.5.0SP2"));
     client.shutdown();
 }
 

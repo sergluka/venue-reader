@@ -1,0 +1,139 @@
+---
+source: tests/diagnostics.rs
+expression: version_problems
+---
+[
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Invalid ApplVerID(1128)",
+    "range": {
+      "end": {
+        "character": 23,
+        "line": 0
+      },
+      "start": {
+        "character": 16,
+        "line": 0
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Duplicate ApplVerID(1128)",
+    "range": {
+      "end": {
+        "character": 29,
+        "line": 1
+      },
+      "start": {
+        "character": 23,
+        "line": 1
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Duplicate BeginString(8)",
+    "range": {
+      "end": {
+        "character": 19,
+        "line": 2
+      },
+      "start": {
+        "character": 10,
+        "line": 2
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Duplicate MsgType(35)",
+    "range": {
+      "end": {
+        "character": 19,
+        "line": 3
+      },
+      "start": {
+        "character": 15,
+        "line": 3
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Duplicate ApplExtID(1156)",
+    "range": {
+      "end": {
+        "character": 36,
+        "line": 4
+      },
+      "start": {
+        "character": 30,
+        "line": 4
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Duplicate CstmApplVerID(1129)",
+    "range": {
+      "end": {
+        "character": 46,
+        "line": 5
+      },
+      "start": {
+        "character": 35,
+        "line": 5
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Application identity has no registered dictionary",
+    "range": {
+      "end": {
+        "character": 22,
+        "line": 6
+      },
+      "start": {
+        "character": 16,
+        "line": 6
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  }
+]

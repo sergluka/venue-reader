@@ -1,0 +1,18 @@
+---
+source: tests/diagnostics.rs
+expression: codes(&published)
+---
+[
+  "unknownVersion",
+  "bodyLength",
+  "checkSum",
+  "unknownVersion",
+  "bodyLength",
+  "checkSum",
+  "unknownVersion",
+  "bodyLength",
+  "checkSum",
+  "unknownVersion",
+  "bodyLength",
+  "checkSum"
+]

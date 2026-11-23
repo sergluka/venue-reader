@@ -1,0 +1,15 @@
+---
+source: tests/code_action.rs
+expression: action
+---
+{
+  "data": {
+    "action": "fixAll",
+    "lifetime": "[lifetime]",
+    "repairGeneration": "[generation]",
+    "uri": "file:///a.fix",
+    "version": 1
+  },
+  "kind": "source.fixAll",
+  "title": "Fix all"
+}

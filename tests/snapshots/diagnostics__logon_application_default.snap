@@ -1,0 +1,25 @@
+---
+source: tests/diagnostics.rs
+expression: version_problems
+---
+[
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Missing application version for MsgType(35)=D. Set ApplVerID(1128), defaultApplVerID, or select an application dictionary.",
+    "range": {
+      "end": {
+        "character": 10,
+        "line": 1
+      },
+      "start": {
+        "character": 0,
+        "line": 1
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  }
+]

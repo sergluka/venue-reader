@@ -1,0 +1,8 @@
+---
+source: tests/dictionary_config.rs
+expression: "dictionary_notice(&notes, &fixture, \"broken.xml\")"
+---
+{
+  "message": "client: dictionary \"<workspace>/broken.xml\" not loaded: <workspace>/broken.xml: message NewOrderSingle refers to component \"Instrumnt\", which the file does not define",
+  "type": 1
+}

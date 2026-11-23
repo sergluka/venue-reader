@@ -1,0 +1,8 @@
+---
+source: tests/inlay_hint.rs
+expression: "resolved[\"tooltip\"]"
+---
+{
+  "kind": "markdown",
+  "value": "**DeskMode** (20001) — INT\n\n*Custom field, introduced in \"desk\"*\n\n---\n\nValue: `1`"
+}

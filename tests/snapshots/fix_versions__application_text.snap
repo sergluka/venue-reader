@@ -1,0 +1,5 @@
+---
+source: tests/fix_versions.rs
+expression: description
+---
+"**Text** (58) — String\n\nFree format text string\n\n*Introduced in FIX.2.7*\n\n---\n\nValue: `SYNTHETIC_REASON`\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/5.0.SP2/tagNum_58.html)"

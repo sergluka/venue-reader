@@ -1,0 +1,5 @@
+---
+source: tests/code_action.rs
+expression: action
+---
+{"disabled": {"reason": "No automatic repair rules are enabled"}, "kind": "source.fixAll", "title": "Fix all"}

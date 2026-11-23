@@ -1,0 +1,23 @@
+---
+source: tests/diagnostics.rs
+expression: problem
+---
+{
+  "code": "unknownVersion",
+  "data": {
+    "rule": "unknownVersion"
+  },
+  "message": "ApplVerID(1128) is prohibited on an administrative message",
+  "range": {
+    "end": {
+      "character": 22,
+      "line": 0
+    },
+    "start": {
+      "character": 16,
+      "line": 0
+    }
+  },
+  "severity": 2,
+  "source": "fix"
+}

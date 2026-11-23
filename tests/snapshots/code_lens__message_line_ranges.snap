@@ -1,0 +1,26 @@
+---
+source: tests/code_lens.rs
+expression: ranges
+---
+[
+  {
+    "end": {
+      "character": 0,
+      "line": 2
+    },
+    "start": {
+      "character": 0,
+      "line": 2
+    }
+  },
+  {
+    "end": {
+      "character": 0,
+      "line": 4
+    },
+    "start": {
+      "character": 0,
+      "line": 4
+    }
+  }
+]

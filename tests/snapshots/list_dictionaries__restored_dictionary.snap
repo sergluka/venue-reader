@@ -1,0 +1,22 @@
+---
+source: tests/list_dictionaries.rs
+expression: old_entry
+---
+{
+  "application": {
+    "customVersion": null,
+    "extensionPack": null,
+    "source": "FIX.4.2",
+    "version": "FIX.4.2"
+  },
+  "definedIn": "client",
+  "kind": "global",
+  "label": "mutable (global)",
+  "name": "mutable",
+  "source": "FIX.4.2",
+  "transport": {
+    "source": "FIX.4.2",
+    "version": "FIX.4.2"
+  },
+  "version": "FIX.4.2"
+}

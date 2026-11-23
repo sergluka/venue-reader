@@ -1,0 +1,19 @@
+---
+source: tests/fix_versions.rs
+expression: selected
+---
+{
+  "application": {
+    "customVersion": "SYNTHETIC_PROFILE",
+    "extensionPack": 42,
+    "source": "<workspace>/application.xml",
+    "version": "FIX.5.0SP2"
+  },
+  "name": "synthetic-pair",
+  "source": "<workspace>/application.xml",
+  "transport": {
+    "source": "<workspace>/transport.xml",
+    "version": "FIXT.1.1"
+  },
+  "version": "FIX.5.0SP2"
+}

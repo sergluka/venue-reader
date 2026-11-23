@@ -1,0 +1,30 @@
+---
+source: tests/selection_range.rs
+expression: "at(&mut client, &[(0, 12)])"
+---
+[
+  {
+    "parent": {
+      "range": {
+        "end": {
+          "character": 21,
+          "line": 0
+        },
+        "start": {
+          "character": 0,
+          "line": 0
+        }
+      }
+    },
+    "range": {
+      "end": {
+        "character": 13,
+        "line": 0
+      },
+      "start": {
+        "character": 10,
+        "line": 0
+      }
+    }
+  }
+]

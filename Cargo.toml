@@ -11,6 +11,7 @@ categories = ["development-tools", "text-editors"]
 include = [
   "src/**",
   "tests/**",
+  "!tests/**/*.snap.new",
   "xml/**",
   "schema/**",
   "build.rs",
@@ -59,6 +60,7 @@ sha2 = "0.11"
 criterion = { version = "0.8", default-features = false, features = [
   "cargo_bench_support",
 ] }
+insta = { version = "1.49.0", features = ["json", "redactions"] }
 
 [[bench]]
 name = "analyze"

@@ -1,0 +1,8 @@
+---
+source: tests/code_lens.rs
+expression: logged
+---
+{
+  "message": "venue-reader: this client resolves no code lens `command`, so the summary's code-lens channel is not offered; set `fix.messageSummary.channels.inlayHints` to true to take the summary through inlay hints instead",
+  "type": 3
+}

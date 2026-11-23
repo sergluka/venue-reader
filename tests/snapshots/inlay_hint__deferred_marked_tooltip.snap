@@ -1,0 +1,8 @@
+---
+source: tests/inlay_hint.rs
+expression: "resolved[\"tooltip\"]"
+---
+{
+  "kind": "markdown",
+  "value": "**RejectText** (1328)\n\n*Not in FIX.5.0, introduced in FIX.5.0SP1*\n\n---\n\nValue: `x`"
+}

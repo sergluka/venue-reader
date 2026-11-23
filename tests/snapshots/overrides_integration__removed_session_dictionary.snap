@@ -1,0 +1,15 @@
+---
+source: tests/overrides_integration.rs
+expression: "removed[\"warnings\"]"
+---
+[
+  {
+    "key": "dictionary",
+    "message": "dictionary `venue` is no longer available; session selection cleared",
+    "severity": "warning",
+    "source": {
+      "layer": "session",
+      "source": "session"
+    }
+  }
+]

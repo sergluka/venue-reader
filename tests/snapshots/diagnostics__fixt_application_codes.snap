@@ -1,0 +1,181 @@
+---
+source: tests/diagnostics.rs
+expression: published
+---
+{
+  "diagnostics": [
+    {
+      "code": "bodyLength",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing BodyLength (tag 9)",
+      "range": {
+        "end": {
+          "character": 10,
+          "line": 0
+        },
+        "start": {
+          "character": 0,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "checkSum",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing CheckSum (tag 10)",
+      "range": {
+        "end": {
+          "character": 23,
+          "line": 0
+        },
+        "start": {
+          "character": 17,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "unknownMsgType",
+      "data": {
+        "rule": "unknownMsgType"
+      },
+      "message": "FIX.5.0 does not define MsgType(35) = U1",
+      "range": {
+        "end": {
+          "character": 16,
+          "line": 0
+        },
+        "start": {
+          "character": 14,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "bodyLength",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing BodyLength (tag 9)",
+      "range": {
+        "end": {
+          "character": 10,
+          "line": 1
+        },
+        "start": {
+          "character": 0,
+          "line": 1
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "checkSum",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing CheckSum (tag 10)",
+      "range": {
+        "end": {
+          "character": 23,
+          "line": 1
+        },
+        "start": {
+          "character": 17,
+          "line": 1
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "unknownMsgType",
+      "data": {
+        "rule": "unknownMsgType"
+      },
+      "message": "FIX.5.0SP1 does not define MsgType(35) = U1",
+      "range": {
+        "end": {
+          "character": 16,
+          "line": 1
+        },
+        "start": {
+          "character": 14,
+          "line": 1
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "bodyLength",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing BodyLength (tag 9)",
+      "range": {
+        "end": {
+          "character": 10,
+          "line": 2
+        },
+        "start": {
+          "character": 0,
+          "line": 2
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "checkSum",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing CheckSum (tag 10)",
+      "range": {
+        "end": {
+          "character": 23,
+          "line": 2
+        },
+        "start": {
+          "character": 17,
+          "line": 2
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "unknownMsgType",
+      "data": {
+        "rule": "unknownMsgType"
+      },
+      "message": "FIX.5.0SP2 does not define MsgType(35) = U1",
+      "range": {
+        "end": {
+          "character": 16,
+          "line": 2
+        },
+        "start": {
+          "character": 14,
+          "line": 2
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    }
+  ],
+  "uri": "file:///a.fix",
+  "version": 1
+}

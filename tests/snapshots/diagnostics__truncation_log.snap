@@ -1,0 +1,8 @@
+---
+source: tests/diagnostics.rs
+expression: logged
+---
+{
+  "message": "venue-reader: file:///a.fix — showing 1 problems of 6; raise fix.limits.diagnosticsPerDocument to see the rest",
+  "type": 3
+}

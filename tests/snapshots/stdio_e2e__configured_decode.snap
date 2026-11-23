@@ -1,0 +1,21 @@
+---
+source: tests/stdio_e2e.rs
+expression: xdg
+---
+{
+  "results": [
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": "35<MsgType>=0[Heartbeat]"
+        }
+      ],
+      "rangeIndex": 0
+    }
+  ],
+  "textDocument": {
+    "uri": "file:///workspace/heartbeat.fix",
+    "version": 1
+  }
+}

@@ -1,0 +1,25 @@
+---
+source: tests/fix_versions.rs
+expression: diagnostics(&mut client)
+---
+[
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "ApplVerID(1128) is prohibited on an administrative message",
+    "range": {
+      "end": {
+        "character": 27,
+        "line": 0
+      },
+      "start": {
+        "character": 21,
+        "line": 0
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  }
+]

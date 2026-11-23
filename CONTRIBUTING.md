@@ -30,3 +30,15 @@ notices.
 Keep affected README/wiki documentation consistent with current behavior.
 The [contributor reference](https://github.com/sergluka/venue-reader/wiki/Contributing)
 covers pull-request preparation, documentation tests and dependency notices.
+
+## Review JSON response snapshots
+
+Run the integration suite for the response you changed, for example
+`cargo test --locked --test decode`. A mismatch fails the test and shows the
+JSON diff. Locally, insta writes a pending `.snap.new` beside the accepted
+fixture in `tests/snapshots/`.
+
+Compare each change with the intended LSP contract. Use `cargo insta review`
+to accept or reject it, then rerun the suite and commit the accepted `.snap`
+files with the tests. The review command was tested with cargo-insta 1.42.2
+and insta 1.49.0. Running the tests only requires Cargo and the crate dependencies.

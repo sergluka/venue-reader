@@ -1,0 +1,5 @@
+---
+source: tests/code_lens.rs
+expression: "resolved[\"command\"]"
+---
+{"command": "", "title": "20251026-09:02:00.000: 1: CLIENT1=>BROKER1 | Heartbeat"}

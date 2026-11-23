@@ -1,0 +1,5 @@
+---
+source: tests/fix_versions.rs
+expression: "hover(&mut client, &text, line, field)"
+---
+"**MsgType** (35) — STRING\n\n*Standard FIXT.1.1*\n\n---\n\nValue: `0` — **SyntheticHeartbeat**\n\n*Category: admin*\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/fixt1.1/tagNum_35.html)"

@@ -68,9 +68,9 @@ fn dictionary_selection_waits_for_the_first_global_commit() {
     let responses = client.responses_through_barrier(&unknown);
     assert_eq!(responses.len(), 2);
     assert_eq!(responses[0].id, bundled);
-    assert_eq!(
-        responses[0].response_result.as_ref().unwrap()["name"],
-        "FIX.4.2"
+    insta::assert_json_snapshot!(
+        "first_dictionary_selection",
+        responses[0].response_result.as_ref().unwrap()
     );
     assert_eq!(
         responses[1].response_result.as_ref().unwrap_err().code,
@@ -360,18 +360,12 @@ fn invalid_modeline_application_default_warns_and_keeps_global_decoding() {
     );
     assert_eq!(report["effective"]["defaultApplVerID"], "FIX.5.0SP2");
     assert_eq!(report["sources"]["defaultApplVerID"]["layer"], "client");
-    assert!(
-        report["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|warning| {
-                warning["key"] == "defaultApplVerID"
-                    && warning["source"]["layer"] == "modeline"
-                    && warning["source"]["source"] == document
-            }),
-        "{report}"
-    );
+    let warnings = report["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["source"]["source"], document);
+    insta::assert_json_snapshot!("invalid_modeline_version", warnings[0], {
+        ".source.source" => "file:///workspace/orders.fix",
+    });
     assert_application_hover(&mut client, &document, &message, 1, Some("5.0.SP2"));
     client.shutdown();
 }

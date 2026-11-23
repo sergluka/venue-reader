@@ -1,0 +1,10 @@
+---
+source: tests/dictionary_config.rs
+expression: shown
+---
+[
+  {
+    "message": "configuration rejected; keeping committed state: dictionaries: missing field `name`",
+    "type": 1
+  }
+]

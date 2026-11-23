@@ -1,0 +1,5 @@
+---
+source: tests/fix_versions.rs
+expression: "hover(&mut client, &text, line, field)"
+---
+"**Side** (54) — INT\n\n*Standard FIX.5.0SP2*\n\n---\n\nValue: `1` — **SYNTHETIC_COMBINED_SIDE**\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/5.0.SP2/tagNum_54.html)"

@@ -1,0 +1,30 @@
+---
+source: tests/stdio_e2e.rs
+expression: rows
+---
+{
+  "results": [
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": "35(MsgType)=0(Heartbeat)"
+        }
+      ],
+      "rangeIndex": 0
+    },
+    {
+      "lines": [
+        {
+          "line": 1,
+          "text": ""
+        }
+      ],
+      "rangeIndex": 1
+    }
+  ],
+  "textDocument": {
+    "uri": "file:///workspace/heartbeat.fix",
+    "version": 1
+  }
+}

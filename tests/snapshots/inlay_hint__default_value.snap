@@ -1,0 +1,24 @@
+---
+source: tests/inlay_hint.rs
+expression: typed
+---
+{
+  "data": {
+    "kind": "value",
+    "line": 0,
+    "offset": 15,
+    "tag": 35,
+    "uri": "file:///a.fix",
+    "version": 1
+  },
+  "kind": 2,
+  "label": "(Heartbeat)",
+  "position": {
+    "character": 19,
+    "line": 0
+  },
+  "tooltip": {
+    "kind": "markdown",
+    "value": "**MsgType** (35) — String\n\nDefines message type ALWAYS THIRD FIELD IN MESSAGE. (Always unencrypted)\n\n*Introduced in FIX.2.7*\n\n---\n\nValue: `0` — **Heartbeat**\n\n*Introduced in FIX.2.7*\n\nThe Heartbeat monitors the status of the communication link and identifies when the last of a string of messages was not received.\n\n*Category: Session*\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/4.4/tagNum_35.html)"
+  }
+}

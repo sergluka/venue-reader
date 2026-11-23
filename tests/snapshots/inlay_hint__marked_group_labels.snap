@@ -1,0 +1,14 @@
+---
+source: tests/inlay_hint.rs
+expression: hint_labels(&hints)
+---
+[
+  "<BeginString>",
+  "<MsgType>",
+  "<Symbol>",
+  "<NoMDEntries>",
+  "<NoMDEntries/1/MDEntryType>",
+  "<NoMDEntries/1/MDEntryPx>",
+  "<RejectText?>",
+  "<CheckSum>"
+]

@@ -9,17 +9,7 @@ use serde_json::json;
 fn commands_are_advertised_without_decode_aliases() {
     let mut client = TestClient::start();
     let result = client.initialize(&["utf-8"]);
-    assert_eq!(
-        result["capabilities"]["executeCommandProvider"]["commands"],
-        json!([
-            "fix.decode",
-            "fix.useDictionary",
-            "fix.listDictionaries",
-            "fix.describeOverrides",
-            "fix.describeTag"
-        ]),
-        "{result}"
-    );
+    insta::assert_json_snapshot!(result["capabilities"]["executeCommandProvider"]);
     client.shutdown();
 }
 

@@ -1,0 +1,8 @@
+---
+source: tests/inlay_hint.rs
+expression: "resolved[\"tooltip\"]"
+---
+{
+  "kind": "markdown",
+  "value": "**MDEntryType** (269) — char\n\nType of market data entry.\n\n*Introduced in FIX.4.2*\n\n---\n\nValue: `0` — **Bid**\n\n*Introduced in FIX.4.2*\n\nGroup: `NoMDEntries/1/MDEntryType`\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/4.4/tagNum_269.html)"
+}

@@ -113,16 +113,8 @@ fn release_artifact_smoke() {
             }]
         }),
     );
-    assert_eq!(
-        rows,
-        json!({
-            "textDocument":{"uri":uri,"version":1},
-            "results":[
-                {"rangeIndex":0,"lines":[{"line":0,"text":"35(MsgType)=0(Heartbeat)"}]},
-                {"rangeIndex":1,"lines":[{"line":1,"text":""}]}
-            ]
-        })
-    );
+    assert_eq!(rows["textDocument"]["uri"], uri);
+    insta::assert_json_snapshot!("smoke_decode_open", rows, {".textDocument.uri" => "file:///workspace/heartbeat.fix"});
     client.notify(
         "textDocument/didChange",
         json!({
@@ -140,13 +132,8 @@ fn release_artifact_smoke() {
             }]
         }),
     );
-    assert_eq!(
-        changed,
-        json!({
-            "textDocument":{"uri":uri,"version":2},
-            "results":[{"rangeIndex":0,"lines":[{"line":0,"text":"35(MsgType)=1(TestRequest)"}]}]
-        })
-    );
+    assert_eq!(changed["textDocument"]["uri"], uri);
+    insta::assert_json_snapshot!("smoke_decode_changed", changed, {".textDocument.uri" => "file:///workspace/heartbeat.fix"});
     assert!(client.shutdown_and_exit().success(), "{}", client.stderr());
 }
 
@@ -188,19 +175,7 @@ fn dictionary_discovery_and_selection_work_without_opening_a_document() {
         .iter()
         .find(|entry| entry["name"] == "FIX.4.4")
         .expect("bundled FIX.4.4 choice");
-    assert_eq!(
-        entry,
-        &json!({
-            "name":"FIX.4.4","label":"FIX.4.4 (bundled)",
-            "kind":"bundled","definedIn":null,"version":"FIX.4.4",
-            "source":"FIX.4.4",
-            "transport":{"version":"FIX.4.4","source":"FIX.4.4"},
-            "application":{
-                "version":"FIX.4.4","extensionPack":null,"customVersion":null,
-                "source":"FIX.4.4"
-            }
-        })
-    );
+    insta::assert_json_snapshot!(entry);
     let selected = client.request(
         "workspace/executeCommand",
         json!({"command":"fix.useDictionary","arguments":[entry["name"]]}),
@@ -249,14 +224,13 @@ fn a_real_client_round_trips_the_full_stdio_lifecycle() {
         }),
     );
     assert_eq!(initialize["serverInfo"]["name"], "venue-reader");
-    assert_eq!(initialize["capabilities"]["positionEncoding"], "utf-8");
-    assert_eq!(initialize["capabilities"]["hoverProvider"], true);
-    assert!(initialize["capabilities"]["inlayHintProvider"].is_object());
-    let semantic_provider = &initialize["capabilities"]["semanticTokensProvider"];
-    assert_eq!(semantic_provider["full"], json!({ "delta": true }));
-    assert!(
-        semantic_provider.get("range").is_none(),
-        "{semantic_provider}"
+    let capabilities = &initialize["capabilities"];
+    assert_eq!(capabilities["positionEncoding"], "utf-8");
+    assert_eq!(capabilities["hoverProvider"], true);
+    assert!(capabilities["inlayHintProvider"].is_object());
+    insta::assert_json_snapshot!(
+        "stdio_semantic_tokens_provider",
+        capabilities["semanticTokensProvider"]
     );
 
     client.notify("initialized", json!({}));
@@ -420,7 +394,7 @@ fn without_xdg_config_home_the_personal_file_comes_from_the_home_default() {
 
 #[test]
 fn personal_configuration_and_fix_initialization_options_reach_fix_commands() {
-    for in_config_home in [true, false] {
+    let configured_decode = |in_config_home| {
         let personal_config = Some("inlayHints.tagNames.format = '<{}>'\n");
         let mut client = if in_config_home {
             StdioClient::start("xdg-personal-config", personal_config, None)
@@ -460,7 +434,7 @@ fn personal_configuration_and_fix_initialization_options_reach_fix_commands() {
         client.wait_for_notification("textDocument/publishDiagnostics", |params| {
             params["uri"] == uri && params["version"] == 1
         });
-        let decoded = client.request(
+        let mut decoded = client.request(
             "workspace/executeCommand",
             json!({
                 "command": "fix.decode",
@@ -473,15 +447,14 @@ fn personal_configuration_and_fix_initialization_options_reach_fix_commands() {
                 }]
             }),
         );
-        assert_eq!(
-            decoded,
-            json!({
-                "textDocument":{"uri":uri,"version":1},
-                "results":[{"rangeIndex":0,"lines":[{"line":0,"text":"35<MsgType>=0[Heartbeat]"}]}]
-            })
-        );
+        assert_eq!(decoded["textDocument"]["uri"], uri);
+        decoded["textDocument"]["uri"] = json!("file:///workspace/heartbeat.fix");
         assert!(client.shutdown_and_exit().success(), "{}", client.stderr());
-    }
+        decoded
+    };
+    let xdg = configured_decode(true);
+    assert_eq!(xdg, configured_decode(false));
+    insta::assert_json_snapshot!("configured_decode", xdg);
 }
 
 #[test]
@@ -660,7 +633,7 @@ fn fix_all_refuses_non_utf8_input_over_stdio() {
         .request_result("codeAction/resolve", actions[0].clone())
         .unwrap_err();
     assert_eq!(error["code"], -32803);
-    assert_eq!(error["message"], "Line 1: Cannot repair a non-UTF-8 line");
+    insta::assert_json_snapshot!(error);
     assert!(client.shutdown_and_exit().success());
 }
 

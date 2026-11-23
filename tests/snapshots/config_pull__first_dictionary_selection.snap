@@ -1,0 +1,19 @@
+---
+source: tests/config_pull.rs
+expression: "responses[0].response_result.as_ref().unwrap()"
+---
+{
+  "application": {
+    "customVersion": null,
+    "extensionPack": null,
+    "source": "FIX.4.2",
+    "version": "FIX.4.2"
+  },
+  "name": "FIX.4.2",
+  "source": "FIX.4.2",
+  "transport": {
+    "source": "FIX.4.2",
+    "version": "FIX.4.2"
+  },
+  "version": "FIX.4.2"
+}

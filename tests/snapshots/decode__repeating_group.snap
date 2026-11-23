@@ -1,0 +1,21 @@
+---
+source: tests/decode.rs
+expression: answer
+---
+{
+  "results": [
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": "8(BeginString)=FIX.4.4|35(MsgType)=W(MarketDataSnapshotFullRefresh)|268(NoMDEntries)=1|269(NoMDEntries/1/MDEntryType)=0(Bid)|270(NoMDEntries/1/MDEntryPx)=1"
+        }
+      ],
+      "rangeIndex": 0
+    }
+  ],
+  "textDocument": {
+    "uri": "file:///decode.fix",
+    "version": 1
+  }
+}

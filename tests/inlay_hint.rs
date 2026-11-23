@@ -66,15 +66,14 @@ fn a_tag_and_its_value_are_labelled_where_they_end_by_default() {
         .iter()
         .find(|hint| hint["position"]["character"] == tag_end)
         .expect("a hint after SenderCompID(49)");
-    assert_eq!(named["label"], "(SenderCompID)");
-    assert_eq!(named["kind"], 1, "Parameter");
+    insta::assert_json_snapshot!("default_tag", named);
 
     let value_end = HEARTBEAT.find("35=0").unwrap() as u32 + 4;
     let typed = hints
         .iter()
         .find(|hint| hint["position"]["character"] == value_end && hint["kind"] == 2)
         .expect("a hint after the value of 35");
-    assert_eq!(typed["label"], "(Heartbeat)");
+    insta::assert_json_snapshot!("default_value", typed);
     client.shutdown();
 }
 
@@ -99,14 +98,14 @@ fn each_label_is_written_by_its_own_format() {
         .iter()
         .find(|hint| hint["position"]["character"] == tag_end)
         .expect("a hint after SenderCompID(49)");
-    assert_eq!(named["label"], "<SenderCompID>");
+    insta::assert_json_snapshot!("formatted_tag", named);
 
     let value_end = HEARTBEAT.find("35=0").unwrap() as u32 + 4;
     let typed = hints
         .iter()
         .find(|hint| hint["position"]["character"] == value_end && hint["kind"] == 2)
         .expect("a hint after the value of 35");
-    assert_eq!(typed["label"], " is Heartbeat");
+    insta::assert_json_snapshot!("formatted_value", typed);
     client.shutdown();
 }
 
@@ -124,11 +123,7 @@ fn a_tag_the_dictionary_does_not_define_draws_nothing() {
         "8=FIX.4.4|35=0|9999=x|10=1|",
     );
     let hints = over(&mut client, (0, 0), (0, 400));
-    assert_eq!(
-        hint_labels(&hints),
-        ["<BeginString>", "<MsgType>", "<CheckSum>"],
-        "9999 is on the line and has no label"
-    );
+    insta::assert_json_snapshot!("unrecognized_tag_skipped", hints);
     client.shutdown();
 }
 
@@ -147,16 +142,7 @@ fn a_tag_standard_fix_names_and_the_dictionary_lacks_is_marked() {
         LINE,
     );
     let hints = over(&mut client, (0, 0), (0, 400));
-    assert_eq!(
-        hint_labels(&hints),
-        [
-            "<BeginString>",
-            "<MsgType>",
-            "<ApplVerID>",
-            "<RejectText?>",
-            "<CheckSum>"
-        ]
-    );
+    insta::assert_json_snapshot!("later_field_labels", hint_labels(&hints));
     let tag_end = LINE.find("1328=").unwrap() as u32 + 4;
     let marked = hints
         .iter()
@@ -196,13 +182,7 @@ fn a_marked_hints_tooltip_resolves_to_the_hover() {
     let resolved = client
         .request("inlayHint/resolve", marked)
         .expect("answered");
-    assert!(
-        resolved["tooltip"]["value"]
-            .as_str()
-            .expect("markdown")
-            .starts_with("**RejectText** (1328)"),
-        "{resolved}"
-    );
+    insta::assert_json_snapshot!("deferred_marked_tooltip", resolved["tooltip"]);
     client.shutdown();
 }
 
@@ -221,19 +201,7 @@ fn a_marked_tag_inside_a_group_draws_the_mark_not_a_path() {
         LINE,
     );
     let hints = over(&mut client, (0, 0), (0, 400));
-    assert_eq!(
-        hint_labels(&hints),
-        [
-            "<BeginString>",
-            "<MsgType>",
-            "<Symbol>",
-            "<NoMDEntries>",
-            "<NoMDEntries/1/MDEntryType>",
-            "<NoMDEntries/1/MDEntryPx>",
-            "<RejectText?>",
-            "<CheckSum>",
-        ]
-    );
+    insta::assert_json_snapshot!("marked_group_labels", hint_labels(&hints));
     client.shutdown();
 }
 
@@ -320,15 +288,7 @@ fn the_summary_is_its_own_hint_when_the_channel_is_on() {
         .iter()
         .find(|hint| hint["data"]["kind"] == "summary")
         .expect("a summary hint");
-    assert_eq!(summary["position"]["character"], 0);
-    assert_eq!(summary["paddingRight"], true);
-    assert_eq!(summary["data"]["templateParts"], 3);
-    assert!(summary["data"].get("tokens").is_none());
-    assert_eq!(summary["label"][3]["value"], " | ");
-    assert_eq!(
-        hint_labels(std::slice::from_ref(summary)),
-        ["2 ExecutionReport | FILL"]
-    );
+    insta::assert_json_snapshot!("summary_with_details", summary);
     client.shutdown();
 }
 
@@ -707,17 +667,10 @@ fn repeated_tags_resolve_to_their_own_field() {
         repeated[0]["data"]["offset"], repeated[1]["data"]["offset"],
         "and they are told apart by where they start"
     );
-
-    let mut tooltip = |hint: Value| -> String {
-        client.request("inlayHint/resolve", hint).expect("answered")["tooltip"]["value"]
-            .as_str()
-            .expect("markdown")
-            .to_owned()
-    };
-    let first = tooltip(repeated[0].clone());
-    let second = tooltip(repeated[1].clone());
-    assert!(first.contains("NoMDEntries/1/"), "{first}");
-    assert!(second.contains("NoMDEntries/2/"), "{second}");
+    for (hint, case) in repeated.into_iter().zip(["first_entry", "second_entry"]) {
+        let resolved = client.request("inlayHint/resolve", hint).expect("answered");
+        insta::assert_json_snapshot!(case, resolved["tooltip"]);
+    }
     client.shutdown();
 }
 
@@ -756,15 +709,8 @@ fn a_custom_tags_tooltip_says_it_is_not_standard() {
         .into_iter()
         .find(|hint| hint["data"]["tag"] == 20001 && hint["data"]["kind"] == "tag")
         .expect("the custom tag is labelled");
-    let tooltip = client.request("inlayHint/resolve", hint).expect("answered")["tooltip"]["value"]
-        .as_str()
-        .expect("markdown")
-        .to_owned();
-    assert!(
-        tooltip.contains("*Custom field, introduced in \"desk\"*"),
-        "{tooltip}"
-    );
-    assert!(!tooltip.contains("[FIX Reference"), "{tooltip}");
+    let resolved = client.request("inlayHint/resolve", hint).expect("answered");
+    insta::assert_json_snapshot!("custom_tag_tooltip", resolved["tooltip"]);
     client.shutdown();
 }
 
@@ -850,13 +796,7 @@ fn fixt_value_hints_and_summary_use_the_application_message() {
             &line,
         );
         let hints = over(&mut client, (0, 0), (0, 400));
-        let names = hint_labels(&hints);
-        assert!(names.contains(&"(NewOrderSingle)".to_owned()), "{names:?}");
-        assert!(names.contains(&"(Buy)".to_owned()), "{names:?}");
-        assert!(
-            names.iter().any(|name| name.contains("NewOrderSingle (D)")),
-            "{names:?}"
-        );
+        insta::assert_json_snapshot!(format!("fixt_application_{code}"), hint_labels(&hints));
         client.shutdown();
     }
 }
@@ -876,14 +816,7 @@ fn unresolved_application_does_not_inherit_a_transport_msg_type_enum() {
         LINE,
     );
     let hints = over(&mut client, (0, 0), (0, 400));
-    let names = hint_labels(&hints);
-    assert!(
-        !names
-            .iter()
-            .any(|name| name.contains("NewOrderSingle") || name.contains("Buy")),
-        "{names:?}"
-    );
-    assert_eq!(names, ["D"]);
+    insta::assert_json_snapshot!("unresolved_application", hints);
     client.shutdown();
 }
 

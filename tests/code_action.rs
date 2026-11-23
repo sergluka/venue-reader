@@ -249,26 +249,8 @@ fn fix_all_repairs_the_document_beyond_the_range_and_publication_limits() {
     params["range"]["end"]["line"] = json!(999);
     params["context"]["diagnostics"] = json!([]);
     let offered = actions(&mut client, params);
-    assert_eq!(offered.len(), 1, "{offered:#?}");
+    insta::assert_compact_json_snapshot!("fix_all_beyond_range", offered);
     let action = &offered[0];
-    assert_eq!(action["kind"], "source.fixAll");
-    assert_eq!(action["title"], "Fix all");
-    assert!(action.get("diagnostics").is_none());
-    assert_eq!(
-        action["edit"]["documentChanges"].as_array().unwrap().len(),
-        1
-    );
-    assert_eq!(
-        action["edit"]["documentChanges"][0]["textDocument"],
-        json!({"uri": URI, "version": 1})
-    );
-    assert_eq!(
-        action["edit"]["documentChanges"][0]["edits"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
     let fixed = apply_document_action(&text, action);
     assert_eq!(fixed.lines().nth(1), Some(SOUND));
     assert_eq!(fixed.lines().nth(3), Some("# untouched"));
@@ -500,10 +482,7 @@ fn fix_all_preserves_line_endings_after_incremental_changes() {
         }));
         let changed = format!("{broken}\npreserved\r\nextra\r\n{broken}\r");
         let action = calculated_fix_all(&mut client, resolve);
-        assert_eq!(
-            action["edit"]["documentChanges"][0]["textDocument"]["version"],
-            2
-        );
+        insta::assert_compact_json_snapshot!("edit_after_incremental_changes", action["edit"]);
         let fixed = apply_document_action(&changed, &action);
         assert_eq!(fixed, changed.replace(broken, repaired));
         let edit = &action["edit"]["documentChanges"][0]["edits"][0];
@@ -544,13 +523,7 @@ fn unicode_integrity_repairs_work_through_quickfix_and_fix_all() {
             assert_eq!(apply_document_action(&broken, &offered[0]), expected);
         }
         let aggregate = calculated_fix_all(&mut client, resolve);
-        assert_eq!(
-            aggregate["edit"]["documentChanges"][0]["edits"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
+        insta::assert_compact_json_snapshot!("unicode_repair", aggregate["edit"]);
         assert_eq!(apply_document_action(&broken, &aggregate), expected);
         client.did_change_full(URI, &expected, 2);
         assert_no_remaining_repairs(&mut client, resolve);
@@ -652,12 +625,7 @@ fn non_utf8_ineligible_fragments_do_not_block_repairs_outside_them() {
                 );
             }
             let action = calculated_fix_all(&mut client, resolve);
-            let edits = action["edit"]["documentChanges"][0]["edits"]
-                .as_array()
-                .unwrap();
-            assert_eq!(edits.len(), 1);
-            assert_eq!(edits[0]["range"]["start"]["line"], 1);
-            assert_eq!(edits[0]["range"]["end"]["line"], 1);
+            insta::assert_compact_json_snapshot!("repair_between_fragments", action["edit"]);
             let fixed = apply_document_action(&text, &action);
             assert_eq!(fixed, format!("{fragment}\r\n{repaired}\n{fragment}"));
             client.did_change_full(URI, &fixed, 2);
@@ -761,15 +729,7 @@ fn fix_all_skips_ineligible_fragments_and_preserves_them_after_application() {
 fn a_line_wrong_in_two_ways_offers_one_action() {
     let mut client = open(BAD_BOTH);
     let offered = actions(&mut client, on_line(0));
-    assert_eq!(offered.len(), 1, "{offered:#?}");
-    let action = &offered[0];
-    assert_eq!(action["title"], "Fix BodyLength and CheckSum");
-    assert_eq!(action["kind"], "quickfix");
-    assert_eq!(action["isPreferred"], true);
-    let changes = &action["edit"]["documentChanges"];
-    assert_eq!(changes[0]["textDocument"]["uri"], URI);
-    assert_eq!(changes[0]["textDocument"]["version"], 1);
-    assert_eq!(changes[0]["edits"].as_array().map(Vec::len), Some(2));
+    insta::assert_compact_json_snapshot!("integrity_quickfix", offered);
     client.shutdown();
 }
 
@@ -912,16 +872,11 @@ fn every_line_in_the_range_gets_its_own_action() {
         "context": { "diagnostics": [], "triggerKind": 1 },
     });
     let offered = actions(&mut client, params);
-    assert_eq!(offered.len(), 2, "{offered:#?}");
-    let lines: Vec<u64> = offered
+    let edit_sets: Vec<_> = offered
         .iter()
-        .map(|action| {
-            action["edit"]["documentChanges"][0]["edits"][0]["range"]["start"]["line"]
-                .as_u64()
-                .unwrap()
-        })
+        .map(|action| &action["edit"]["documentChanges"][0]["edits"])
         .collect();
-    assert_eq!(lines, vec![0, 2]);
+    insta::assert_compact_json_snapshot!("two_line_repairs", edit_sets);
     client.shutdown();
 }
 
@@ -966,7 +921,7 @@ fn a_span_after_non_ascii_text_is_converted_under_the_negotiated_encoding() {
     // "— " is three bytes and two utf-16 units, so the BodyLength value that
     // starts at byte 16 is at character 14.
     assert_eq!(prefixed.find("9=7").unwrap() + 2, 16);
-    assert_eq!(first["range"]["start"]["character"], 14);
+    insta::assert_compact_json_snapshot!("utf16_body_length_edit", first);
     client.shutdown();
 }
 
@@ -1043,10 +998,7 @@ fn resolve_without_data_support_retains_eager_explicit_fix_all() {
         .is_none());
     client.did_open(URI, BAD_BOTH, 1);
     let offered = actions(&mut client, source_params());
-    assert_eq!(offered.len(), 1);
-    assert!(offered[0]["edit"]["documentChanges"].is_array());
-    assert!(offered[0].get("command").is_none());
-    assert!(offered[0].get("data").is_none());
+    insta::assert_compact_json_snapshot!("eager_fix_all", offered);
     client.shutdown();
 }
 
@@ -1119,13 +1071,12 @@ fn ordinary_menu_defers_fix_all_until_resolution_and_preserves_action_properties
     assert_eq!(offered.len(), 2);
     assert_eq!(offered[0]["kind"], "quickfix");
     let action = &offered[1];
-    assert_eq!(action["kind"], "source.fixAll");
-    assert_eq!(action["title"], "Fix all");
-    assert!(action.get("edit").is_none());
-    assert!(action.get("command").is_none());
-    assert!(action.get("disabled").is_none());
-    assert_eq!(action["data"]["uri"], URI);
-    assert_eq!(action["data"]["version"], 1);
+    assert!(action["data"]["lifetime"].is_u64());
+    assert!(action["data"]["repairGeneration"].is_u64());
+    insta::assert_compact_json_snapshot!("deferred_fix_all", action, {
+        ".data.lifetime" => "[lifetime]",
+        ".data.repairGeneration" => "[generation]",
+    });
     let resolved = client
         .request("codeAction/resolve", action.clone())
         .unwrap();
@@ -1292,12 +1243,7 @@ fn ordinary_menu_explains_missing_resolve_support_without_changing_explicit_fall
         assert_eq!(offered[0]["kind"], "quickfix");
         assert_eq!(offered.len(), if disabled_support { 2 } else { 1 });
         if disabled_support {
-            assert_eq!(offered[1]["kind"], "source.fixAll");
-            assert!(!offered[1]["disabled"]["reason"]
-                .as_str()
-                .unwrap()
-                .is_empty());
-            assert!(offered[1].get("edit").is_none());
+            insta::assert_compact_json_snapshot!("unavailable_resolve", offered[1]);
         }
         let explicit = actions(&mut client, source_params());
         assert_eq!(explicit.len(), 1);
@@ -1320,9 +1266,7 @@ fn discovery_reports_disabled_repairs_without_offering_a_resolvable_action() {
     }));
     client.did_open(URI, BAD_BOTH, 1);
     let action = discovered_fix_all(&mut client);
-    assert!(!action["disabled"]["reason"].as_str().unwrap().is_empty());
-    assert!(action.get("edit").is_none());
-    assert!(action.get("data").is_none());
+    insta::assert_compact_json_snapshot!("disabled_repairs", action);
     client.shutdown();
 }
 

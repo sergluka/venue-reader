@@ -1,0 +1,25 @@
+---
+source: tests/overrides_integration.rs
+expression: warnings
+---
+[
+  {
+    "key": "hover.enabled",
+    "message": "duplicate setting hover.enabled; first defined at file:///workspace/orders.fix:1:8",
+    "severity": "error",
+    "source": {
+      "layer": "modeline",
+      "range": {
+        "end": {
+          "character": 26,
+          "line": 1
+        },
+        "start": {
+          "character": 7,
+          "line": 1
+        }
+      },
+      "source": "file:///workspace/orders.fix"
+    }
+  }
+]

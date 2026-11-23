@@ -1,0 +1,11 @@
+---
+source: tests/code_action.rs
+expression: "offered[1]"
+---
+{
+  "disabled": {
+    "reason": "This client cannot resolve fix-all edits; request source.fixAll explicitly"
+  },
+  "kind": "source.fixAll",
+  "title": "Fix all"
+}

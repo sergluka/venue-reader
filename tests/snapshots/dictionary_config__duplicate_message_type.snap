@@ -1,0 +1,8 @@
+---
+source: tests/dictionary_config.rs
+expression: "dictionary_notice(&notes, &fixture, \"desk.xml\")"
+---
+{
+  "message": "client: dictionary \"<workspace>/desk.xml\" loaded with an error: message NewOrderSingle, MsgType(35) = D, is defined twice, also as OrderSingle; merged into one under NewOrderSingle",
+  "type": 1
+}

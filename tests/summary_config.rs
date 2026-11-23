@@ -27,8 +27,7 @@ fn a_bad_summary_template_warns_once_and_the_server_keeps_working() {
         .filter(|(method, _)| method == "window/showMessage")
         .collect();
     assert_eq!(warnings.len(), 1, "exactly one warning: {notes:?}");
-    let text = warnings[0].1["message"].as_str().unwrap();
-    assert!(text.contains("template"), "{text}");
+    insta::assert_json_snapshot!("invalid_summary_template", warnings[0].1);
 
     // The same broken configuration pulled again must not warn again.
     client.notify(

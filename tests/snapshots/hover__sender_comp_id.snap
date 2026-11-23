@@ -1,0 +1,20 @@
+---
+source: tests/hover.rs
+expression: on_tag
+---
+{
+  "contents": {
+    "kind": "markdown",
+    "value": "**SenderCompID** (49) — String\n\nAssigned value used to identify firm sending message.\n\n*Introduced in FIX.2.7*\n\n---\n\nValue: `CLIENT1`\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/4.4/tagNum_49.html)"
+  },
+  "range": {
+    "end": {
+      "character": 35,
+      "line": 0
+    },
+    "start": {
+      "character": 25,
+      "line": 0
+    }
+  }
+}

@@ -1,0 +1,15 @@
+---
+source: tests/overrides_integration.rs
+expression: warnings
+---
+[
+  {
+    "key": "dictionary",
+    "message": "dictionary \"./broken.xml\" not loaded: <workspace>/logs/broken.xml: message NewOrderSingle refers to component \"Instrumnt\", which the file does not define",
+    "severity": "error",
+    "source": {
+      "layer": "project",
+      "source": "file:///workspace/logs/.venue-reader.toml"
+    }
+  }
+]

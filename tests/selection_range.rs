@@ -59,11 +59,7 @@ fn levels(mut node: &Value) -> Vec<(u64, u64)> {
 fn a_cursor_in_a_value_expands_value_field_line() {
     let mut client = open(HEARTBEAT);
     let found = at(&mut client, &[(0, 18)]);
-    assert_eq!(
-        levels(&found[0]),
-        vec![(18, 19), (15, 19), (0, 79)],
-        "`0`, then `35=0`, then the line"
-    );
+    insta::assert_compact_json_snapshot!("value_field_line", found);
     client.shutdown();
 }
 
@@ -74,17 +70,9 @@ fn a_cursor_in_a_value_expands_value_field_line() {
 #[test]
 fn a_cursor_on_the_tag_or_the_equals_starts_at_the_field() {
     let mut client = open(HEARTBEAT);
-    for (character, what) in [
-        (15, "the first tag digit"),
-        (16, "the second"),
-        (17, "the `=`"),
-    ] {
+    for character in [15, 16, 17] {
         let found = at(&mut client, &[(0, character)]);
-        assert_eq!(
-            levels(&found[0]),
-            vec![(15, 19), (0, 79)],
-            "{what}: no value level, because the cursor is not in the value"
-        );
+        insta::assert_compact_json_snapshot!("tag_and_equals", found);
     }
     client.shutdown();
 }
@@ -123,7 +111,7 @@ fn every_level_contains_the_position_and_its_parent() {
 fn a_cursor_on_a_separator_gets_the_line_only() {
     let mut client = open(HEARTBEAT);
     let found = at(&mut client, &[(0, 9)]);
-    assert_eq!(levels(&found[0]), vec![(0, 79)]);
+    insta::assert_compact_json_snapshot!("separator", found);
     client.shutdown();
 }
 
@@ -132,7 +120,7 @@ fn a_cursor_on_a_separator_gets_the_line_only() {
 fn a_line_that_is_not_a_message_still_answers() {
     let mut client = open("# a comment");
     let found = at(&mut client, &[(0, 3)]);
-    assert_eq!(levels(&found[0]), vec![(0, 11)]);
+    insta::assert_compact_json_snapshot!("comment", found);
     client.shutdown();
 }
 
@@ -147,16 +135,8 @@ fn a_line_that_is_not_a_message_still_answers() {
 #[test]
 fn an_empty_value_is_addressed_by_its_equals_not_past_it() {
     let mut client = open("8=FIX.4.4|35=|10=171|");
-    assert_eq!(
-        levels(&at(&mut client, &[(0, 12)])[0]),
-        vec![(10, 13), (0, 21)],
-        "on the `=`: the field, with no value level to enter"
-    );
-    assert_eq!(
-        levels(&at(&mut client, &[(0, 13)])[0]),
-        vec![(0, 21)],
-        "one past it is the separator, which is inside no field"
-    );
+    insta::assert_compact_json_snapshot!("empty_value_equals", at(&mut client, &[(0, 12)]));
+    insta::assert_compact_json_snapshot!("empty_value_separator", at(&mut client, &[(0, 13)]));
     client.shutdown();
 }
 
@@ -166,11 +146,7 @@ fn an_empty_value_is_addressed_by_its_equals_not_past_it() {
 fn a_field_that_is_the_whole_line_collapses_into_it() {
     let mut client = open("8=FIX.4.4");
     let found = at(&mut client, &[(0, 3)]);
-    assert_eq!(
-        levels(&found[0]),
-        vec![(2, 9), (0, 9)],
-        "value then line: the field *is* the line, so it is not repeated"
-    );
+    insta::assert_compact_json_snapshot!("whole_line_field", found);
     client.shutdown();
 }
 
@@ -198,16 +174,7 @@ fn duplicates_and_disorder_keep_their_slots() {
 fn positions_past_the_text_still_get_a_slot() {
     let mut client = open(HEARTBEAT);
     let found = at(&mut client, &[(0, 9999), (7, 3)]);
-    assert_eq!(found.len(), 2);
-    assert_eq!(levels(&found[0]), vec![(0, 79)], "clamped to its line");
-    assert_eq!(
-        found[1],
-        json!({ "range": {
-            "start": { "line": 7, "character": 3 },
-            "end": { "line": 7, "character": 3 },
-        }}),
-        "past the document: empty, at itself, no parent"
-    );
+    insta::assert_compact_json_snapshot!("positions_past_text", found);
     client.shutdown();
 }
 
@@ -223,10 +190,7 @@ fn past_the_line_bound_every_position_gets_its_line() {
     client.did_open(URI, &[HEARTBEAT; 4].join("\n"), 1);
 
     let found = at(&mut client, &[(0, 18), (1, 18), (2, 18)]);
-    assert_eq!(found.len(), 3);
-    for (nth, node) in found.iter().enumerate() {
-        assert_eq!(levels(node), vec![(0, 79)], "slot {nth}: the line only");
-    }
+    insta::assert_compact_json_snapshot!("line_budget", found);
 
     let logged = client.wait_for_log("rangeLines");
     let text = logged["message"].as_str().expect("text");
@@ -311,19 +275,7 @@ fn a_field_in_a_group_expands_through_its_entry_then_the_group() {
     let cursor = at_of(PARTIES, "448=A", 4);
     let found = at(&mut client, &[(0, cursor)]);
 
-    let entry = (at_of(PARTIES, "448=A", 0), at_of(PARTIES, "452=1", 5));
-    let group = (at_of(PARTIES, "453=2", 0), at_of(PARTIES, "803=2", 5));
-    assert_eq!(
-        levels(&found[0]),
-        vec![
-            (cursor as u64, cursor as u64 + 1),
-            (entry.0 as u64, entry.0 as u64 + 5),
-            (entry.0 as u64, entry.1 as u64),
-            (group.0 as u64, group.1 as u64),
-            (0, PARTIES.len() as u64),
-        ],
-        "value, field, entry, group, line"
-    );
+    insta::assert_compact_json_snapshot!("party_entry", found);
     client.shutdown();
 }
 
@@ -359,18 +311,7 @@ fn a_count_tag_expands_through_the_group_it_opens() {
     let cursor = at_of(PARTIES, "453=2", 4);
     let found = at(&mut client, &[(0, cursor)]);
 
-    let count = at_of(PARTIES, "453=2", 0) as u64;
-    let group_end = at_of(PARTIES, "803=2", 5) as u64;
-    assert_eq!(
-        levels(&found[0]),
-        vec![
-            (cursor as u64, cursor as u64 + 1),
-            (count, count + 5),
-            (count, group_end),
-            (0, PARTIES.len() as u64),
-        ],
-        "value, the count field, the group it opens, line"
-    );
+    insta::assert_compact_json_snapshot!("party_count", found);
     client.shutdown();
 }
 
@@ -411,26 +352,20 @@ fn group_levels_are_columns_under_utf16() {
 /// the group under FIX.4.4 and under `8=FIXT.1.1`.
 #[test]
 fn a_header_group_field_expands_through_its_entry_then_the_group() {
-    for line in [
-        "8=FIX.4.4|35=0|627=2|628=A|630=1|628=B|630=2|112=T",
-        "8=FIXT.1.1|35=0|627=2|628=A|630=1|628=B|630=2|112=T",
+    for (name, line) in [
+        (
+            "fix44_header_group",
+            "8=FIX.4.4|35=0|627=2|628=A|630=1|628=B|630=2|112=T",
+        ),
+        (
+            "fixt_header_group",
+            "8=FIXT.1.1|35=0|627=2|628=A|630=1|628=B|630=2|112=T",
+        ),
     ] {
         let mut client = open(line);
         let cursor = at_of(line, "628=B", 4);
         let found = at(&mut client, &[(0, cursor)]);
-        let entry = (at_of(line, "628=B", 0), at_of(line, "630=2", 5));
-        let group = (at_of(line, "627=2", 0), at_of(line, "630=2", 5));
-        assert_eq!(
-            levels(&found[0]),
-            vec![
-                (cursor as u64, cursor as u64 + 1),
-                (entry.0 as u64, entry.0 as u64 + 5),
-                (entry.0 as u64, entry.1 as u64),
-                (group.0 as u64, group.1 as u64),
-                (0, line.len() as u64),
-            ],
-            "{line}: value, field, entry, group, line"
-        );
+        insta::assert_compact_json_snapshot!(name, found);
         client.shutdown();
     }
 }

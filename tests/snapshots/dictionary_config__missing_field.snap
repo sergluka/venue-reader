@@ -1,0 +1,8 @@
+---
+source: tests/dictionary_config.rs
+expression: "dictionary_notice(&notes, &fixture, \"desk.xml\")"
+---
+{
+  "message": "client: dictionary \"<workspace>/desk.xml\" loaded with an error: message MarketDataRequest refers to field \"PriceAggregation\", which the file does not define; skipped",
+  "type": 1
+}

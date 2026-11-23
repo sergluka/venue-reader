@@ -1,0 +1,32 @@
+---
+source: tests/inlay_hint.rs
+expression: summary
+---
+{
+  "data": {
+    "kind": "summary",
+    "templateParts": 3
+  },
+  "label": [
+    {
+      "value": "2"
+    },
+    {
+      "value": " "
+    },
+    {
+      "value": "ExecutionReport"
+    },
+    {
+      "value": " | "
+    },
+    {
+      "value": "FILL"
+    }
+  ],
+  "paddingRight": true,
+  "position": {
+    "character": 0,
+    "line": 0
+  }
+}

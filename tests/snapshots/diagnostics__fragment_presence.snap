@@ -1,0 +1,143 @@
+---
+source: tests/diagnostics.rs
+expression: published
+---
+{
+  "diagnostics": [
+    {
+      "code": "beginString",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Not a FIX message: missing BeginString(8)",
+      "range": {
+        "end": {
+          "character": 4,
+          "line": 0
+        },
+        "start": {
+          "character": 0,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "bodyLength",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing BodyLength (tag 9)",
+      "range": {
+        "end": {
+          "character": 4,
+          "line": 0
+        },
+        "start": {
+          "character": 0,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "checkSum",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing CheckSum (tag 10)",
+      "range": {
+        "end": {
+          "character": 4,
+          "line": 0
+        },
+        "start": {
+          "character": 0,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "bodyLength",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing BodyLength (tag 9)",
+      "range": {
+        "end": {
+          "character": 9,
+          "line": 1
+        },
+        "start": {
+          "character": 0,
+          "line": 1
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "checkSum",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing CheckSum (tag 10)",
+      "range": {
+        "end": {
+          "character": 9,
+          "line": 1
+        },
+        "start": {
+          "character": 0,
+          "line": 1
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "missingMsgType",
+      "data": {
+        "rule": "unknownMsgType"
+      },
+      "message": "Missing MsgType(35)",
+      "range": {
+        "end": {
+          "character": 9,
+          "line": 1
+        },
+        "start": {
+          "character": 0,
+          "line": 1
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "beginString",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Not a FIX message: missing BeginString(8)",
+      "range": {
+        "end": {
+          "character": 21,
+          "line": 2
+        },
+        "start": {
+          "character": 0,
+          "line": 2
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    }
+  ],
+  "uri": "file:///a.fix",
+  "version": 1
+}

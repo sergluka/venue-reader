@@ -120,12 +120,11 @@ fn successful_bottom_modeline_selector_reports_its_actual_line() {
     );
     let report = client.describe(&document).unwrap();
     assert_eq!(report["effective"]["dictionary"], "FIX.4.4");
-    assert_eq!(report["sources"]["dictionary"]["layer"], "modeline");
-    assert_eq!(report["sources"]["dictionary"]["source"], document);
-    assert_eq!(
-        report["sources"]["dictionary"]["range"]["start"],
-        json!({"line":11,"character":7})
-    );
+    let source = &report["sources"]["dictionary"];
+    assert_eq!(source["source"], document);
+    insta::assert_json_snapshot!("bottom_selector_source", source, {
+        ".source" => "file:///workspace/orders.fix",
+    });
     client.shutdown();
 }
 
@@ -149,12 +148,10 @@ fn rejected_bottom_modeline_selector_diagnostic_uses_its_actual_range() {
         .iter()
         .find(|warning| warning["key"] == "dictionary")
         .unwrap();
-    assert_eq!(warning["source"]["layer"], "modeline");
     assert_eq!(warning["source"]["source"], document);
-    assert_eq!(
-        warning["source"]["range"]["start"],
-        json!({"line":11,"character":7})
-    );
+    insta::assert_json_snapshot!("rejected_selector", warning, {
+        ".source.source" => "file:///workspace/orders.fix",
+    });
     let published = client.wait_for("textDocument/publishDiagnostics");
     let diagnostic = published["diagnostics"]
         .as_array()
@@ -162,10 +159,7 @@ fn rejected_bottom_modeline_selector_diagnostic_uses_its_actual_range() {
         .iter()
         .find(|diagnostic| diagnostic["code"] == "modeline")
         .unwrap();
-    assert_eq!(
-        diagnostic["range"]["start"],
-        json!({"line":11,"character":7})
-    );
+    assert_eq!(diagnostic["range"], warning["source"]["range"]);
     client.shutdown();
 }
 
@@ -178,14 +172,7 @@ fn unknown_global_rule_is_omitted_and_reported_as_an_error() {
     let document = fixture.uri("orders.fix");
     let report = client.did_open(&document, "8=FIX.4.4|35=D|", 1);
     assert!(report["effective"]["diagnostics.rules.integritY.enabled"].is_null());
-    let warning = report["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|warning| warning["message"].as_str().unwrap().contains("integritY"))
-        .unwrap();
-    assert_eq!(warning["severity"], "error");
-    assert_eq!(warning["source"]["layer"], "client");
+    insta::assert_json_snapshot!("unknown_global_rule", report["warnings"]);
     client.wait_for_log("integritY");
     client.shutdown();
 }
@@ -199,15 +186,7 @@ fn unknown_rule_with_only_opaque_options_is_omitted_and_reported() {
     let document = fixture.uri("orders.fix");
     let report = client.did_open(&document, "8=FIX.4.4|35=D|", 1);
     assert!(report["effective"]["diagnostics.rules.futureRule.autoCorrect"].is_null());
-    assert!(report["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|warning| {
-            warning["message"].as_str().unwrap().contains("futureRule")
-                && warning["severity"] == "error"
-                && warning["source"]["layer"] == "client"
-        }));
+    insta::assert_json_snapshot!("unknown_rule_options", report["warnings"]);
     client.shutdown();
 }
 
@@ -229,13 +208,10 @@ fn unknown_modeline_rule_is_omitted_and_diagnosed_at_its_source() {
         .iter()
         .find(|warning| warning["message"].as_str().unwrap().contains("integritY"))
         .unwrap();
-    assert_eq!(warning["severity"], "error");
-    assert_eq!(warning["source"]["layer"], "modeline");
     assert_eq!(warning["source"]["source"], document);
-    assert_eq!(
-        warning["source"]["range"]["start"],
-        json!({"line":1,"character":7})
-    );
+    insta::assert_json_snapshot!("unknown_modeline_rule", warning, {
+        ".source.source" => "file:///workspace/orders.fix",
+    });
     let published = client.wait_for("textDocument/publishDiagnostics");
     assert!(published["diagnostics"]
         .as_array()

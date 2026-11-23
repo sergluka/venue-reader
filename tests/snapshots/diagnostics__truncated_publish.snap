@@ -1,0 +1,45 @@
+---
+source: tests/diagnostics.rs
+expression: last
+---
+{
+  "diagnostics": [
+    {
+      "code": "bodyLength",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "BodyLength is 7, expected 139",
+      "range": {
+        "end": {
+          "character": 13,
+          "line": 0
+        },
+        "start": {
+          "character": 12,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "truncated",
+      "message": "5 more problems not shown",
+      "range": {
+        "end": {
+          "character": 0,
+          "line": 0
+        },
+        "start": {
+          "character": 0,
+          "line": 0
+        }
+      },
+      "severity": 3,
+      "source": "fix"
+    }
+  ],
+  "uri": "file:///a.fix",
+  "version": 1
+}

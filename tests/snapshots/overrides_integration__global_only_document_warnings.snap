@@ -1,0 +1,62 @@
+---
+source: tests/overrides_integration.rs
+expression: warnings
+---
+[
+  {
+    "key": "allowDictionaryPath",
+    "message": "allowDictionaryPath is global-only",
+    "severity": "warning",
+    "source": {
+      "layer": "project",
+      "source": "file:///workspace/.venue-reader.toml"
+    }
+  },
+  {
+    "key": "documentLink.url",
+    "message": "documentLink.url is global-only",
+    "severity": "warning",
+    "source": {
+      "layer": "project",
+      "source": "file:///workspace/.venue-reader.toml"
+    }
+  },
+  {
+    "key": "allowDictionaryPath",
+    "message": "allowDictionaryPath is global-only",
+    "severity": "warning",
+    "source": {
+      "layer": "modeline",
+      "range": {
+        "end": {
+          "character": 31,
+          "line": 0
+        },
+        "start": {
+          "character": 7,
+          "line": 0
+        }
+      },
+      "source": "file:///workspace/orders.fix"
+    }
+  },
+  {
+    "key": "dictionary",
+    "message": "dictionary paths are disabled; enable allowDictionaryPath in user TOML or global LSP settings",
+    "severity": "warning",
+    "source": {
+      "layer": "modeline",
+      "range": {
+        "end": {
+          "character": 56,
+          "line": 0
+        },
+        "start": {
+          "character": 32,
+          "line": 0
+        }
+      },
+      "source": "file:///workspace/orders.fix"
+    }
+  }
+]

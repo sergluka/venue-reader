@@ -1,0 +1,96 @@
+---
+source: tests/list_dictionaries.rs
+expression: globals
+---
+[
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.4.4",
+      "version": "FIX.4.4"
+    },
+    "definedIn": "client",
+    "kind": "global",
+    "label": "  Alias \"β\"   (global)",
+    "name": "  Alias \"β\"  ",
+    "source": "FIX.4.4",
+    "transport": {
+      "source": "FIX.4.4",
+      "version": "FIX.4.4"
+    },
+    "version": "FIX.4.4"
+  },
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.4.4",
+      "version": "FIX.4.4"
+    },
+    "definedIn": "client",
+    "kind": "global",
+    "label": "Alpha (global)",
+    "name": "Alpha",
+    "source": "FIX.4.4",
+    "transport": {
+      "source": "FIX.4.4",
+      "version": "FIX.4.4"
+    },
+    "version": "FIX.4.4"
+  },
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "<workspace>/synthetic.xml",
+      "version": "FIX.4.4"
+    },
+    "definedIn": "client",
+    "kind": "global",
+    "label": "external (global)",
+    "name": "external",
+    "source": "<workspace>/synthetic.xml",
+    "transport": {
+      "source": "<workspace>/synthetic.xml",
+      "version": "FIX.4.4"
+    },
+    "version": "FIX.4.4"
+  },
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.4.2",
+      "version": "FIX.4.2"
+    },
+    "definedIn": "file:///workspace/user.toml",
+    "kind": "global",
+    "label": "same (global)",
+    "name": "same",
+    "source": "FIX.4.2",
+    "transport": {
+      "source": "FIX.4.2",
+      "version": "FIX.4.2"
+    },
+    "version": "FIX.4.2"
+  },
+  {
+    "application": {
+      "customVersion": null,
+      "extensionPack": null,
+      "source": "FIX.4.4",
+      "version": "FIX.4.4"
+    },
+    "definedIn": "client",
+    "kind": "global",
+    "label": "zulu (global)",
+    "name": "zulu",
+    "source": "FIX.4.4",
+    "transport": {
+      "source": "FIX.4.4",
+      "version": "FIX.4.4"
+    },
+    "version": "FIX.4.4"
+  }
+]

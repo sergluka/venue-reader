@@ -1,0 +1,28 @@
+---
+source: tests/symbol_stream.rs
+expression: marker
+---
+{
+  "kind": 15,
+  "name": "… 2 more messages",
+  "range": {
+    "end": {
+      "character": 0,
+      "line": 0
+    },
+    "start": {
+      "character": 0,
+      "line": 0
+    }
+  },
+  "selectionRange": {
+    "end": {
+      "character": 0,
+      "line": 0
+    },
+    "start": {
+      "character": 0,
+      "line": 0
+    }
+  }
+}

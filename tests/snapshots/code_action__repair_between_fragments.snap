@@ -1,0 +1,29 @@
+---
+source: tests/code_action.rs
+expression: "action[\"edit\"]"
+---
+{
+  "documentChanges": [
+    {
+      "edits": [
+        {
+          "newText": "5|35=0|10=163",
+          "range": {
+            "end": {
+              "character": 25,
+              "line": 1
+            },
+            "start": {
+              "character": 12,
+              "line": 1
+            }
+          }
+        }
+      ],
+      "textDocument": {
+        "uri": "file:///a.fix",
+        "version": 1
+      }
+    }
+  ]
+}

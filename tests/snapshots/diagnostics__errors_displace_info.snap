@@ -1,0 +1,83 @@
+---
+source: tests/diagnostics.rs
+expression: last
+---
+{
+  "diagnostics": [
+    {
+      "code": "bodyLength",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "BodyLength is 7, expected 139",
+      "range": {
+        "end": {
+          "character": 13,
+          "line": 2
+        },
+        "start": {
+          "character": 12,
+          "line": 2
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "checkSum",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "CheckSum is 001, expected 213",
+      "range": {
+        "end": {
+          "character": 159,
+          "line": 2
+        },
+        "start": {
+          "character": 156,
+          "line": 2
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "unknownMsgType",
+      "data": {
+        "rule": "unknownMsgType"
+      },
+      "message": "FIX.4.4 does not define MsgType(35) = U1",
+      "range": {
+        "end": {
+          "character": 20,
+          "line": 3
+        },
+        "start": {
+          "character": 18,
+          "line": 3
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "truncated",
+      "message": "6 more problems not shown",
+      "range": {
+        "end": {
+          "character": 0,
+          "line": 0
+        },
+        "start": {
+          "character": 0,
+          "line": 0
+        }
+      },
+      "severity": 3,
+      "source": "fix"
+    }
+  ],
+  "uri": "file:///a.fix",
+  "version": 1
+}

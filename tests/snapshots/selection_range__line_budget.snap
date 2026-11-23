@@ -1,0 +1,42 @@
+---
+source: tests/selection_range.rs
+expression: found
+---
+[
+  {
+    "range": {
+      "end": {
+        "character": 79,
+        "line": 0
+      },
+      "start": {
+        "character": 0,
+        "line": 0
+      }
+    }
+  },
+  {
+    "range": {
+      "end": {
+        "character": 79,
+        "line": 1
+      },
+      "start": {
+        "character": 0,
+        "line": 1
+      }
+    }
+  },
+  {
+    "range": {
+      "end": {
+        "character": 79,
+        "line": 2
+      },
+      "start": {
+        "character": 0,
+        "line": 2
+      }
+    }
+  }
+]

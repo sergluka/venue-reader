@@ -1,0 +1,5 @@
+---
+source: tests/code_action.rs
+expression: first
+---
+{"newText": "139", "range": {"end": {"character": 15, "line": 0}, "start": {"character": 14, "line": 0}}}

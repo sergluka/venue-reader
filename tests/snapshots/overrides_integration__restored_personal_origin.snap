@@ -1,0 +1,8 @@
+---
+source: tests/overrides_integration.rs
+expression: origin
+---
+{
+  "layer": "userFile",
+  "source": "file:///workspace/personal/venue-reader/config.toml"
+}

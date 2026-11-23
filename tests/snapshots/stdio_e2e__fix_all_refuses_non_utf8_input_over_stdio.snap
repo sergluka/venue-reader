@@ -1,0 +1,8 @@
+---
+source: tests/stdio_e2e.rs
+expression: error
+---
+{
+  "code": -32803,
+  "message": "Line 1: Cannot repair a non-UTF-8 line"
+}

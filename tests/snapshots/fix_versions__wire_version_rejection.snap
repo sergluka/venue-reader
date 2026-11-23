@@ -1,0 +1,63 @@
+---
+source: tests/fix_versions.rs
+expression: findings
+---
+[
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Unsupported BeginString(8) = FIX.5.0; no dictionary interpretation",
+    "range": {
+      "end": {
+        "character": 9,
+        "line": 0
+      },
+      "start": {
+        "character": 0,
+        "line": 0
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Unsupported BeginString(8) = FIX.5.0SP1; no dictionary interpretation",
+    "range": {
+      "end": {
+        "character": 12,
+        "line": 1
+      },
+      "start": {
+        "character": 0,
+        "line": 1
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  },
+  {
+    "code": "unknownVersion",
+    "data": {
+      "rule": "unknownVersion"
+    },
+    "message": "Unsupported BeginString(8) = FIX.5.0SP2; no dictionary interpretation",
+    "range": {
+      "end": {
+        "character": 12,
+        "line": 2
+      },
+      "start": {
+        "character": 0,
+        "line": 2
+      }
+    },
+    "severity": 2,
+    "source": "fix"
+  }
+]

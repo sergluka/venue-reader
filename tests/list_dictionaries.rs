@@ -5,17 +5,7 @@ mod harness;
 use harness::{file_uri, TestClient, Workspace, INVALID_PARAMS, REQUEST_FAILED};
 use serde_json::{json, Value};
 
-const BUNDLED: [&str; 9] = [
-    "FIX.4.0",
-    "FIX.4.1",
-    "FIX.4.2",
-    "FIX.4.3",
-    "FIX.4.4",
-    "FIX.5.0",
-    "FIX.5.0SP1",
-    "FIX.5.0SP2",
-    "FIXT.1.1",
-];
+const BUNDLED_COUNT: usize = 9;
 
 fn registration(name: &str, version: &str) -> Value {
     json!({"name":name,"transport":version,"application":version})
@@ -64,34 +54,8 @@ fn canonical_choices_round_trip_without_any_open_document() {
     client.initialize(&["utf-8"]);
     client.wait_base_ready();
     let choices = list(&mut client);
-    assert_eq!(choices.len(), BUNDLED.len());
-    for (entry, expected) in choices.iter().zip(BUNDLED) {
-        assert_eq!(entry["name"], expected);
-        assert_eq!(entry["label"], format!("{expected} (bundled)"));
-        assert_eq!(entry["kind"], "bundled");
-        assert!(entry["definedIn"].is_null());
-        assert_eq!(entry["version"], expected);
-        assert_eq!(entry["source"], expected);
-        let transport = if expected.starts_with("FIX.5.") {
-            "FIXT.1.1"
-        } else {
-            expected
-        };
-        assert_eq!(
-            entry["transport"],
-            json!({"version":transport,"source":transport})
-        );
-        if expected == "FIXT.1.1" {
-            assert!(entry["application"].is_null());
-        } else {
-            assert_eq!(
-                entry["application"],
-                json!({
-                    "version":expected,"source":expected,
-                    "extensionPack":null,"customVersion":null
-                })
-            );
-        }
+    insta::assert_json_snapshot!("bundled_dictionaries", choices);
+    for entry in &choices {
         assert_round_trip(&mut client, entry);
     }
     let omitted = client
@@ -129,32 +93,33 @@ fn global_sources_aliases_and_duplicate_winners_are_reported_accurately() {
     );
     client.wait_base_ready();
     let entries = list(&mut client);
-    assert_eq!(
-        global_names(&entries),
-        vec![unusual_name, "Alpha", "external", "same", "zulu"]
-    );
-    let canonical_source = external.canonicalize().unwrap();
-    for entry in entries.iter().filter(|entry| entry["kind"] == "global") {
-        let name = entry["name"].as_str().unwrap();
-        assert_eq!(entry["label"], format!("{name} (global)"));
-        if name == "same" {
-            assert_eq!(
-                entry["definedIn"],
-                file_uri(&user_file.canonicalize().unwrap())
-            );
-            assert_eq!(entry["version"], "FIX.4.2");
-            assert_eq!(entry["source"], "FIX.4.2");
-        } else {
-            assert_eq!(entry["definedIn"], "client");
-            assert_eq!(entry["version"], "FIX.4.4");
-        }
-        if name == "external" {
-            assert_eq!(entry["source"], json!(canonical_source));
-            assert_eq!(entry["transport"]["source"], json!(canonical_source));
-            assert_eq!(entry["application"]["source"], json!(canonical_source));
-        }
+    let mut globals: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry["kind"] == "global")
+        .cloned()
+        .collect();
+    for entry in &mut globals {
         assert_round_trip(&mut client, entry);
+        match entry["name"].as_str().unwrap() {
+            "same" => {
+                assert_eq!(
+                    entry["definedIn"],
+                    file_uri(&user_file.canonicalize().unwrap())
+                );
+                entry["definedIn"] = json!("file:///workspace/user.toml");
+            }
+            "external" => {
+                let canonical = json!(external.canonicalize().unwrap());
+                for pointer in ["/source", "/transport/source", "/application/source"] {
+                    let source = entry.pointer_mut(pointer).unwrap();
+                    assert_eq!(*source, canonical);
+                    *source = json!("<workspace>/synthetic.xml");
+                }
+            }
+            _ => {}
+        }
     }
+    insta::assert_json_snapshot!("global_dictionaries", globals);
     assert_eq!(list(&mut client), entries);
     client.shutdown();
 }
@@ -179,7 +144,8 @@ fn listing_excludes_rejected_and_path_gated_names_but_keeps_default_conflicts() 
     ]}));
     client.wait_base_ready();
     let entries = list(&mut client);
-    assert_eq!(global_names(&entries), vec!["conflict-a", "conflict-b"]);
+    let names = global_names(&entries);
+    insta::assert_json_snapshot!("conflicting_defaults", names);
     for entry in entries.iter().filter(|entry| entry["kind"] == "global") {
         assert_round_trip(&mut client, entry);
     }
@@ -257,7 +223,7 @@ fn argument_validation_precedes_initial_readiness_and_valid_commands_wait() {
         replies[1].response_result.as_ref().unwrap()["name"],
         "FIX.4.2"
     );
-    assert_eq!(list(&mut client).len(), BUNDLED.len());
+    assert_eq!(list(&mut client).len(), BUNDLED_COUNT);
     client.shutdown();
 }
 
@@ -282,7 +248,7 @@ fn a_rejected_configuration_refuses_discovery_until_a_valid_update() {
     // Receiving the queued pull proves the valid recovery batch committed.
     client.answer_base_pull();
     client.wait_base_ready();
-    assert_eq!(list(&mut client).len(), BUNDLED.len());
+    assert_eq!(list(&mut client).len(), BUNDLED_COUNT);
     client.shutdown();
 }
 
@@ -305,8 +271,7 @@ fn listing_does_not_reserve_removed_or_rebound_names() {
     );
     client.did_open("untitled:restored", "35=0|", 1);
     let old_entry = list(&mut client).pop().unwrap();
-    assert_eq!(old_entry["name"], "mutable");
-    assert_eq!(old_entry["version"], "FIX.4.2");
+    insta::assert_json_snapshot!("restored_dictionary", old_entry);
     client.notify(
         "workspace/didChangeConfiguration",
         json!({"settings":{"fix":{"dictionaries":[registration("mutable", "FIX.4.3")]}}}),

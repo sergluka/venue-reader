@@ -1,0 +1,66 @@
+---
+source: tests/decode.rs
+expression: answer
+---
+{
+  "results": [
+    {
+      "lines": [
+        {
+          "line": 4,
+          "text": "35(MsgType)=0(Heartbeat)"
+        }
+      ],
+      "rangeIndex": 0
+    },
+    {
+      "lines": [
+        {
+          "line": 1,
+          "text": ""
+        }
+      ],
+      "rangeIndex": 1
+    },
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": ""
+        }
+      ],
+      "rangeIndex": 2
+    },
+    {
+      "lines": [
+        {
+          "line": 3,
+          "text": ""
+        }
+      ],
+      "rangeIndex": 3
+    },
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": "35(MsgType)=0(Heartbeat)"
+        }
+      ],
+      "rangeIndex": 4
+    },
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": "35(MsgType)=0(Heartbeat)"
+        }
+      ],
+      "rangeIndex": 5
+    }
+  ],
+  "textDocument": {
+    "uri": "file:///decode.fix",
+    "version": 1
+  }
+}

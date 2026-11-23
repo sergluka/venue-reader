@@ -1,0 +1,20 @@
+---
+source: tests/hover.rs
+expression: "at(&mut client, LINE.find(tag).unwrap() as u32)"
+---
+{
+  "contents": {
+    "kind": "markdown",
+    "value": "**MsgType** (35) — String\n\nDefines message type ALWAYS THIRD FIELD IN MESSAGE. (Always unencrypted)\n\n*Introduced in FIX.2.7*\n\n---\n\nValue: `D` — **NewOrderSingle**\n\n*Introduced in FIX.2.7*\n\nThe NewOrderSingle(35=D) message type is used by the order submitter wishing to electronically place orders for execution with their counterparty. The message supports a variety of security types.\n\n*Category: SingleGeneralOrderHandling*\n\n---\n\n[FIX Reference: onixs.biz](https://www.onixs.biz/fix-dictionary/fixt1.1/tagNum_35.html)"
+  },
+  "range": {
+    "end": {
+      "character": 15,
+      "line": 0
+    },
+    "start": {
+      "character": 11,
+      "line": 0
+    }
+  }
+}

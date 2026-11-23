@@ -1,0 +1,67 @@
+---
+source: tests/diagnostics.rs
+expression: published
+---
+{
+  "diagnostics": [
+    {
+      "code": "bodyLength",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing BodyLength (tag 9)",
+      "range": {
+        "end": {
+          "character": 9,
+          "line": 0
+        },
+        "start": {
+          "character": 0,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "checkSum",
+      "data": {
+        "rule": "integrity"
+      },
+      "message": "Missing CheckSum (tag 10)",
+      "range": {
+        "end": {
+          "character": 15,
+          "line": 0
+        },
+        "start": {
+          "character": 10,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    },
+    {
+      "code": "unknownMsgType",
+      "data": {
+        "rule": "unknownMsgType"
+      },
+      "message": "\"desk\" does not define MsgType(35) = U1",
+      "range": {
+        "end": {
+          "character": 15,
+          "line": 0
+        },
+        "start": {
+          "character": 13,
+          "line": 0
+        }
+      },
+      "severity": 1,
+      "source": "fix"
+    }
+  ],
+  "uri": "file:///a.fix",
+  "version": 1
+}

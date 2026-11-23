@@ -7,9 +7,7 @@ use serde_json::{json, Value};
 fn initialize_negotiates_utf8_when_offered() {
     let mut client = TestClient::start();
     let res = client.initialize(&["utf-8", "utf-16"]);
-    assert_eq!(res["capabilities"]["positionEncoding"], "utf-8");
-    assert_eq!(res["capabilities"]["hoverProvider"], true);
-    assert_eq!(res["capabilities"]["textDocumentSync"], 2);
+    insta::assert_json_snapshot!(res["capabilities"]);
     assert_eq!(res["serverInfo"]["name"], "venue-reader");
     client.shutdown();
 }

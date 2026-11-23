@@ -1,0 +1,72 @@
+---
+source: tests/document_symbol.rs
+expression: hierarchy(outline(&mut client))
+---
+[
+  {
+    "children": [
+      {
+        "kind": 8,
+        "name": "BeginString (8) = FIXT.1.1"
+      },
+      {
+        "kind": 8,
+        "name": "MsgType (35) = D (NewOrderSingle)"
+      },
+      {
+        "kind": 8,
+        "name": "ApplVerID (1128) = 9 (FIX50SP2)"
+      },
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "kind": 8,
+                "name": "PartyID (448) = P"
+              },
+              {
+                "kind": 8,
+                "name": "PartyIDSource (447) = D (Proprietary)"
+              },
+              {
+                "kind": 8,
+                "name": "PartyRole (452) = 1 (ExecutingFirm)"
+              },
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "kind": 8,
+                        "name": "PartySubID (523) = S"
+                      },
+                      {
+                        "kind": 8,
+                        "name": "PartySubIDType (803) = 1 (Firm)"
+                      }
+                    ],
+                    "kind": 23,
+                    "name": "[1]"
+                  }
+                ],
+                "kind": 18,
+                "name": "NoPartySubIDs (802) = 1"
+              }
+            ],
+            "kind": 23,
+            "name": "[1]"
+          }
+        ],
+        "kind": 18,
+        "name": "NoPartyIDs (453) = 1"
+      },
+      {
+        "kind": 8,
+        "name": "Side (54) = 1 (Buy)"
+      }
+    ],
+    "kind": 19,
+    "name": "# → NewOrderSingle (D)"
+  }
+]

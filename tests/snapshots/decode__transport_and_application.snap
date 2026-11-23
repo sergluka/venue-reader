@@ -1,0 +1,21 @@
+---
+source: tests/decode.rs
+expression: answer
+---
+{
+  "results": [
+    {
+      "lines": [
+        {
+          "line": 0,
+          "text": "8(BeginString)=FIXT.1.1|35(MsgType)=D(NewOrderSingle)|1128(ApplVerID)=7(FIX50)|54(Side)=1(Buy)"
+        }
+      ],
+      "rangeIndex": 0
+    }
+  ],
+  "textDocument": {
+    "uri": "file:///decode.fix",
+    "version": 1
+  }
+}

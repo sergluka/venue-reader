@@ -208,33 +208,12 @@ fn empty_and_disabled_documents_finish_without_symbols() {
 fn budget_markers_have_exact_text_anchor_and_shared_item_accounting() {
     let two = "8=FIX.4.4|35=0|\n8=FIX.4.4|35=0|";
     for streaming in [false, true] {
-        for (cap, depth, text, expected_items, marker_name, anchor) in [
-            (
-                1,
-                "full",
-                "8=FIX.4.4|35=0|",
-                1,
-                "… 1 more messages; some fields/groups omitted",
-                0,
-            ),
-            (
-                2,
-                "full",
-                two,
-                2,
-                "… 1 more messages; some fields/groups omitted",
-                0,
-            ),
-            (
-                4,
-                "full",
-                two,
-                4,
-                "… 1 more messages; some fields/groups omitted",
-                1,
-            ),
-            (5, "full", two, 5, "… Some fields/groups omitted", 1),
-            (1, "messages", two, 1, "… 2 more messages", 0),
+        for (cap, depth, text, expected_items) in [
+            (1, "full", "8=FIX.4.4|35=0|", 1),
+            (2, "full", two, 2),
+            (4, "full", two, 4),
+            (5, "full", two, 5),
+            (1, "messages", two, 1),
         ] {
             let mut client = client(
                 json!({"documentSymbol": {"depth": depth}, "limits": {"documentSymbolItems": cap}}),
@@ -244,13 +223,8 @@ fn budget_markers_have_exact_text_anchor_and_shared_item_accounting() {
             assert_eq!(count(&found), expected_items, "{found:?}");
             assert!(count(&found) <= cap);
             let marker = found.last().expect("marker");
-            assert_eq!(marker["name"], marker_name);
-            assert_eq!(marker["kind"], 15);
-            assert_eq!(
-                marker["range"],
-                json!({"start": {"line": anchor, "character": 0}, "end": {"line": anchor, "character": 0}})
-            );
             assert_eq!(marker["selectionRange"], marker["range"]);
+            insta::assert_compact_json_snapshot!(format!("{depth}_budget_{cap}_marker"), marker);
             assert!(client.drain_notifications(Duration::ZERO).iter().all(
                 |(method, params)| method != "window/logMessage"
                     || !params["message"]

@@ -1,0 +1,15 @@
+---
+source: tests/overrides_integration.rs
+expression: warnings
+---
+[
+  {
+    "key": "dictionaries",
+    "message": "allowDictionaryPath is false; project dictionaries ignored: blocked-venue (does-not-exist.xml)",
+    "severity": "warning",
+    "source": {
+      "layer": "project",
+      "source": "file:///workspace/.venue-reader.toml"
+    }
+  }
+]

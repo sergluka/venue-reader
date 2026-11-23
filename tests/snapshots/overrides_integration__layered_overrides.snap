@@ -1,0 +1,179 @@
+---
+source: tests/overrides_integration.rs
+expression: first_report
+---
+{
+  "dictionaries": [],
+  "effective": {
+    "allowDictionaryPath": false,
+    "defaultApplVerID": null,
+    "diagnostics.enabled": false,
+    "diagnostics.rules": {},
+    "dictionaries": [],
+    "dictionary": null,
+    "documentLink.url": "https://www.onixs.biz/fix-dictionary/{version}/tagNum_{tag}.html",
+    "documentSymbol.depth": "full",
+    "documentSymbol.enabled": true,
+    "documentSymbol.template": "#{34} {49}→{56} {35.valueName} ({35})",
+    "hover.enabled": true,
+    "inlayHints.enumValues.enabled": true,
+    "inlayHints.enumValues.format": "({})",
+    "inlayHints.groupPaths.enabled": true,
+    "inlayHints.tagNames.enabled": false,
+    "inlayHints.tagNames.format": "({})",
+    "limits.cachedLines": 4000,
+    "limits.codeLensLines": 20000,
+    "limits.decodeResultBytes": 8388608,
+    "limits.diagnosticsPerDocument": 10000,
+    "limits.dictionaryBytes": 16777216,
+    "limits.documentSymbolItems": 50000,
+    "limits.rangeLines": 2000,
+    "limits.semanticTokensFullLines": 2000,
+    "messageSummary.channels.codeLens": true,
+    "messageSummary.channels.inlayHints": false,
+    "messageSummary.details": true,
+    "messageSummary.enabled": true,
+    "messageSummary.semanticTokens": false,
+    "messageSummary.template": "{52?:???}: {34?:???}: {sender?:???}=>{target?:???} | {msgName?:???}{43=Y? [POSS DUP]}",
+    "overrides.modeline": true,
+    "overrides.projectConfig": true,
+    "semanticTokens.enabled": true
+  },
+  "sources": {
+    "allowDictionaryPath": {
+      "layer": "default",
+      "source": "default"
+    },
+    "defaultApplVerID": {
+      "layer": "default",
+      "source": "default"
+    },
+    "diagnostics.enabled": {
+      "layer": "userFile",
+      "source": "file:///workspace/personal/venue-reader/config.toml"
+    },
+    "dictionary": {
+      "layer": "default",
+      "source": "default"
+    },
+    "documentLink.url": {
+      "layer": "default",
+      "source": "default"
+    },
+    "documentSymbol.depth": {
+      "layer": "default",
+      "source": "default"
+    },
+    "documentSymbol.enabled": {
+      "layer": "default",
+      "source": "default"
+    },
+    "documentSymbol.template": {
+      "layer": "default",
+      "source": "default"
+    },
+    "hover.enabled": {
+      "layer": "modeline",
+      "range": {
+        "end": {
+          "character": 25,
+          "line": 0
+        },
+        "start": {
+          "character": 7,
+          "line": 0
+        }
+      },
+      "source": "file:///workspace/logs/one.fix"
+    },
+    "inlayHints.enumValues.enabled": {
+      "layer": "project",
+      "source": "file:///workspace/.venue-reader.toml"
+    },
+    "inlayHints.enumValues.format": {
+      "layer": "default",
+      "source": "default"
+    },
+    "inlayHints.groupPaths.enabled": {
+      "layer": "default",
+      "source": "default"
+    },
+    "inlayHints.tagNames.enabled": {
+      "layer": "project",
+      "source": "file:///workspace/logs/.venue-reader.toml"
+    },
+    "inlayHints.tagNames.format": {
+      "layer": "default",
+      "source": "default"
+    },
+    "limits.cachedLines": {
+      "layer": "default",
+      "source": "default"
+    },
+    "limits.codeLensLines": {
+      "layer": "default",
+      "source": "default"
+    },
+    "limits.decodeResultBytes": {
+      "layer": "default",
+      "source": "default"
+    },
+    "limits.diagnosticsPerDocument": {
+      "layer": "default",
+      "source": "default"
+    },
+    "limits.dictionaryBytes": {
+      "layer": "default",
+      "source": "default"
+    },
+    "limits.documentSymbolItems": {
+      "layer": "default",
+      "source": "default"
+    },
+    "limits.rangeLines": {
+      "layer": "default",
+      "source": "default"
+    },
+    "limits.semanticTokensFullLines": {
+      "layer": "default",
+      "source": "default"
+    },
+    "messageSummary.channels.codeLens": {
+      "layer": "default",
+      "source": "default"
+    },
+    "messageSummary.channels.inlayHints": {
+      "layer": "default",
+      "source": "default"
+    },
+    "messageSummary.details": {
+      "layer": "default",
+      "source": "default"
+    },
+    "messageSummary.enabled": {
+      "layer": "default",
+      "source": "default"
+    },
+    "messageSummary.semanticTokens": {
+      "layer": "default",
+      "source": "default"
+    },
+    "messageSummary.template": {
+      "layer": "default",
+      "source": "default"
+    },
+    "overrides.modeline": {
+      "layer": "default",
+      "source": "default"
+    },
+    "overrides.projectConfig": {
+      "layer": "default",
+      "source": "default"
+    },
+    "semanticTokens.enabled": {
+      "layer": "default",
+      "source": "default"
+    }
+  },
+  "warnings": []
+}

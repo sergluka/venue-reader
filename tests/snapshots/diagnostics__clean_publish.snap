@@ -1,0 +1,9 @@
+---
+source: tests/diagnostics.rs
+expression: first
+---
+{
+  "diagnostics": [],
+  "uri": "file:///a.fix",
+  "version": 1
+}

@@ -1,0 +1,19 @@
+---
+source: tests/fix_versions.rs
+expression: "select(&mut client, \"FIX.5.0SP2\")"
+---
+{
+  "application": {
+    "customVersion": null,
+    "extensionPack": null,
+    "source": "FIX.5.0SP2",
+    "version": "FIX.5.0SP2"
+  },
+  "name": "FIX.5.0SP2",
+  "source": "FIX.5.0SP2",
+  "transport": {
+    "source": "FIXT.1.1",
+    "version": "FIXT.1.1"
+  },
+  "version": "FIX.5.0SP2"
+}

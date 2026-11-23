@@ -32,52 +32,29 @@ fn outline(client: &mut TestClient) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// The tree as one readable block, so a change of shape fails as a shape.
-fn shape(nodes: &[Value]) -> String {
-    fn walk(nodes: &[Value], depth: usize, out: &mut Vec<String>) {
-        for node in nodes {
-            out.push(format!(
-                "{}{} [{}]",
-                "  ".repeat(depth),
-                node["name"].as_str().expect("a name"),
-                node["kind"],
-            ));
-            walk(
-                node["children"].as_array().unwrap_or(&Vec::new()),
-                depth + 1,
-                out,
-            );
+/// Ranges are covered independently; these cases specify the named symbol hierarchy.
+fn hierarchy(mut nodes: Vec<Value>) -> Vec<Value> {
+    fn omit_ranges(node: &mut Value) {
+        let symbol = node.as_object_mut().expect("a symbol");
+        symbol.remove("range");
+        symbol.remove("selectionRange");
+        if let Some(children) = symbol.get_mut("children") {
+            for child in children.as_array_mut().expect("children") {
+                omit_ranges(child);
+            }
         }
     }
-    let mut out = Vec::new();
-    walk(nodes, 0, &mut out);
-    out.join("\n")
+
+    for node in &mut nodes {
+        omit_ranges(node);
+    }
+    nodes
 }
 
 #[test]
 fn a_client_that_takes_nesting_gets_the_tree() {
     let mut client = open_with(nesting_client(), PARTIES);
-    assert_eq!(
-        shape(&outline(&mut client)),
-        "\
-# → NewOrderSingle (D) [19]
-  BeginString (8) = FIX.4.4 [8]
-  MsgType (35) = D (NewOrderSingle) [8]
-  NoPartyIDs (453) = 2 [18]
-    [1] [23]
-      PartyID (448) = A [8]
-      PartyIDSource (447) = D (Proprietary) [8]
-      PartyRole (452) = 1 (ExecutingFirm) [8]
-      NoPartySubIDs (802) = 1 [18]
-        [1] [23]
-          PartySubID (523) = S1 [8]
-          PartySubIDType (803) = 1 (Firm) [8]
-    [2] [23]
-      PartyID (448) = B [8]
-      PartyIDSource (447) = D (Proprietary) [8]
-      PartyRole (452) = 2 (BrokerOfCredit) [8]
-  Side (54) = 1 (Buy) [8]"
-    );
+    insta::assert_compact_json_snapshot!("nested_parties", hierarchy(outline(&mut client)));
     client.shutdown();
 }
 
@@ -95,13 +72,7 @@ fn a_client_that_lists_no_kinds_gets_the_legacy_ones() {
         }),
         PARTIES,
     );
-    let shape = shape(&outline(&mut client));
-    assert!(shape.starts_with("# → NewOrderSingle (D) [5]"), "{shape}");
-    assert!(shape.contains("    [1] [18]"), "an entry as Array: {shape}");
-    assert!(
-        !shape.contains("[19]") && !shape.contains("[23]"),
-        "{shape}"
-    );
+    insta::assert_compact_json_snapshot!("legacy_party_kinds", hierarchy(outline(&mut client)));
     client.shutdown();
 }
 
@@ -122,14 +93,10 @@ fn a_client_without_nesting_is_offered_no_provider() {
     let said = client.drain_notifications(std::time::Duration::from_millis(50));
     let logged = said
         .iter()
-        .filter(|(method, _)| method == "window/logMessage")
-        .find_map(|(_, params)| params["message"].as_str())
+        .find(|(method, _)| method == "window/logMessage")
+        .map(|(_, params)| params)
         .expect("the limitation is named");
-    assert!(
-        logged.contains("hierarchicalDocumentSymbolSupport"),
-        "{logged}"
-    );
-    assert!(logged.contains("no document-symbol provider"), "{logged}");
+    insta::assert_compact_json_snapshot!("nesting_warning", logged);
     client.shutdown();
 }
 
@@ -138,9 +105,9 @@ fn a_client_without_nesting_is_offered_no_provider() {
 fn a_client_that_takes_nesting_is_offered_the_provider() {
     let mut client = TestClient::start();
     let result = client.initialize_caps(nesting_client());
-    assert_eq!(
-        result["capabilities"]["documentSymbolProvider"]["workDoneProgress"],
-        true
+    insta::assert_compact_json_snapshot!(
+        "provider",
+        result["capabilities"]["documentSymbolProvider"]
     );
     client.shutdown();
 }
@@ -158,12 +125,7 @@ fn past_the_budget_the_answer_says_what_it_left_out() {
     client.did_open(URI, &[heartbeat; 3].join("\n"), 1);
 
     let found = outline(&mut client);
-    assert_eq!(found.len(), 2, "one message and the marker: {found:?}");
-    assert_eq!(found[1]["name"], "… 2 more messages");
-    assert_eq!(
-        found[1]["range"]["start"]["line"], 1,
-        "anchored on the first message it stands for"
-    );
+    insta::assert_compact_json_snapshot!("truncated_outline", found);
 
     let said = client.drain_notifications(std::time::Duration::from_millis(50));
     assert!(
@@ -335,22 +297,9 @@ fn a_header_group_nests_in_the_outline() {
         ),
     ] {
         let mut client = open_with(nesting_client(), line);
-        assert_eq!(
-            shape(&outline(&mut client)),
-            format!(
-                "\
-# → Heartbeat (0) [19]
-  BeginString (8) = {begin} [8]
-  MsgType (35) = 0 (Heartbeat) [8]
-  NoHops (627) = 2 [18]
-    [1] [23]
-      HopCompID (628) = A [8]
-      HopRefID (630) = 1 [8]
-    [2] [23]
-      HopCompID (628) = B [8]
-      HopRefID (630) = 2 [8]
-  TestReqID (112) = T [8]"
-            )
+        insta::assert_compact_json_snapshot!(
+            format!("header_group_{begin}"),
+            hierarchy(outline(&mut client))
         );
         client.shutdown();
     }
@@ -360,17 +309,6 @@ fn a_header_group_nests_in_the_outline() {
 fn fixt_outline_names_groups_and_values_from_their_own_sources() {
     const LINE: &str = "8=FIXT.1.1|35=D|1128=9|453=1|448=P|447=D|452=1|802=1|523=S|803=1|54=1|";
     let mut client = open_with(nesting_client(), LINE);
-    let tree = shape(&outline(&mut client));
-    for expected in [
-        "NewOrderSingle (D)",
-        "BeginString (8) = FIXT.1.1",
-        "MsgType (35) = D (NewOrderSingle)",
-        "NoPartyIDs (453) = 1",
-        "NoPartySubIDs (802) = 1",
-        "PartySubIDType (803) = 1 (Firm)",
-        "Side (54) = 1 (Buy)",
-    ] {
-        assert!(tree.contains(expected), "{tree}");
-    }
+    insta::assert_compact_json_snapshot!("fixt_order", hierarchy(outline(&mut client)));
     client.shutdown();
 }

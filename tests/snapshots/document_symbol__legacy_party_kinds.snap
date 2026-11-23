@@ -1,0 +1,86 @@
+---
+source: tests/document_symbol.rs
+expression: hierarchy(outline(&mut client))
+---
+[
+  {
+    "children": [
+      {
+        "kind": 8,
+        "name": "BeginString (8) = FIX.4.4"
+      },
+      {
+        "kind": 8,
+        "name": "MsgType (35) = D (NewOrderSingle)"
+      },
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "kind": 8,
+                "name": "PartyID (448) = A"
+              },
+              {
+                "kind": 8,
+                "name": "PartyIDSource (447) = D (Proprietary)"
+              },
+              {
+                "kind": 8,
+                "name": "PartyRole (452) = 1 (ExecutingFirm)"
+              },
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "kind": 8,
+                        "name": "PartySubID (523) = S1"
+                      },
+                      {
+                        "kind": 8,
+                        "name": "PartySubIDType (803) = 1 (Firm)"
+                      }
+                    ],
+                    "kind": 18,
+                    "name": "[1]"
+                  }
+                ],
+                "kind": 18,
+                "name": "NoPartySubIDs (802) = 1"
+              }
+            ],
+            "kind": 18,
+            "name": "[1]"
+          },
+          {
+            "children": [
+              {
+                "kind": 8,
+                "name": "PartyID (448) = B"
+              },
+              {
+                "kind": 8,
+                "name": "PartyIDSource (447) = D (Proprietary)"
+              },
+              {
+                "kind": 8,
+                "name": "PartyRole (452) = 2 (BrokerOfCredit)"
+              }
+            ],
+            "kind": 18,
+            "name": "[2]"
+          }
+        ],
+        "kind": 18,
+        "name": "NoPartyIDs (453) = 2"
+      },
+      {
+        "kind": 8,
+        "name": "Side (54) = 1 (Buy)"
+      }
+    ],
+    "kind": 5,
+    "name": "# → NewOrderSingle (D)"
+  }
+]

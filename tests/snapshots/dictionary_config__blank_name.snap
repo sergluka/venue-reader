@@ -1,0 +1,10 @@
+---
+source: tests/dictionary_config.rs
+expression: shown
+---
+[
+  {
+    "message": "configuration rejected; keeping committed state: dictionaries: name must not be blank",
+    "type": 1
+  }
+]
