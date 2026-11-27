@@ -244,6 +244,8 @@ pub(super) struct ClientSupport {
     pub refreshes_inlay_hints: bool,
     pub refreshes_code_lens: bool,
     pub refreshes_semantic_tokens: bool,
+    /// The server advertised only range highlighting to this client.
+    pub range_only_tokens: bool,
     /// Whether overlapping semantic tokens can be rendered.
     pub overlaps_tokens: bool,
     pub summary_tokens: bool,
@@ -266,6 +268,7 @@ impl Default for ClientSupport {
             refreshes_inlay_hints: false,
             refreshes_code_lens: false,
             refreshes_semantic_tokens: false,
+            range_only_tokens: false,
             overlaps_tokens: false,
             summary_tokens: false,
             takes_actions: false,
@@ -726,18 +729,21 @@ pub(super) fn origin_range(
     line: Option<&crate::document::Line>,
     encoding: PositionEncoding,
 ) -> lsp_types::Range {
+    let wire_max = i32::MAX as u32;
+    let row = u32::try_from(origin.line).unwrap_or(wire_max).min(wire_max);
     let column = |byte: usize| {
         line.map_or(0, |line| {
             crate::document::byte_to_position(
                 line,
-                crate::codec::ByteOffset::new(byte as u32),
+                crate::codec::ByteOffset::new(u32::try_from(byte).unwrap_or(u32::MAX)),
                 encoding,
-            ) - crate::document::Column::new(0)
+            )
+            .wire_value()
         })
     };
     lsp_types::Range::new(
-        lsp_types::Position::new(origin.line as u32, column(origin.start)),
-        lsp_types::Position::new(origin.line as u32, column(origin.end)),
+        lsp_types::Position::new(row, column(origin.start)),
+        lsp_types::Position::new(row, column(origin.end)),
     )
 }
 

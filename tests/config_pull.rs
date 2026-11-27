@@ -369,3 +369,106 @@ fn invalid_modeline_application_default_warns_and_keeps_global_decoding() {
     assert_application_hover(&mut client, &document, &message, 1, Some("5.0.SP2"));
     client.shutdown();
 }
+
+#[test]
+fn invalid_global_limits_preserve_the_client_layer_and_reject_a_bad_user_file() {
+    let workspace = Workspace::new("line-limit-settings");
+    let user_file = workspace.write("personal/config.toml", "");
+    let document = workspace.uri("test.fix");
+    let mut client = TestClient::start_with_user_file(Some(user_file.clone()));
+    workspace.initialize(&mut client, json!({}));
+    client.did_open(&document, "8=FIX.4.4|35=0|", 1);
+    for (key, default) in [
+        ("lineBytes", 52_428_800),
+        ("fieldsPerLine", 1_000_000),
+        ("semanticTokensBytes", 65_536),
+    ] {
+        let path = format!("limits.{key}");
+        for invalid in [json!(-1), json!(1.5), json!(u64::from(u32::MAX) + 1)] {
+            std::fs::write(&user_file, format!("{path} = 0\n")).unwrap();
+            client.notify(
+                "workspace/didChangeConfiguration",
+                json!({"settings":{"fix":{}}}),
+            );
+            let report = client.wait_effective(&document, &path, json!(0));
+            assert_eq!(report["sources"][&path]["layer"], "userFile");
+
+            std::fs::write(&user_file, format!("{path} = {invalid}\n")).unwrap();
+            client.notify(
+                "workspace/didChangeConfiguration",
+                json!({"settings":{"fix":{}}}),
+            );
+            let report = client.wait_effective(&document, &path, json!(default));
+            assert_eq!(report["sources"][&path]["layer"], "default");
+            assert!(report["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning["source"]["layer"] == "userFile"
+                    && warning["message"].as_str().unwrap().contains(&path)));
+
+            client.notify(
+                "workspace/didChangeConfiguration",
+                json!({"settings":{"fix":{"limits":{key:u32::MAX}}}}),
+            );
+            client.wait_effective(&document, &path, json!(u32::MAX));
+            client.notify(
+                "workspace/didChangeConfiguration",
+                json!({"settings":{"fix":{"limits":{key:invalid}}}}),
+            );
+            let rejection = client.wait_for_log("configuration rejected");
+            assert!(rejection["message"].as_str().unwrap().contains(&path));
+            let report = client.describe(&document).unwrap();
+            assert_eq!(report["effective"][&path], u32::MAX);
+            assert_eq!(report["sources"][&path]["layer"], "client");
+        }
+    }
+    client.shutdown();
+}
+
+#[test]
+fn changing_either_line_limit_updates_cached_hover_and_whole_document_lists() {
+    let workspace = Workspace::new("line-analysis-settings");
+    let document = workspace.uri("limits.fix");
+    let message = "8=FIX.4.4|35=D|54=1|";
+    let mut client = workspace.client(json!({}));
+    client.did_open(&document, message, 1);
+    for (key, exact, other, default) in [
+        (
+            "lineBytes",
+            message.len(),
+            "limits.fieldsPerLine",
+            1_000_000,
+        ),
+        ("fieldsPerLine", 3, "limits.lineBytes", 52_428_800),
+    ] {
+        for (limit, admitted) in [(exact, true), (exact - 1, false), (exact, true)] {
+            client.notify(
+                "workspace/didChangeConfiguration",
+                json!({"settings":{"fix":{
+                    "limits":{key:limit},
+                    "messageSummary":{"template":"message","channels":{"codeLens":true}},
+                    "documentSymbol":{"depth":"messages"}
+                }}}),
+            );
+            let report = client.wait_effective(&document, &format!("limits.{key}"), json!(limit));
+            assert_eq!(report["effective"][other], default);
+            for method in ["textDocument/codeLens", "textDocument/documentSymbol"] {
+                let result = client
+                    .request(method, json!({"textDocument":{"uri":document}}))
+                    .unwrap();
+                assert_eq!(
+                    result.as_array().unwrap().len(),
+                    usize::from(admitted),
+                    "{method}: {key}={limit}"
+                );
+            }
+            assert_eq!(
+                client.hover(&document, 0, 15).unwrap().is_object(),
+                admitted,
+                "{key}={limit}"
+            );
+        }
+    }
+    client.shutdown();
+}

@@ -18,12 +18,17 @@ pub struct Integrity {
     pub body_length_field: Option<u32>,
     pub check_sum_field: Option<u32>,
     /// What BodyLength should be.
-    pub body_length: u32,
+    pub body_length: u64,
     /// What CheckSum should be; render as `{:03}`.
     pub check_sum: u8,
 }
 
-const SEPARATOR_BYTES: u32 = 1;
+const SEPARATOR_BYTES: u64 = 1;
+
+fn wire_length(field: &Field) -> u64 {
+    let span = field.span();
+    u64::from(span.end - span.start) + SEPARATOR_BYTES
+}
 
 pub(crate) fn compute(bytes: &[u8], fields: &[Field]) -> Integrity {
     let at = |tag: u32| fields.iter().position(|field| field.tag == tag);
@@ -36,17 +41,18 @@ pub(crate) fn compute(bytes: &[u8], fields: &[Field]) -> Integrity {
         .map_or(0, |index| index + 1);
     let body_end = check_sum_field.unwrap_or(fields.len());
 
-    let mut body_length = 0u32;
-    for field in fields.iter().take(body_end).skip(body_first) {
-        let span = field.span();
-        body_length += span.end - span.start + SEPARATOR_BYTES;
-    }
+    let body_length: u64 = fields
+        .iter()
+        .take(body_end)
+        .skip(body_first)
+        .map(wire_length)
+        .sum();
 
     let body_text = body_length.to_string();
     // With BodyLength(9) absent the checksum still has to account for the `9=<len>|`
     // that a repaired line would carry.
     let synthetic_9 = if body_length_field.is_none() {
-        sum_bytes(b"9=") + sum_bytes(body_text.as_bytes()) + SEPARATOR_BYTES as u64
+        sum_bytes(b"9=") + sum_bytes(body_text.as_bytes()) + SEPARATOR_BYTES
     } else {
         0
     };
@@ -64,7 +70,7 @@ pub(crate) fn compute(bytes: &[u8], fields: &[Field]) -> Integrity {
             let span = field.span();
             sum += sum_bytes(&bytes[span.start.index()..span.end.index()]);
         }
-        sum += SEPARATOR_BYTES as u64;
+        sum += SEPARATOR_BYTES;
     }
     if body_first >= body_end {
         sum += synthetic_9;
@@ -106,6 +112,19 @@ mod tests {
     const BAD_BOTH: &str = "8=FIX.4.4|9=7|35=D|34=2|49=CLIENT1|56=BROKER1|\
 52=20251026-09:00:02.000|11=ORDER123|21=1|55=BTCUSD|54=1|38=10|40=2|44=65000|59=0|\
 60=20251026-09:00:02.000|10=001|";
+
+    #[test]
+    fn a_missing_final_separator_can_take_the_computed_length_past_u32() {
+        use crate::codec::{byte, FieldSpan};
+        let field = Field::new(&FieldSpan {
+            tag: 1,
+            tag_start: byte(0),
+            tag_end: byte(1),
+            value_start: byte(2),
+            value_end: byte(u32::MAX),
+        });
+        assert_eq!(wire_length(&field), u64::from(u32::MAX) + 1);
+    }
 
     #[test]
     fn a_valid_message_agrees_with_its_own_fields() {

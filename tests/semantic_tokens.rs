@@ -120,6 +120,93 @@ fn a_viewport_is_measured_from_the_top_of_the_document() {
     client.shutdown();
 }
 
+fn absolute_tokens(data: &Value) -> Vec<[u64; 5]> {
+    let mut line = 0;
+    let mut start = 0;
+    integers(data)
+        .as_chunks::<5>()
+        .0
+        .iter()
+        .map(|token| {
+            line += token[0];
+            start = if token[0] == 0 {
+                start + token[1]
+            } else {
+                token[1]
+            };
+            [line, start, token[2], token[3], token[4]]
+        })
+        .collect()
+}
+
+#[test]
+fn column_ranges_return_exactly_the_intersecting_full_tokens() {
+    let message = "🚀 > 8=FIX.4.4|35=D|453=1|448=甲🎵|447=D|452=1|802=1|523=S|803=1|54=1";
+    let text = format!("# привет\n{message}\n# end");
+    for encoding in ["utf-8", "utf-16"] {
+        let column = |needle: &str| {
+            let prefix = &message[..message.find(needle).unwrap()];
+            (if encoding == "utf-8" {
+                prefix.len()
+            } else {
+                prefix.encode_utf16().count()
+            }) as u64
+        };
+        for overlays in [false, true] {
+            let open_client = |shape| {
+                let mut client = TestClient::start();
+                let mut capabilities = caps(shape);
+                capabilities["general"]["positionEncodings"] = json!([encoding]);
+                capabilities["textDocument"]["semanticTokens"]["overlappingTokenSupport"] =
+                    json!(overlays);
+                client.initialize_caps(capabilities);
+                client.did_open(URI, &text, 1);
+                client
+            };
+            let mut whole = open_client("full");
+            let params = json!({ "textDocument": { "uri": URI } });
+            let full = absolute_tokens(
+                &whole
+                    .request("textDocument/semanticTokens/full", params)
+                    .unwrap()["data"],
+            );
+            whole.shutdown();
+            let mut client = open_client("range");
+            let separator = column("|803");
+            for (from, to) in [
+                ((0, 1), (1, 1)),
+                ((1, 0), (1, column("8="))),
+                ((1, column("甲")), (1, column("|447"))),
+                ((1, column("🎵") + 1), (1, column("🎵") + 2)),
+                ((1, column("523=S") + 1), (1, column("523=S") + 2)),
+                ((1, separator), (1, separator + 1)),
+                ((1, separator), (1, separator)),
+                ((1, column("54=1") + 2), (2, 0)),
+                ((1, column("54=1")), (2, 2)),
+                ((0, 0), (3, 0)),
+            ] {
+                let expected: Vec<_> = full
+                    .iter()
+                    .copied()
+                    .filter(|&[line, start, length, _, _]| {
+                        from < to && (line, start) < to && (line, start + length) > from
+                    })
+                    .collect();
+                let response = client.request("textDocument/semanticTokens/range", json!({
+                    "textDocument": { "uri": URI },
+                    "range": {"start":{"line":from.0, "character":from.1}, "end":{"line":to.0, "character":to.1}}
+                })).unwrap();
+                assert_eq!(
+                    absolute_tokens(&response["data"]),
+                    expected,
+                    "{encoding}, overlays={overlays}, {from:?}..{to:?}"
+                );
+            }
+            client.shutdown();
+        }
+    }
+}
+
 /// The whole point, end to end: apply what the server sent to what it sent
 /// before, and hold what asking again would have given.
 #[test]
@@ -366,4 +453,262 @@ fn fixt_group_counts_and_transport_fields_keep_their_scope_modifiers() {
             "{tag}: {tokens:?}"
         );
     }
+}
+
+#[test]
+fn joined_oversized_lines_drop_tokens_and_splitting_restores_the_exact_delta() {
+    let mut client = TestClient::start();
+    client.initialize_with(json!({
+        "capabilities":caps("full"),
+        "initializationOptions":{"fix":{"limits":{"lineBytes":HEARTBEAT.len()}}}
+    }));
+    client.did_open(URI, &[HEARTBEAT; 4].join("\n"), 1);
+    let full = client
+        .request(
+            "textDocument/semanticTokens/full",
+            json!({"textDocument":{"uri":URI}}),
+        )
+        .unwrap();
+    let initial = absolute_tokens(&full["data"]);
+    assert!(!initial.is_empty());
+    let mut live = integers(&full["data"]);
+    let mut previous = full["resultId"].clone();
+    let end = HEARTBEAT.len();
+    for (version, end_line, end_column, replacement) in [(2, 2, 0, ""), (3, 1, end, "\n")] {
+        client.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument":{"uri":URI,"version":version},
+                "contentChanges":[{"range":{
+                    "start":{"line":1,"character":end},
+                    "end":{"line":end_line,"character":end_column}
+                },"text":replacement}]
+            }),
+        );
+        let delta = client
+            .request(
+                "textDocument/semanticTokens/full/delta",
+                json!({
+                    "textDocument":{"uri":URI},"previousResultId":previous
+                }),
+            )
+            .unwrap();
+        previous = delta["resultId"].clone();
+        for edit in delta["edits"].as_array().unwrap().iter().rev() {
+            let first = edit["start"].as_u64().unwrap() as usize;
+            let count = edit["deleteCount"].as_u64().unwrap() as usize;
+            let data = edit.get("data").map(integers).unwrap_or_default();
+            live.splice(first..first + count, data);
+        }
+        let actual = absolute_tokens(&json!(live));
+        if replacement.is_empty() {
+            let expected: Vec<_> = initial
+                .iter()
+                .filter_map(|&[line, start, len, kind, mods]| match line {
+                    0 => Some([0, start, len, kind, mods]),
+                    3 => Some([2, start, len, kind, mods]),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(actual, expected);
+        } else {
+            assert_eq!(actual, initial);
+        }
+    }
+    client.shutdown();
+}
+
+#[test]
+fn full_highlighting_logs_the_line_cutoff_even_if_the_byte_budget_skips_a_line() {
+    let mut client = TestClient::start();
+    client.initialize_with(json!({
+        "capabilities": caps("full"),
+        "initializationOptions": {"fix": {"limits": {
+            "semanticTokensFullLines": 2, "semanticTokensBytes": 2
+        }}}
+    }));
+    let params = json!({"textDocument": {"uri": URI}});
+    client.did_open(URI, "#long\n#x\n#y", 1);
+    let answer = client
+        .request("textDocument/semanticTokens/full", params.clone())
+        .unwrap();
+    let tokens = absolute_tokens(&answer["data"]);
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(&tokens[0][..3], &[1, 0, 2]);
+    let log = client.wait_for_log("fix.limits.semanticTokensFullLines");
+    assert_eq!(log["type"], 3);
+    assert_eq!(
+        log["message"],
+        "venue-reader: file:///a.fix — full highlighting considers the first 2 of 3 lines \
+         (fix.limits.semanticTokensFullLines). Within those lines, fix.limits.semanticTokensBytes \
+         limits the total source bytes highlighted."
+    );
+    client.drain_notifications(std::time::Duration::ZERO);
+
+    client.did_change_full(URI, "#long\n#x", 2);
+    let (answer, notifications) =
+        client.request_collecting("textDocument/semanticTokens/full", params);
+    assert_eq!(absolute_tokens(&answer.unwrap()["data"]), tokens);
+    assert!(
+        notifications
+            .iter()
+            .all(|(method, _)| method != "window/logMessage"),
+        "byte-only skips are silent: {notifications:?}"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn the_default_highlight_budget_admits_exactly_65536_source_bytes() {
+    let exact = format!("#{}", "x".repeat(65_535));
+    let text = format!("{exact}x\r\n{exact}\r\n#tail");
+    for shape in ["range", "full"] {
+        let mut client = TestClient::start();
+        client.initialize_caps(caps(shape));
+        client.did_open(URI, &text, 1);
+        let mut params = json!({"textDocument":{"uri":URI}});
+        if shape == "range" {
+            params["range"] = json!({
+                "start":{"line":0,"character":0}, "end":{"line":3,"character":0}
+            });
+        }
+        let result = client
+            .request(&format!("textDocument/semanticTokens/{shape}"), params)
+            .unwrap();
+        let tokens = absolute_tokens(&result["data"]);
+        assert_eq!(tokens.len(), 1, "{shape}");
+        assert_eq!(&tokens[0][..3], &[1, 0, 65_536]);
+        client.shutdown();
+    }
+}
+
+#[test]
+fn a_utf16_fragment_costs_source_bytes_and_returns_the_intersecting_token() {
+    let mut client = TestClient::start();
+    let mut capabilities = caps("range");
+    capabilities["general"]["positionEncodings"] = json!(["utf-16"]);
+    client.initialize_with(json!({
+        "capabilities": capabilities,
+        "initializationOptions":{"fix":{"limits":{"semanticTokensBytes":4}}}
+    }));
+    client.did_open(URI, "#x🙂y", 1);
+    for (end, fits) in [(4, true), (5, false)] {
+        let result = client
+            .request(
+                "textDocument/semanticTokens/range",
+                json!({
+                    "textDocument":{"uri":URI},"range":{
+                        "start":{"line":0,"character":2},"end":{"line":0,"character":end}
+                    }
+                }),
+            )
+            .unwrap();
+        let tokens = absolute_tokens(&result["data"]);
+        if fits {
+            assert_eq!(tokens.len(), 1);
+            assert_eq!(&tokens[0][..3], &[0, 0, 5]);
+        } else {
+            assert!(tokens.is_empty());
+        }
+    }
+    client.shutdown();
+}
+
+#[test]
+fn editing_an_early_fragment_moves_the_budget_across_unchanged_lines_in_a_delta() {
+    let mut client = TestClient::start();
+    client.initialize_with(json!({
+        "capabilities":caps("full"),
+        "initializationOptions":{"fix":{"limits":{"semanticTokensBytes":10}}}
+    }));
+    client.did_open(URI, "#abc\n#123456\n#end\n#x", 1);
+    let params = json!({"textDocument":{"uri":URI}});
+    let mut result = client
+        .request("textDocument/semanticTokens/full", params.clone())
+        .unwrap();
+    let mut data = integers(&result["data"]);
+    let rows = |data: &[u64]| {
+        absolute_tokens(&json!(data))
+            .iter()
+            .map(|token| token[0])
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows(&data), [0, 2, 3]);
+    for (version, end, replacement, expected) in [(2, 4, "#", [0, 1, 3]), (3, 1, "#abc", [0, 2, 3])]
+    {
+        client.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument":{"uri":URI,"version":version}, "contentChanges":[{
+                    "range":{"start":{"line":0,"character":0},"end":{"line":0,"character":end}},
+                    "text":replacement
+                }]
+            }),
+        );
+        result = client
+            .request(
+                "textDocument/semanticTokens/full/delta",
+                json!({
+                    "textDocument":{"uri":URI},"previousResultId":result["resultId"]
+                }),
+            )
+            .unwrap();
+        if let Some(full) = result.get("data") {
+            data = integers(full);
+        } else {
+            for edit in result["edits"].as_array().unwrap().iter().rev() {
+                let start = edit["start"].as_u64().unwrap() as usize;
+                let delete = edit["deleteCount"].as_u64().unwrap() as usize;
+                data.splice(
+                    start..start + delete,
+                    edit.get("data").map(integers).unwrap_or_default(),
+                );
+            }
+        }
+        assert_eq!(rows(&data), expected);
+        let fresh = client
+            .request("textDocument/semanticTokens/full", params.clone())
+            .unwrap();
+        assert_eq!(data, integers(&fresh["data"]));
+        result = fresh;
+    }
+    client.shutdown();
+}
+
+#[test]
+fn a_range_client_keeps_getting_ranges_after_unadvertised_full_requests() {
+    let mut client = TestClient::start();
+    let mut capabilities = caps("range");
+    capabilities["textDocument"]["semanticTokens"]["requests"]["full"] = json!({"delta":true});
+    let negotiated = client.initialize_caps(capabilities);
+    assert!(provider(&negotiated).get("full").is_none());
+    client.did_open(URI, "#a", 1);
+    for version in [1, 2] {
+        if version == 2 {
+            client.did_change_full(URI, "#b", version);
+        }
+        let params = json!({"textDocument":{"uri":URI}});
+        let mut range = params.clone();
+        range["range"] = json!({"start":{"line":0,"character":0},"end":{"line":1,"character":0}});
+        assert_eq!(
+            absolute_tokens(
+                &client
+                    .request("textDocument/semanticTokens/range", range)
+                    .unwrap()["data"]
+            )
+            .len(),
+            1
+        );
+        assert!(client
+            .request("textDocument/semanticTokens/full", params.clone())
+            .unwrap()
+            .is_null());
+        let mut delta = params;
+        delta["previousResultId"] = json!("old");
+        assert!(client
+            .request("textDocument/semanticTokens/full/delta", delta)
+            .unwrap()
+            .is_null());
+    }
+    client.shutdown();
 }

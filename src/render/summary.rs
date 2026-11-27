@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn structured_text_matches_plain_and_only_active_marker_literals_are_flags() {
-        let (bytes, message) = message_of("8=FIX.4.4|35=8|43=Y|150=F|38=10|44=5|49=ALPHA|56=BETA|");
+        let (bytes, message) = message_of("8=FIX.4.4|35=8|49=ALPHA|56=BETA|43=Y|150=F|38=10|44=5|");
         let options = options(
             r#"{sender}=>{target}{43="Y"?" [POSS DUP]{38}"}{43 in "Y"?" also"}{43?" present"}{43 in "Y","N"?" boolean"}{43="N"?"":" not N"}"#,
             true,
@@ -687,6 +687,20 @@ mod tests {
             .parts
             .iter()
             .all(|part| part.style.is_none()));
+    }
+
+    #[test]
+    fn late_header_values_keep_their_summary_text_without_line_modifiers() {
+        let (bytes, message) = message_of("8=FIX.4.4|35=D|55=X|49=ALPHA|56=BETA|43=Y|");
+        let options = options(r#"{sender}=>{target}{43="Y"?" [POSS DUP]"}"#, false);
+        let parts = structured(&bytes, &message, &options, true).parts;
+        assert_eq!(text_of(&parts), "ALPHA=>BETA [POSS DUP]");
+        let line_mods =
+            tokens::Mod::PossDup.bit() | tokens::Mod::Peer1.bit() | tokens::Mod::Peer2.bit();
+        assert!(parts
+            .iter()
+            .filter_map(|part| part.style)
+            .all(|style| style.mods & line_mods == 0));
     }
 
     #[test]

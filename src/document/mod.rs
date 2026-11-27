@@ -110,6 +110,8 @@ pub struct Line {
     pub bytes: Arc<[u8]>,
     pub hash: u64,
     pub is_ascii: bool,
+    // Avoid rescanning long non-ASCII lines when converting between byte offsets and LSP UTF-16 positions.
+    utf16_index: Option<Arc<position::Utf16Index>>,
     ending: Ending,
     /// Read since the last sweep. Set by every hit and every population, so a
     /// line has to go unread across two sweeps before it is evicted.
@@ -121,7 +123,7 @@ pub struct Line {
 
 // Measured for the 4c-3 memory budget; a field added here is paid per line.
 #[cfg(target_os = "linux")]
-const _: () = assert!(std::mem::size_of::<Line>() == 48);
+const _: () = assert!(std::mem::size_of::<Line>() == 56);
 
 #[derive(Clone, Copy)]
 enum Ending {
@@ -164,10 +166,13 @@ impl Line {
         let bytes: Arc<[u8]> = bytes.into();
         let hash = xxh3_64(&bytes);
         let is_ascii = bytes.is_ascii();
+        let utf16_index = (!is_ascii && bytes.len() >= position::INDEX_MIN_BYTES)
+            .then(|| Arc::new(position::Utf16Index::default()));
         Arc::new(Line {
             bytes,
             hash,
             is_ascii,
+            utf16_index,
             ending,
             used: AtomicBool::new(false),
             analysis: Mutex::new(None),
@@ -184,6 +189,7 @@ impl Line {
             bytes: self.bytes.clone(),
             hash: self.hash,
             is_ascii: self.is_ascii,
+            utf16_index: self.utf16_index.clone(),
             ending: self.ending,
             used: AtomicBool::new(false),
             analysis: Mutex::new(None),

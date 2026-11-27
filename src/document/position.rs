@@ -5,6 +5,8 @@
 //! lines only, which is what a client negotiating it sends; an invalid line
 //! falls back to byte addressing. ASCII lines convert as identity.
 
+use std::sync::OnceLock;
+
 use super::Line;
 use crate::codec::ByteOffset;
 
@@ -22,12 +24,26 @@ use crate::codec::ByteOffset;
 /// a token is a start and a length, so a second column is always converted
 /// rather than computed.
 #[repr(transparent)]
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, serde::Serialize)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Column(u32);
 
 impl Column {
     pub fn new(character: u32) -> Column {
         Column(character)
+    }
+
+    pub fn fits_lsp(self) -> bool {
+        self.0 <= i32::MAX as u32
+    }
+
+    pub fn wire_value(self) -> u32 {
+        self.0.min(i32::MAX as u32)
+    }
+}
+
+impl serde::Serialize for Column {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.wire_value())
     }
 }
 
@@ -53,6 +69,170 @@ pub enum PositionEncoding {
     Utf16,
 }
 
+#[cfg(test)]
+pub(crate) mod work {
+    use std::cell::Cell;
+    thread_local! {
+        pub static PREFIX_BYTES: Cell<usize> = const { Cell::new(0) };
+        pub static DECODED: Cell<usize> = const { Cell::new(0) };
+        pub static VALIDATED: Cell<usize> = const { Cell::new(0) };
+    }
+}
+
+pub(super) const INDEX_MIN_BYTES: usize = 16 * 1024;
+const CHECKPOINT_BYTES: usize = 4 * 1024;
+
+#[derive(Clone, Copy, Default)]
+struct Checkpoint {
+    byte: usize,
+    units: usize,
+}
+
+#[derive(Clone, Copy)]
+enum FromUnit {
+    Byte,
+    Utf16,
+}
+
+impl FromUnit {
+    fn source(self, point: Checkpoint) -> usize {
+        match self {
+            Self::Byte => point.byte,
+            Self::Utf16 => point.units,
+        }
+    }
+
+    fn result(self, point: Checkpoint) -> usize {
+        match self {
+            Self::Byte => point.units,
+            Self::Utf16 => point.byte,
+        }
+    }
+}
+
+/// A short lookup can validate the text without building the index used for distant positions.
+#[derive(Default)]
+pub(super) struct Utf16Index {
+    prefix_valid: OnceLock<bool>,
+    points: OnceLock<Option<Box<[Checkpoint]>>>,
+}
+
+fn checked_text(bytes: &[u8]) -> Option<&str> {
+    #[cfg(test)]
+    work::VALIDATED.set(work::VALIDATED.get() + bytes.len());
+    std::str::from_utf8(bytes).ok()
+}
+
+fn direct(line: &Line, encoding: PositionEncoding, last: usize) -> bool {
+    // Byte and UTF-16 coordinates coincide throughout an ASCII prefix, even if its tail is invalid.
+    if encoding == PositionEncoding::Utf8 || line.is_ascii {
+        return true;
+    }
+    if last > CHECKPOINT_BYTES {
+        return false;
+    }
+    let prefix = &line.bytes[..last.min(line.bytes.len())];
+    #[cfg(test)]
+    work::PREFIX_BYTES.set(work::PREFIX_BYTES.get() + prefix.len());
+    prefix.is_ascii()
+}
+
+impl Utf16Index {
+    fn checkpoints(bytes: &[u8]) -> Option<Box<[Checkpoint]>> {
+        let text = checked_text(bytes)?;
+        let mut points = Vec::with_capacity(text.len() / CHECKPOINT_BYTES + 2);
+        let mut last_byte = 0;
+        let mut units = 0;
+        points.push(Checkpoint::default());
+        for (byte, ch) in text.char_indices() {
+            #[cfg(test)]
+            work::DECODED.set(work::DECODED.get() + 1);
+            if byte - last_byte >= CHECKPOINT_BYTES {
+                points.push(Checkpoint { byte, units });
+                last_byte = byte;
+            }
+            units += ch.len_utf16();
+        }
+        points.push(Checkpoint {
+            byte: bytes.len(),
+            units,
+        });
+        Some(points.into_boxed_slice())
+    }
+
+    fn convert(
+        &self,
+        bytes: &[u8],
+        input: impl DoubleEndedIterator<Item = usize> + Clone,
+        from: FromUnit,
+        mut emit: impl FnMut(usize),
+    ) {
+        let Some(last) = input.clone().next_back() else {
+            return;
+        };
+        if last <= CHECKPOINT_BYTES && self.points.get().is_none() {
+            // A bad byte anywhere in the line switches *every* coordinate to byte addressing.
+            if !self
+                .prefix_valid
+                .get_or_init(|| checked_text(bytes).is_some())
+            {
+                input.for_each(|value| emit(value.min(bytes.len())));
+                return;
+            }
+            // Three UTF-8 bytes per UTF-16 unit also cover surrogate pairs (four bytes for two).
+            let mut end = bytes.len().min(last * 3 + 3);
+            while end < bytes.len() && bytes[end] & 0xc0 == 0x80 {
+                end -= 1;
+            }
+            walk_chunk(&bytes[..end], Checkpoint::default(), input, from, &mut emit);
+            return;
+        }
+
+        let Some(points) = self.points.get_or_init(|| Self::checkpoints(bytes)) else {
+            input.for_each(|value| emit(value.min(bytes.len())));
+            return;
+        };
+        let mut wanted = input.peekable();
+        while let Some(&first) = wanted.peek() {
+            let index = points.partition_point(|point| from.source(*point) <= first) - 1;
+            let position = points[index];
+            let Some(end) = points.get(index + 1) else {
+                wanted.for_each(|_| emit(from.result(position)));
+                break;
+            };
+            let in_chunk =
+                std::iter::from_fn(|| wanted.next_if(|value| *value <= from.source(*end)));
+            walk_chunk(
+                &bytes[position.byte..end.byte],
+                position,
+                in_chunk,
+                from,
+                &mut emit,
+            );
+        }
+    }
+}
+
+fn walk_chunk(
+    bytes: &[u8],
+    mut position: Checkpoint,
+    input: impl Iterator<Item = usize>,
+    from: FromUnit,
+    emit: &mut impl FnMut(usize),
+) {
+    let mut chars = checked_text(bytes).expect("validated UTF-8").chars();
+    for value in input {
+        while from.source(position) < value {
+            let Some(ch) = chars.next() else { break };
+            #[cfg(test)]
+            work::DECODED.set(work::DECODED.get() + 1);
+            position.byte += ch.len_utf8();
+            position.units += ch.len_utf16();
+        }
+        emit(from.result(position));
+    }
+}
+
 /// Byte offset within `line` for the given `character`, clamped to the line end.
 ///
 /// Returns `usize`, deliberately. `apply_ranged` slices with this result, so
@@ -62,8 +242,15 @@ pub enum PositionEncoding {
 /// handles the `None`.
 pub fn position_to_byte(line: &Line, character: Column, enc: PositionEncoding) -> usize {
     let ch = character.0 as usize;
-    if line.is_ascii || enc == PositionEncoding::Utf8 {
+    if direct(line, enc, ch) {
         return ch.min(line.bytes.len());
+    }
+    if let Some(index) = &line.utf16_index {
+        let mut byte = 0;
+        index.convert(&line.bytes, std::iter::once(ch), FromUnit::Utf16, |value| {
+            byte = value
+        });
+        return byte;
     }
     let Some(s) = utf16_addressable(line) else {
         return ch.min(line.bytes.len());
@@ -81,8 +268,18 @@ pub fn position_to_byte(line: &Line, character: Column, enc: PositionEncoding) -
 /// The `character` (in the given encoding) for a byte offset within `line`.
 pub fn byte_to_position(line: &Line, byte: ByteOffset, enc: PositionEncoding) -> Column {
     let byte = byte.index().min(line.bytes.len());
-    if line.is_ascii || enc == PositionEncoding::Utf8 {
+    if direct(line, enc, byte) {
         return Column(byte as u32);
+    }
+    if let Some(index) = &line.utf16_index {
+        let mut column = 0;
+        index.convert(
+            &line.bytes,
+            std::iter::once(byte),
+            FromUnit::Byte,
+            |value| column = value as u32,
+        );
+        return Column(column);
     }
     let Some(s) = utf16_addressable(line) else {
         return Column(byte as u32);
@@ -179,12 +376,22 @@ impl Offsets {
 /// private for the same reason: [`Offsets`] owns the contract it needs.
 fn positions_to_bytes(line: &Line, columns: &[Column], enc: PositionEncoding) -> Vec<usize> {
     debug_assert!(columns.is_sorted(), "columns must ascend: {columns:?}");
-    if columns.is_empty() {
+    let Some(last) = columns.last() else {
         return Vec::new();
-    }
+    };
     let clamped = |column: &Column| (column.0 as usize).min(line.bytes.len());
-    if line.is_ascii || enc == PositionEncoding::Utf8 {
+    if direct(line, enc, last.0 as usize) {
         return columns.iter().map(clamped).collect();
+    }
+    if let Some(index) = &line.utf16_index {
+        let mut result = Vec::with_capacity(columns.len());
+        index.convert(
+            &line.bytes,
+            columns.iter().map(|column| column.0 as usize),
+            FromUnit::Utf16,
+            |byte| result.push(byte),
+        );
+        return result;
     }
     let Some(s) = utf16_addressable(line) else {
         return columns.iter().map(clamped).collect();
@@ -222,14 +429,24 @@ fn positions_to_bytes(line: &Line, columns: &[Column], enc: PositionEncoding) ->
 /// asserted in debug rather than silently answered with the wrong columns.
 fn byte_to_positions(line: &Line, bytes: &[ByteOffset], enc: PositionEncoding) -> Vec<Column> {
     debug_assert!(bytes.is_sorted(), "offsets must ascend: {bytes:?}");
-    if bytes.is_empty() {
+    let Some(last) = bytes.last() else {
         return Vec::new();
-    }
-    if line.is_ascii || enc == PositionEncoding::Utf8 {
+    };
+    if direct(line, enc, last.index()) {
         return bytes
             .iter()
             .map(|byte| Column(byte.index().min(line.bytes.len()) as u32))
             .collect();
+    }
+    if let Some(index) = &line.utf16_index {
+        let mut result = Vec::with_capacity(bytes.len());
+        index.convert(
+            &line.bytes,
+            bytes.iter().map(|byte| byte.index()),
+            FromUnit::Byte,
+            |units| result.push(Column(units as u32)),
+        );
+        return result;
     }
     let Some(s) = utf16_addressable(line) else {
         return bytes
@@ -283,6 +500,122 @@ mod tests {
     /// A column, short — the byte-offset half is `crate::codec::byte`.
     fn column(at: u32) -> Column {
         Column::new(at)
+    }
+
+    #[test]
+    fn early_utf16_edits_touch_only_the_ascii_prefix_on_each_version() {
+        use crate::ctx::Ctx;
+        use crate::document::{Change, Document};
+        use lsp_types::{Position, Range};
+
+        let text = format!("{}é", "x".repeat(4 * INDEX_MIN_BYTES));
+        let mut document = Document::open(text.as_bytes(), 1, Ctx::for_test("FIX.4.4"));
+        let encoding = PositionEncoding::Utf16;
+        for version in 2..8 {
+            work::DECODED.set(0);
+            work::VALIDATED.set(0);
+            work::PREFIX_BYTES.set(0);
+            let range = Range::new(Position::new(0, 12), Position::new(0, 13));
+            let edited = Change::Ranged {
+                range,
+                text: vec![b'A' + version as u8],
+            };
+            document
+                .apply_changes(&[edited], version, encoding)
+                .unwrap();
+            let line = &document.lines[0];
+            assert_eq!(line.bytes[12], b'A' + version as u8);
+            assert_eq!(byte_to_position(line, byte(80), encoding), column(80));
+            assert_eq!(
+                Columns::of(line, [byte(12), byte(80)], encoding).at(byte(12)),
+                column(12)
+            );
+            assert_eq!(
+                Offsets::of(line, [column(12), column(80)], encoding).at(column(80)),
+                80
+            );
+            assert_eq!(work::PREFIX_BYTES.get(), 12 + 13 + 80 * 3);
+            assert_eq!((work::VALIDATED.get(), work::DECODED.get()), (0, 0));
+            assert!(line.utf16_index.as_ref().unwrap().points.get().is_none());
+        }
+        let line = &document.lines[0];
+        let far = byte(text.len() as u32);
+        assert_eq!(
+            byte_to_position(line, far, encoding),
+            column(text.len() as u32 - 1)
+        );
+        assert!(line.utf16_index.as_ref().unwrap().points.get().is_some());
+        for distance in 4..10 {
+            work::VALIDATED.set(0);
+            work::DECODED.set(0);
+            let offset = text.len() as u32 - distance;
+            assert_eq!(
+                byte_to_position(line, byte(offset), encoding),
+                column(offset)
+            );
+            assert!(work::VALIDATED.get() <= CHECKPOINT_BYTES + 3);
+            assert!(work::DECODED.get() <= CHECKPOINT_BYTES + 3);
+        }
+    }
+
+    #[test]
+    fn a_mixed_prefix_obeys_line_wide_utf8_validity_without_building_checkpoints() {
+        for valid in [true, false] {
+            let mut bytes = "🚀".as_bytes().to_vec();
+            bytes.resize(INDEX_MIN_BYTES, b'x');
+            if !valid {
+                bytes.push(0xff);
+            }
+            let line = Line::new(bytes, Ending::None);
+            let encoding = PositionEncoding::Utf16;
+            assert_eq!(
+                position_to_byte(&line, column(2), encoding),
+                if valid { 4 } else { 2 }
+            );
+            work::VALIDATED.set(0);
+            assert_eq!(
+                byte_to_position(&line, byte(4), encoding),
+                column(if valid { 2 } else { 4 })
+            );
+            assert!(work::VALIDATED.get() < 32);
+            assert!(line.utf16_index.as_ref().unwrap().points.get().is_none());
+        }
+    }
+
+    #[test]
+    fn indexed_utf16_matches_a_linear_walk_across_checkpoints_and_invalid_text() {
+        let text = "x🚀甲".repeat(INDEX_MIN_BYTES);
+        for suffix in [b"".as_slice(), &[0xff]] {
+            let bytes = [text.as_bytes(), suffix].concat();
+            let indexed = Line::new(bytes.as_slice(), Ending::None);
+            let mut reference = Line::new(bytes.as_slice(), Ending::None);
+            std::sync::Arc::get_mut(&mut reference).unwrap().utf16_index = None;
+            let positions = [
+                0,
+                1,
+                2,
+                4095,
+                4096,
+                4097,
+                8191,
+                8192,
+                8193,
+                65535,
+                65536,
+                u32::MAX,
+            ];
+            let columns = positions.map(Column::new);
+            let offsets = positions.map(ByteOffset::new);
+            let encoding = PositionEncoding::Utf16;
+            assert_eq!(
+                positions_to_bytes(&indexed, &columns, encoding),
+                positions_to_bytes(&reference, &columns, encoding)
+            );
+            assert_eq!(
+                byte_to_positions(&indexed, &offsets, encoding),
+                byte_to_positions(&reference, &offsets, encoding)
+            );
+        }
     }
 
     /// The contract `Columns` exists for: whatever order and however many times

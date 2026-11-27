@@ -179,6 +179,7 @@ pub struct Checked {
 /// The enabled rules and the severity each was configured with. Rebuilt on
 /// every committed configuration.
 pub struct Registry {
+    enabled: bool,
     rules: Vec<(&'static dyn Rule, Severity)>,
     selected_version: Option<String>,
 }
@@ -213,6 +214,7 @@ impl Registry {
             Vec::new()
         };
         Registry {
+            enabled: config.enabled,
             rules,
             selected_version: selected_version.map(str::to_owned),
         }
@@ -229,6 +231,7 @@ impl Registry {
         selected_version: Option<&str>,
     ) -> Registry {
         Registry {
+            enabled: true,
             rules,
             selected_version: selected_version.map(str::to_owned),
         }
@@ -253,9 +256,34 @@ impl Registry {
         }
     }
 
-    /// Empty for a line that is not a message: there is nothing to check.
     pub fn check(&self, bytes: &[u8], analysis: &LineAnalysis, scope: &Scope) -> Checked {
         let mut checked = Checked::default();
+        if let LineAnalysis::Skipped(reason) = analysis {
+            if self.enabled && scope.only.is_none() {
+                if scope
+                    .count_from
+                    .is_some_and(|from| Severity::Warning.rank() >= from.rank())
+                {
+                    checked.counted = 1;
+                    return checked;
+                }
+                checked.diags.push(Diag {
+                    rule: "analysisLimit",
+                    kind: DiagnosticKind {
+                        code: "analysisLimit".into(),
+                        fixability: Fixability::RequiresJudgment(
+                            "Edit the line or adjust the analysis limit".into(),
+                        ),
+                    },
+                    start: ByteOffset::new(0),
+                    end: ByteOffset::new(0),
+                    message: reason.to_string(),
+                    severity: Severity::Warning,
+                    document_key: None,
+                });
+            }
+            return checked;
+        }
         let Some(message) = analysis.message() else {
             return checked;
         };

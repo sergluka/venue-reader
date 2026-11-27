@@ -1285,3 +1285,49 @@ fn resolve_can_be_cancelled_before_a_complete_edit_is_delivered() {
     );
     client.shutdown();
 }
+
+#[test]
+fn repair_candidates_must_fit_the_analysis_limits() {
+    let wrong_length = SOUND.replacen("9=57", "9=0", 1);
+    for (original, limits, fits) in [
+        (
+            wrong_length.as_str(),
+            json!({"lineBytes":SOUND.len()-1}),
+            false,
+        ),
+        (
+            wrong_length.as_str(),
+            json!({"lineBytes":SOUND.len()}),
+            true,
+        ),
+        (
+            SOUND.trim_end_matches("10=171|"),
+            json!({"fieldsPerLine":7}),
+            false,
+        ),
+        (
+            SOUND.trim_end_matches("10=171|"),
+            json!({"fieldsPerLine":8}),
+            true,
+        ),
+    ] {
+        let mut client = TestClient::start();
+        client.initialize_with(json!({
+            "capabilities": TestClient::caps_taking_actions(),
+            "initializationOptions":{"fix":{"limits":limits}}
+        }));
+        client.did_open(URI, original, 1);
+        for kind in ["quickfix", "source.fixAll"] {
+            let mut params = on_line(0);
+            params["context"]["only"] = json!([kind]);
+            let result = client.request("textDocument/codeAction", params);
+            if fits {
+                let actions = result.unwrap();
+                assert_eq!(apply_document_action(original, &actions[0]), SOUND);
+            } else {
+                assert_eq!(result, Err(REQUEST_FAILED));
+            }
+        }
+        client.shutdown();
+    }
+}

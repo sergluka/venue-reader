@@ -155,6 +155,14 @@ impl ServerState {
             )?)?,
             _ => return Ok(None),
         };
+        if self.client.range_only_tokens
+            && matches!(
+                parsed,
+                PreparedRequest::TokensFull(_) | PreparedRequest::TokensDelta(_)
+            )
+        {
+            return Ok(Some(Dispatched::Now(Ok(Value::Null))));
+        }
         let dependency = if let Some(uri) = parsed.uri() {
             let Some(document) = self.docs.get(&uri) else {
                 return Ok(Some(parsed.execute(self)));

@@ -1028,3 +1028,154 @@ fn invalid_and_repeated_selectors_publish_resolution_errors_without_body_guesses
     insta::assert_json_snapshot!("invalid_selectors", version_problems);
     client.shutdown();
 }
+
+#[test]
+fn analysis_limit_keeps_neighbors_and_recovers_across_edits_and_pulls() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    let settings = json!({"diagnostics":{"rules":{
+        "unknownVersion":false,"dictionaryVersion":false,"integrity":false,
+        "unknownMsgType":false,"unknownTag":false
+    }}, "limits":{"lineBytes":SOUND.len(),"fieldsPerLine":8}});
+    pull(&mut client, settings.clone());
+    client.did_open(URI, &format!("{SOUND}\r\n{SOUND}x\r\n{SOUND}"), 1);
+    let report = client.wait_for("textDocument/publishDiagnostics");
+    assert_eq!(codes(&report), ["analysisLimit"]);
+    let warning = &report["diagnostics"][0];
+    assert_eq!(warning["severity"], 2);
+    assert_eq!(
+        warning["range"],
+        json!({"start":{"line":1,"character":0},"end":{"line":1,"character":0}})
+    );
+    assert!(warning["message"].as_str().unwrap().contains("lineBytes"));
+    for line in [0, 2] {
+        assert!(!client.hover(URI, line, 1).unwrap().is_null());
+    }
+    assert!(client.hover(URI, 1, 1).unwrap().is_null());
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument":{"uri":URI,"version":2},
+            "contentChanges":[{"range":{"start":{"line":1,"character":SOUND.len()},
+                "end":{"line":1,"character":SOUND.len()+1}},"text":""}]
+        }),
+    );
+    let cleared = client.wait_for("textDocument/publishDiagnostics");
+    assert_eq!(cleared["version"], 2);
+    assert!(codes(&cleared).is_empty());
+    assert!(!client.hover(URI, 1, 1).unwrap().is_null());
+    client.did_change_full(
+        URI,
+        "log [S] 8=FIX.4.4\x0135=0\x0155=é\x0149=\x0149=\x0149=\x0149=\x0149=\x0149=\x01",
+        3,
+    );
+    let report = client.wait_for("textDocument/publishDiagnostics");
+    assert_eq!(codes(&report), ["analysisLimit"]);
+    assert!(report["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("fieldsPerLine"));
+    let mut disabled = settings.clone();
+    disabled["diagnostics"]["enabled"] = json!(false);
+    pull(&mut client, disabled);
+    assert!(codes(&client.wait_for("textDocument/publishDiagnostics")).is_empty());
+    pull(&mut client, settings.clone());
+    assert_eq!(
+        codes(&client.wait_for("textDocument/publishDiagnostics")),
+        ["analysisLimit"]
+    );
+    let mut raised = settings;
+    raised["limits"]["fieldsPerLine"] = json!(9);
+    pull(&mut client, raised);
+    assert!(codes(&client.wait_for("textDocument/publishDiagnostics")).is_empty());
+    assert!(!client.hover(URI, 0, 8).unwrap().is_null());
+    client.did_close(URI);
+    client.did_open(URI, SOUND, 1);
+    assert!(!client.hover(URI, 0, 1).unwrap().is_null());
+    client.shutdown();
+}
+
+#[test]
+fn oversized_modeline_is_ignored_and_reappears_at_the_inclusive_limit() {
+    let directive = "# fix: hover.enabled=false typo=1";
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    pull(
+        &mut client,
+        json!({"limits":{"lineBytes":directive.len()-1}}),
+    );
+    client.did_open(URI, &format!("{directive}\n8=FIX.4.4|35=0|"), 1);
+    let report = client.wait_for("textDocument/publishDiagnostics");
+    assert!(codes(&report).contains(&"analysisLimit".into()));
+    assert!(!codes(&report).contains(&"modeline".into()));
+    assert!(!client.hover(URI, 1, 1).unwrap().is_null());
+    pull(&mut client, json!({"limits":{"lineBytes":directive.len()}}));
+    let report = last_publish(&client.drain_notifications(QUIET), URI).unwrap();
+    assert!(!codes(&report).contains(&"analysisLimit".into()));
+    assert!(codes(&report).contains(&"modeline".into()));
+    assert!(client.hover(URI, 1, 1).unwrap().is_null());
+    client.did_change_full(URI, &format!("{directive} \n8=FIX.4.4|35=0|"), 2);
+    let report = last_publish(&client.drain_notifications(QUIET), URI).unwrap();
+    assert!(codes(&report).contains(&"analysisLimit".into()));
+    assert!(!codes(&report).contains(&"modeline".into()));
+    assert!(!client.hover(URI, 1, 1).unwrap().is_null());
+    client.shutdown();
+}
+
+#[test]
+fn skipped_lines_share_the_document_diagnostic_quota() {
+    for rules in [
+        json!({}),
+        json!({"unknownVersion":false,"dictionaryVersion":false,"integrity":false,
+            "unknownMsgType":false,"unknownTag":false}),
+    ] {
+        let mut client = TestClient::start();
+        client.initialize_with(json!({
+            "capabilities": {},
+            "initializationOptions":{"fix":{"diagnostics":{"rules":rules},
+                "limits":{"lineBytes":12,"fieldsPerLine":1,"diagnosticsPerDocument":1}}}
+        }));
+        client.did_open(URI, "#\n[S] 8=|1=\n1234567890123\n1=|1=", 1);
+        let report = last_publish(&client.drain_notifications(QUIET), URI).unwrap();
+        assert_eq!(codes(&report), ["analysisLimit", "truncated"]);
+        assert_eq!(report["diagnostics"][0]["range"]["start"]["line"], 1);
+        assert_eq!(
+            report["diagnostics"][1]["message"],
+            "2 more problems not shown"
+        );
+        client.shutdown();
+    }
+}
+
+#[test]
+fn a_pending_limit_increase_uses_the_latest_edge_text_when_enabling_modelines() {
+    let mut client = TestClient::start();
+    client.initialize_caps(TestClient::caps_with_pull());
+    client.answer_base_pull();
+    pull(
+        &mut client,
+        json!({"limits":{"lineBytes":20},"overrides":{"modeline":false}}),
+    );
+    client.did_open(URI, "# fix: hover.enabled=true\n8=FIX.4.4|35=0|", 1);
+    assert_eq!(
+        client.wait_for("textDocument/publishDiagnostics")["version"],
+        1
+    );
+    assert!(!client.hover(URI, 1, 1).unwrap().is_null());
+
+    client.notify("workspace/didChangeConfiguration", json!({"settings":null}));
+    let (request, method, _) = client.recv_server_request();
+    assert_eq!(method, "workspace/configuration");
+    client.did_change_full(URI, "# fix: hover.enabled=false\n8=FIX.4.4|35=0|", 2);
+    client.reply(
+        request,
+        json!([{"limits":{"lineBytes":50},"overrides":{"modeline":true}}]),
+    );
+    let report = last_publish(&client.drain_notifications(QUIET), URI).unwrap();
+    assert_eq!(report["version"], 2);
+    assert!(!codes(&report).contains(&"analysisLimit".into()));
+    assert!(client.hover(URI, 1, 1).unwrap().is_null());
+    client.shutdown();
+}

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use super::dispatch::{BackgroundEvent, BackgroundResult, BackgroundTask, Dispatched, Snapshot};
 use super::ServerState;
-use crate::codec::{tokenize, ByteOffset, GroupSpans, LineKind, MessageAnalysis};
+use crate::codec::{ByteOffset, GroupSpans, LineKind, MessageAnalysis};
 use crate::config::SymbolDepth;
 use crate::document::{Column, Columns, LineNo};
 use crate::render::{symbol, Options};
@@ -367,10 +367,10 @@ fn enumerate(
     for number in 0..physical_lines {
         check_cancel(cancelled)?;
         let number = LineNo::new(number as u32);
-        // Tokenized always: a cache lookup locks the line, and a hit saves little here.
+        // A cache lookup locks the line, and a hit saves little during classification.
         if snapshot
             .line(number)
-            .is_some_and(|line| tokenize(&line.bytes).kind == LineKind::Message)
+            .is_some_and(|line| snapshot.ctx.line_kind(&line.bytes) == LineKind::Message)
         {
             total += 1;
             if lines.len() <= cap {

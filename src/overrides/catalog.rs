@@ -46,6 +46,9 @@ settings! {
     ("documentLink.url", Global, String),
     ("overrides.modeline", Global, Boolean),
     ("overrides.projectConfig", Global, Boolean),
+    ("limits.lineBytes", Global, Unsigned),
+    ("limits.fieldsPerLine", Global, Unsigned),
+    ("limits.semanticTokensBytes", Global, Unsigned),
     ("limits.dictionaryBytes", Global, Unsigned),
     ("limits.diagnosticsPerDocument", Global, Unsigned),
     ("limits.rangeLines", Global, Unsigned),
@@ -147,6 +150,15 @@ pub fn validate(path: &str, kind: Kind, value: &Value) -> Result<(), String> {
     };
     if !valid {
         return Err(format!("{path}: expected {kind:?}"));
+    }
+    if matches!(
+        path,
+        "limits.lineBytes" | "limits.fieldsPerLine" | "limits.semanticTokensBytes"
+    ) && value
+        .as_u64()
+        .is_some_and(|number| number > u64::from(u32::MAX))
+    {
+        return Err(format!("{path}: must be at most {}", u32::MAX));
     }
     if path == "limits.documentSymbolItems" && value.as_u64() == Some(0) {
         return Err(format!("{path}: must be at least 1"));

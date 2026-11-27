@@ -166,6 +166,9 @@ pub fn repair_line(
             }
             *current = next;
             fresh_analysis = analyze(current.as_bytes(), ctx);
+            if let LineAnalysis::Skipped(reason) = &fresh_analysis {
+                return Err(invalid(reason.to_string()));
+            }
             analysis = &fresh_analysis;
             if !finalizer {
                 let message = analysis

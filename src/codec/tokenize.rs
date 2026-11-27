@@ -7,6 +7,22 @@
 
 use super::ByteOffset;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SkipReason {
+    #[error("Skipped FIX analysis: line exceeds fix.limits.lineBytes ({0} bytes)")]
+    LineBytes(u32),
+    #[error("Skipped FIX analysis: line exceeds fix.limits.fieldsPerLine ({0} fields)")]
+    FieldsPerLine(u32),
+}
+
+pub(super) fn check_line_bytes(length: usize, limit: u32) -> Result<(), SkipReason> {
+    if u32::try_from(length).is_ok_and(|length| length <= limit) {
+        Ok(())
+    } else {
+        Err(SkipReason::LineBytes(limit))
+    }
+}
+
 /// What a line is, decided without a dictionary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -17,6 +33,7 @@ pub enum LineKind {
     /// Non-blank, but no `tag=value` pair could be read.
     Other,
     Message,
+    Skipped(SkipReason),
 }
 
 /// What one line tokenizes to: how it classifies, and the `tag=value` spans it
@@ -58,44 +75,65 @@ const MAX_TAG_DIGITS: usize = 255;
 const SOH: u8 = 0x01;
 
 pub fn tokenize(bytes: &[u8]) -> LineTokens {
+    tokenize_bounded(bytes, u32::MAX, u32::MAX)
+}
+
+pub fn tokenize_bounded(bytes: &[u8], line_bytes: u32, fields_per_line: u32) -> LineTokens {
+    scan_bounded::<true>(bytes, line_bytes, fields_per_line)
+}
+
+pub(crate) fn line_kind(bytes: &[u8], line_bytes: u32, fields_per_line: u32) -> LineKind {
+    scan_bounded::<false>(bytes, line_bytes, fields_per_line).kind
+}
+
+fn scan_bounded<const COLLECT_SPANS: bool>(
+    bytes: &[u8],
+    line_bytes: u32,
+    fields_per_line: u32,
+) -> LineTokens {
+    check_line_bytes(bytes.len(), line_bytes)
+        .and_then(|()| scan_line::<COLLECT_SPANS>(bytes, fields_per_line))
+        .unwrap_or_else(|reason| empty(LineKind::Skipped(reason), None))
+}
+
+pub(crate) fn check_limits(
+    bytes: &[u8],
+    line_bytes: u32,
+    fields_per_line: u32,
+) -> Result<(), SkipReason> {
+    check_line_bytes(bytes.len(), line_bytes)?;
+    // An overflowing line needs at least `1=|` per admitted field, then `1=`.
+    if (bytes.len() as u64) < u64::from(fields_per_line) * 3 + 2 {
+        return Ok(());
+    }
+    scan_line::<false>(bytes, fields_per_line).map(|_| ())
+}
+
+fn scan_line<const COLLECT_SPANS: bool>(
+    bytes: &[u8],
+    fields_per_line: u32,
+) -> Result<LineTokens, SkipReason> {
     let separator = sniff_separator(bytes);
 
     let cursor = skip_blanks(bytes, 0);
     if cursor == bytes.len() {
-        return empty(LineKind::Empty, separator);
+        return Ok(empty(LineKind::Empty, separator));
     }
     if bytes[cursor] == b'#' {
-        return empty(LineKind::Comment, separator);
+        return Ok(empty(LineKind::Comment, separator));
     }
 
-    let (fields, stopped_at) = scan_fields(bytes, 0, separator);
-    // Nothing parsed from column 0: the line may be a log entry whose FIX
-    // payload starts after a timestamp. Resynchronising only when column 0
-    // yields nothing is what keeps a leading field from being eaten as prefix.
-    let (fields, stopped_at, prefix_len) = if fields.is_empty() {
-        match resync_offset(bytes, separator) {
-            Some(offset) => {
-                let (fields, stopped_at) = scan_fields(bytes, offset, separator);
-                (fields, stopped_at, offset)
-            }
-            None => (fields, stopped_at, 0),
+    let mut tokens = empty(LineKind::Other, separator);
+    let mut stopped_at = scan_fields::<COLLECT_SPANS>(bytes, 0, fields_per_line, &mut tokens)?;
+    // A leading field takes precedence over a later anchored BeginString.
+    if tokens.kind == LineKind::Other {
+        if let Some(prefix) = resync_offset(bytes, separator) {
+            tokens.prefix_len = offset(prefix);
+            stopped_at = scan_fields::<COLLECT_SPANS>(bytes, prefix, fields_per_line, &mut tokens)?;
         }
-    } else {
-        (fields, stopped_at, 0)
-    };
-
-    let kind = if fields.is_empty() {
-        LineKind::Other
-    } else {
-        LineKind::Message
-    };
-    LineTokens {
-        kind,
-        prefix_len: offset(prefix_len),
-        fields,
-        separator,
-        trailing_junk_at: (stopped_at < bytes.len()).then_some(offset(stopped_at)),
     }
+    tokens.trailing_junk_at = (stopped_at < bytes.len()).then_some(offset(stopped_at));
+    Ok(tokens)
 }
 
 fn empty(kind: LineKind, separator: Option<u8>) -> LineTokens {
@@ -140,33 +178,58 @@ fn skip_blanks(bytes: &[u8], from: usize) -> usize {
     cursor
 }
 
-/// Returns the fields read and the offset parsing stopped at.
-fn scan_fields(bytes: &[u8], from: usize, separator: Option<u8>) -> (Vec<FieldSpan>, usize) {
-    let mut fields = Vec::new();
+fn scan_fields<const COLLECT_SPANS: bool>(
+    bytes: &[u8],
+    from: usize,
+    limit: u32,
+    tokens: &mut LineTokens,
+) -> Result<usize, SkipReason> {
+    let mut count = 0;
     let mut cursor = from;
     loop {
-        let field_start = skip_blanks(bytes, cursor);
-        let Some(span) = read_field(bytes, field_start, separator) else {
-            return (fields, field_start);
+        let start = skip_blanks(bytes, cursor);
+        let Some(tag_end) = tag_end(bytes, start) else {
+            return Ok(start);
         };
-        if fields.is_empty() {
-            // Sized on the first hit rather than up front: `tokenize` probes
-            // from offset 0 before resyncing past a log prefix, and that probe
-            // must not allocate. Clamped because line length bounds the field
-            // count poorly at both ends — one RawData value can be megabytes.
-            fields.reserve((bytes.len().saturating_sub(from) / 8).clamp(16, 256));
+        if count == limit {
+            return Err(SkipReason::FieldsPerLine(limit));
         }
-        cursor = span.value_end.index();
-        fields.push(span);
-        if cursor < bytes.len() && Some(bytes[cursor]) == separator {
-            cursor += 1;
-        } else {
-            return (fields, cursor);
+        let value_start = tag_end + 1;
+        let value_end = tokens
+            .separator
+            .and_then(|separator| {
+                bytes[value_start..]
+                    .iter()
+                    .position(|&byte| byte == separator)
+            })
+            .map_or(bytes.len(), |relative| value_start + relative);
+        if COLLECT_SPANS {
+            if count == 0 {
+                // A failed prefix probe must not allocate. One raw value may occupy the entire line.
+                tokens.fields.reserve(
+                    (bytes.len().saturating_sub(from) / 8)
+                        .clamp(16, 256)
+                        .min(limit as usize),
+                );
+            }
+            tokens.fields.push(FieldSpan {
+                tag: parse_tag(&bytes[start..tag_end]),
+                tag_start: offset(start),
+                tag_end: offset(tag_end),
+                value_start: offset(value_start),
+                value_end: offset(value_end),
+            });
         }
+        tokens.kind = LineKind::Message;
+        count += 1;
+        if value_end == bytes.len() {
+            return Ok(value_end);
+        }
+        cursor = value_end + 1;
     }
 }
 
-fn read_field(bytes: &[u8], start: usize, separator: Option<u8>) -> Option<FieldSpan> {
+fn tag_end(bytes: &[u8], start: usize) -> Option<usize> {
     let mut cursor = start;
     while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
         cursor += 1;
@@ -185,33 +248,11 @@ fn read_field(bytes: &[u8], start: usize, separator: Option<u8>) -> Option<Field
     if cursor >= bytes.len() || bytes[cursor] != b'=' {
         return None;
     }
-    let value_start = cursor + 1;
-
-    let mut value_end = value_start;
-    while value_end < bytes.len() && Some(bytes[value_end]) != separator {
-        value_end += 1;
-    }
-
-    Some(FieldSpan {
-        tag: parse_tag(&bytes[start..tag_end]),
-        tag_start: offset(start),
-        tag_end: offset(tag_end),
-        value_start: offset(value_start),
-        value_end: offset(value_end),
-    })
+    Some(tag_end)
 }
 
-/// A position inside the line the tokenizer is walking, which scans with
-/// `usize`.
-///
-/// **This truncates**, and nothing upstream stops it: no line-length limit
-/// exists anywhere in the crate, so a line past `u32::MAX` would have every
-/// offset on it wrapped. Said plainly rather than excused — an earlier comment
-/// here claimed the codec's packing refused such a line, and it does not.
-/// Work-order item 20 is where that gets decided; until then this is the
-/// crate's oldest unstated premise, not a new one.
 fn offset(at: usize) -> ByteOffset {
-    ByteOffset::new(at as u32)
+    ByteOffset::from_len(at).expect("the full line fits in a ByteOffset")
 }
 
 /// `u32::MAX` marks a run that does not fit; the span still stands.
@@ -235,6 +276,112 @@ mod tests {
 
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn byte_limit_counts_prefix_and_multibyte_values_before_reading_fields() {
+        let bytes = "prefix 8=FIX.4.4|58=é|".as_bytes();
+        let length = u32::try_from(bytes.len()).unwrap();
+        for limit in [length, length + 1] {
+            assert_eq!(tokenize_bounded(bytes, limit, 2).fields.len(), 2);
+        }
+        let over = tokenize_bounded(bytes, length - 1, 0);
+        assert_eq!(
+            over.kind,
+            LineKind::Skipped(SkipReason::LineBytes(length - 1))
+        );
+        assert!(over.fields.is_empty());
+        assert_eq!(over.separator, None);
+        assert_eq!(tokenize_bounded(b"", 0, 0).kind, LineKind::Empty);
+        assert_eq!(
+            tokenize_bounded(b"#", 0, 0).kind,
+            LineKind::Skipped(SkipReason::LineBytes(0))
+        );
+    }
+
+    #[test]
+    fn the_scanner_stops_at_the_first_excess_field_including_after_a_prefix() {
+        for separator in [b'|', b'^', 1] {
+            for prefix in ["", "[log] "] {
+                let line = format!("{prefix}8=FIX.4.4|58=|58=value|junk")
+                    .replace('|', &char::from(separator).to_string());
+                let bytes = line.as_bytes();
+                for limit in [3, 4] {
+                    let tokens = tokenize_bounded(bytes, u32::MAX, limit);
+                    assert_eq!(tokens.fields.len(), 3);
+                    assert!(tokens.trailing_junk_at.is_some());
+                }
+                for limit in [0, 2] {
+                    let tokens = tokenize_bounded(bytes, u32::MAX, limit);
+                    assert_eq!(
+                        tokens.kind,
+                        LineKind::Skipped(SkipReason::FieldsPerLine(limit))
+                    );
+                    assert!(tokens.fields.is_empty());
+                    assert_eq!(tokens.trailing_junk_at, None);
+                    assert_eq!(tokens.prefix_len.index(), 0);
+                }
+            }
+        }
+        assert_eq!(
+            tokenize_bounded(b"prose", u32::MAX, 0).kind,
+            LineKind::Other
+        );
+        let mut long_value = b"58=".to_vec();
+        long_value.resize(2 * 1024 * 1024, b'A');
+        assert_eq!(tokenize_bounded(&long_value, u32::MAX, 1).fields.len(), 1);
+    }
+
+    #[test]
+    fn limit_checks_match_tokenization_without_retaining_spans() {
+        for bytes in [
+            &b""[..],
+            b"1=",
+            b"1=|1=",
+            b"1=|1=|1=",
+            b"  1=|1=|junk|1=",
+            b"  # 1=|1=|1=",
+            b"log [S] 8=^1=^1=^",
+            b"logx8=|1=|1=",
+            b"1=|8=\x011=^|\x011=",
+            b"21474836481=|1=",
+            b"1=\xff|1=\x80",
+        ] {
+            let length = bytes.len() as u32;
+            for line_limit in [0, length.saturating_sub(1), length, u32::MAX] {
+                for field_limit in [0, 1, 2, 3, u32::MAX] {
+                    let kind = tokenize_bounded(bytes, line_limit, field_limit).kind;
+                    assert_eq!(line_kind(bytes, line_limit, field_limit), kind);
+                    let expected = match kind {
+                        LineKind::Skipped(reason) => Err(reason),
+                        _ => Ok(()),
+                    };
+                    assert_eq!(
+                        check_limits(bytes, line_limit, field_limit),
+                        expected,
+                        "{bytes:?}, bytes={line_limit}, fields={field_limit}"
+                    );
+                }
+            }
+            assert_eq!(
+                scan_line::<false>(bytes, u32::MAX)
+                    .unwrap()
+                    .fields
+                    .capacity(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn line_bound_is_inclusive_and_also_bounds_standalone_offsets() {
+        assert_eq!(check_line_bytes(u32::MAX as usize, u32::MAX), Ok(()));
+        if let Some(too_long) = (u32::MAX as usize).checked_add(1) {
+            assert_eq!(
+                check_line_bytes(too_long, u32::MAX),
+                Err(SkipReason::LineBytes(u32::MAX))
+            );
+        }
+    }
 
     fn spans(line: &str) -> Vec<(u32, u32, u32, u32, u32)> {
         tokenize(line.as_bytes())

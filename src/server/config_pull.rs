@@ -232,7 +232,8 @@ impl ServerState {
             uri: uri.clone(),
             lifetime: *self.config.lifetimes.get(uri)?,
             revision: *self.config.revisions.get(uri)?,
-            modeline: modeline_layer(open, uri),
+            version: open.version,
+            edges: ModelineEdges::capture(open, uri),
             previous: self.config.documents.get(uri).cloned(),
         })
     }
@@ -445,6 +446,8 @@ impl ServerState {
         let mut tokens = false;
         let mut diagnostics = Vec::new();
         let mut held_edits = Vec::new();
+        let line_limit_changed =
+            self.config.base.limits.line_bytes != prepared.base.config.limits.line_bytes;
         let base_unchanged = self.config.base == prepared.base.config;
         let rules_unchanged = self.config.base.diagnostics == prepared.base.config.diagnostics;
         self.config.user = prepared.user;
@@ -498,7 +501,13 @@ impl ServerState {
             if self.config.lifetimes.get(&input.uri) != Some(&input.lifetime) {
                 continue;
             }
-            if self.config.revisions.get(&input.uri) != Some(&input.revision) {
+            // An edit ignored under the old limit can become an effective directive.
+            let stale_edges = line_limit_changed
+                && self
+                    .docs
+                    .get(&input.uri)
+                    .is_some_and(|open| open.version != input.version);
+            if stale_edges || self.config.revisions.get(&input.uri) != Some(&input.revision) {
                 self.config.waiting.insert(input.uri);
                 self.config.waiting_projects |= prepared.refresh_projects;
                 continue;
@@ -512,7 +521,7 @@ impl ServerState {
             let held = self.config.held_edits.remove(&input.uri);
             self.config
                 .modelines
-                .insert(input.uri.clone(), input.modeline);
+                .insert(input.uri.clone(), document.modeline);
             let previous = self.config.documents.get(&input.uri);
             let fingerprint = Ctx::fingerprint_for(
                 &document.resolved.config,
@@ -597,18 +606,26 @@ impl ServerState {
             // interpretation; it changes what hints and diagnostics print.
             let renamed = previous.is_none_or(|previous| !previous.names.same_as(&document.names));
             let config = &document.resolved.config;
+            let other_limits_changed = previous.is_none_or(|previous| {
+                let previous = &previous.resolved.config.limits;
+                *previous
+                    != crate::config::Limits {
+                        semantic_tokens_bytes: previous.semantic_tokens_bytes,
+                        ..config.limits.clone()
+                    }
+            });
             hints |= interpretation
+                || other_limits_changed
                 || renamed
                 || previous.is_none_or(|previous| {
                     previous.resolved.config.inlay_hints != config.inlay_hints
                         || previous.resolved.config.message_summary != config.message_summary
                         || previous.resolved.config.document_link != config.document_link
-                        || previous.resolved.config.limits != config.limits
                 });
             lenses |= interpretation
+                || other_limits_changed
                 || previous.is_none_or(|previous| {
                     previous.resolved.config.message_summary != config.message_summary
-                        || previous.resolved.config.limits != config.limits
                 });
             let token_changed = interpretation
                 || previous.is_none_or(|previous| {
@@ -622,10 +639,10 @@ impl ServerState {
             if held {
                 held_edits.push(input.uri.clone());
             } else if interpretation
+                || other_limits_changed
                 || renamed
                 || previous.is_none_or(|previous| {
                     previous.resolved.config.diagnostics != config.diagnostics
-                        || previous.resolved.config.limits != config.limits
                         || previous.resolved.warnings != document.resolved.warnings
                 })
             {
@@ -738,7 +755,8 @@ impl ServerState {
         let Some(document) = self.docs.get(uri) else {
             return false;
         };
-        let modeline = modeline_layer(document, uri);
+        let modeline =
+            ModelineEdges::capture(document, uri).parse(uri, self.config.base.limits.line_bytes);
         if self.config.modelines.get(uri) == Some(&modeline) {
             return false;
         }
@@ -847,24 +865,35 @@ impl ServerState {
     }
 }
 
-/// Parse edge modelines even when currently disabled.
-///
-/// The merge applies the enable setting, so a batch that enables modelines must
-/// already carry the parsed layer rather than require a second pass.
-/// Only a file document carries modelines. The scheme decides, not whether the
-/// path converts: `file:///a.fix` has no drive letter, so on Windows it
-/// converts to nothing, yet its text is as much a file as any other.
-fn modeline_layer(document: &crate::document::Document, uri: &Uri) -> SettingsLayer {
-    if uri.scheme() != "file" {
-        return SettingsLayer::new(overrides::Origin::new(SourceKind::Modeline, uri.as_str()));
+#[derive(Clone)]
+pub(super) struct ModelineEdges {
+    count: usize,
+    lines: Vec<(usize, Arc<[u8]>)>,
+}
+
+impl ModelineEdges {
+    fn capture(document: &crate::document::Document, uri: &Uri) -> Self {
+        let count = if uri.scheme() == "file" {
+            document.content_lines()
+        } else {
+            0
+        };
+        let lines = overrides::modeline::edge_indices(count)
+            .map(|index| (index, document.lines[index].bytes.clone()))
+            .collect();
+        Self { count, lines }
     }
-    let count = document.content_lines();
-    overrides::modeline::parse_numbered(
-        overrides::modeline::edge_indices(count)
-            .map(|index| (index, document.lines[index].bytes.as_ref())),
-        count,
-        uri.as_str(),
-    )
+
+    pub(super) fn parse(&self, uri: &Uri, line_bytes: u32) -> SettingsLayer {
+        overrides::modeline::parse_numbered(
+            self.lines
+                .iter()
+                .filter(|(_, bytes)| bytes.len() <= line_bytes as usize)
+                .map(|(index, bytes)| (*index, bytes.as_ref())),
+            self.count,
+            uri.as_str(),
+        )
+    }
 }
 
 /// Convert a workspace-folder JSON value into a local filesystem path.
@@ -964,6 +993,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn changing_only_the_highlight_budget_preserves_analysis_and_idle_diagnostics() {
+        let (mut state, uri) =
+            crate::server::testing::state_with(crate::server::testing::HEARTBEAT);
+        state.diagnostics.forget(&uri);
+        let idle = state.diagnostics.tick_in();
+        let previous = state.config.documents[&uri].clone();
+        state.on_did_change_configuration(
+            json!({"settings":{"fix":{"limits":{"semanticTokensBytes":0}}}}),
+        );
+        crate::server::testing::settle(&mut state);
+        let current = &state.config.documents[&uri];
+        assert_eq!(current.resolved.config.limits.semantic_tokens_bytes, 0);
+        assert!(Arc::ptr_eq(&previous.ctx, &current.ctx));
+        assert_eq!(current.repair_generation, previous.repair_generation);
+        assert_eq!(state.diagnostics.tick_in(), idle);
+    }
+
     /// `file:///a.fix` has no drive letter, so on Windows it converts to no
     /// path; its modeline is read all the same, and a non-file scheme's is not.
     #[test]
@@ -974,11 +1021,13 @@ mod tests {
             Ctx::for_test("FIX.4.4"),
         );
         let file = Uri::parse("file:///a.fix").unwrap();
-        assert!(modeline_layer(&document, &file)
+        assert!(ModelineEdges::capture(&document, &file)
+            .parse(&file, u32::MAX)
             .get("hover.enabled")
             .is_some());
         let untitled = Uri::parse("untitled:a.fix").unwrap();
-        assert!(modeline_layer(&document, &untitled)
+        assert!(ModelineEdges::capture(&document, &untitled)
+            .parse(&untitled, u32::MAX)
             .get("hover.enabled")
             .is_none());
     }

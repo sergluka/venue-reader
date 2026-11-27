@@ -27,7 +27,10 @@ expression: first_report
     "limits.diagnosticsPerDocument": 10000,
     "limits.dictionaryBytes": 16777216,
     "limits.documentSymbolItems": 50000,
+    "limits.fieldsPerLine": 1000000,
+    "limits.lineBytes": 52428800,
     "limits.rangeLines": 2000,
+    "limits.semanticTokensBytes": 65536,
     "limits.semanticTokensFullLines": 2000,
     "messageSummary.channels.codeLens": true,
     "messageSummary.channels.inlayHints": false,
@@ -130,7 +133,19 @@ expression: first_report
       "layer": "default",
       "source": "default"
     },
+    "limits.fieldsPerLine": {
+      "layer": "default",
+      "source": "default"
+    },
+    "limits.lineBytes": {
+      "layer": "default",
+      "source": "default"
+    },
     "limits.rangeLines": {
+      "layer": "default",
+      "source": "default"
+    },
+    "limits.semanticTokensBytes": {
       "layer": "default",
       "source": "default"
     },

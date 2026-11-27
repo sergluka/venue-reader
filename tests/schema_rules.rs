@@ -77,6 +77,15 @@ fn user_schemas_list_the_registered_limits_with_their_effective_defaults() {
                 "{filename}: {name}"
             );
         }
+        for (key, expected) in [
+            ("lineBytes", 52_428_800),
+            ("fieldsPerLine", 1_000_000),
+            ("semanticTokensBytes", 65_536),
+        ] {
+            assert_eq!(properties[key]["minimum"], 0);
+            assert_eq!(properties[key]["maximum"], u32::MAX);
+            assert_eq!(properties[key]["default"], expected);
+        }
         assert_eq!(properties["decodeResultBytes"]["minimum"], 0);
         assert_eq!(properties["decodeResultBytes"]["default"], 8 * 1024 * 1024);
     }
@@ -87,6 +96,29 @@ fn user_schemas_list_the_registered_limits_with_their_effective_defaults() {
     let project: Value =
         serde_json::from_str(include_str!("../schema/venue-reader-project.schema.json")).unwrap();
     assert!(project["properties"].get("limits").is_none());
+}
+
+#[test]
+fn document_sources_cannot_raise_or_lower_global_line_and_highlighting_limits() {
+    for key in ["lineBytes", "fieldsPerLine", "semanticTokensBytes"] {
+        let path = format!("limits.{key}");
+        for value in [0, u32::MAX] {
+            let assignment = format!("{path}={value}");
+            let directive = format!("# fix: {assignment}");
+            let layers = [
+                project::parse(&assignment, Path::new(".venue-reader.toml"))
+                    .unwrap()
+                    .layer,
+                modeline::parse(&[directive.as_bytes()], "file:///test.fix"),
+            ];
+            for layer in layers {
+                assert!(layer.get(&path).is_none());
+                assert_eq!(layer.warnings.len(), 1);
+                assert_eq!(layer.warnings[0].key, path);
+                assert!(layer.warnings[0].message.contains("global-only"));
+            }
+        }
+    }
 }
 
 #[test]

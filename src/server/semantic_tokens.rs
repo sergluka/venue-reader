@@ -15,9 +15,12 @@ use serde_json::{json, Value};
 
 use super::dispatch::{Dispatched, Notices, Snapshot};
 use super::ServerState;
+use crate::codec::{ByteOffset, LineAnalysis};
 use crate::ctx::analyze;
-use crate::document::{Column, Columns, Edited, LineNo};
-use crate::render::tokens::{classify, Token};
+use crate::document::{
+    byte_to_position, position_to_byte, Column, Columns, Edited, Line, LineNo, PositionEncoding,
+};
+use crate::render::tokens::{classify, classify_range, Token};
 
 /// Integers per token, fixed by the protocol.
 const STRIDE: usize = 5;
@@ -46,7 +49,8 @@ pub fn encode(
             counts.push(0);
             continue;
         };
-        counts.push(tokens.len() as u32);
+        let initial_size = data.len();
+        let mut wire_end = None;
         // One walk of the line for every offset on it. Both ends of every
         // token, because a length is a distance in the negotiated encoding and
         // not a count of bytes; duplicates — an overlay starts where its first
@@ -61,6 +65,15 @@ pub fn encode(
 
         for token in &tokens {
             let start = columns.at(token.range.start);
+            let mut end = columns.at(token.range.end);
+            if !end.fits_lsp() {
+                end = *wire_end.get_or_insert_with(|| {
+                    last_wire_column(line, snapshot.encoding, i32::MAX as u32)
+                });
+            }
+            if start >= end {
+                continue;
+            }
             let delta_line = no.raw().saturating_sub(previous_line.raw());
             // A new line resets the start; the same line measures from the
             // token before it.
@@ -72,13 +85,14 @@ pub fn encode(
             data.extend_from_slice(&[
                 delta_line,
                 delta_start,
-                columns.at(token.range.end) - start,
+                end - start,
                 token.kind as u32,
                 token.mods,
             ]);
             previous_line = no;
             previous_start = start;
         }
+        counts.push(((data.len() - initial_size) / STRIDE) as u32);
     }
 
     debug_assert_eq!(
@@ -86,6 +100,65 @@ pub fn encode(
         0,
         "a token is {STRIDE} integers, always"
     );
+}
+
+/// A start inside a UTF-16 surrogate pair still intersects the character's token.
+fn start_byte(line: &Line, column: Column, encoding: PositionEncoding) -> usize {
+    let after = position_to_byte(line, column, encoding);
+    if encoding == PositionEncoding::Utf16
+        && after >= 4
+        && matches!(line.bytes[after - 4], 0xf0..=0xf4)
+    {
+        if let Some(byte) = ByteOffset::from_len(after) {
+            if byte_to_position(line, byte, encoding) > column {
+                return after - 4;
+            }
+        }
+    }
+    after
+}
+
+/// Keep a clipped end on a character boundary in the negotiated encoding.
+fn last_wire_column(line: &Line, encoding: PositionEncoding, limit: u32) -> Column {
+    let column = Column::new(limit);
+    if line.is_ascii {
+        return column;
+    }
+    match encoding {
+        PositionEncoding::Utf16 => {
+            let after = position_to_byte(line, column, encoding);
+            let measured =
+                ByteOffset::from_len(after).map(|byte| byte_to_position(line, byte, encoding));
+            if measured.is_some_and(|actual| actual > column) {
+                Column::new(limit - 1)
+            } else {
+                column
+            }
+        }
+        PositionEncoding::Utf8 => {
+            let at = limit as usize;
+            // A valid code point crossing the cut can start at most three bytes before it.
+            for start in at.saturating_sub(3)..at {
+                let Some(tail) = line
+                    .bytes
+                    .get(start..start.saturating_add(4).min(line.bytes.len()))
+                else {
+                    continue;
+                };
+                let valid = std::str::from_utf8(tail).unwrap_or_else(|error| {
+                    std::str::from_utf8(&tail[..error.valid_up_to()]).expect("valid prefix")
+                });
+                if valid
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| start + ch.len_utf8() > at)
+                {
+                    return Column::new(start as u32);
+                }
+            }
+            column
+        }
+    }
 }
 
 /// What a client was last told, so an edit can be answered as one.
@@ -96,6 +169,7 @@ pub fn encode(
 pub(crate) struct Digest {
     pub result_id: u64,
     pub counts: Vec<u32>,
+    admitted: Vec<bool>,
     /// What has happened to the document since the answer that carries this id.
     pub edited: Edited,
 }
@@ -112,27 +186,31 @@ struct Answer {
     data: Vec<u32>,
 }
 
+struct ByteBudget(usize);
+
+impl ByteBudget {
+    fn admit(&mut self, bytes: usize) -> bool {
+        let Some(remaining) = self.0.checked_sub(bytes) else {
+            return false;
+        };
+        self.0 = remaining;
+        bytes != 0
+    }
+}
+
 impl ServerState {
-    /// The viewport shape. Widened to whole lines, because a token is a whole
-    /// `tag=value` and half of one would be a token the client cannot place.
+    /// A viewport receives whole tokens intersecting its half-open range.
     pub(super) fn semantic_tokens_range_task_prepared(
         &mut self,
         params: SemanticTokensRangeParams,
     ) -> Dispatched {
         let uri = params.text_document.uri.clone();
-        if !self
-            .effective_config(&uri)
-            .unwrap_or(&self.config.base)
-            .semantic_tokens
-            .enabled
-        {
+        let config = self.effective_config(&uri).unwrap_or(&self.config.base);
+        if !config.semantic_tokens.enabled {
             return Dispatched::Now(Ok(Value::Null));
         }
-        let cap = self
-            .effective_config(&uri)
-            .unwrap_or(&self.config.base)
-            .limits
-            .range_lines;
+        let cap = config.limits.range_lines;
+        let mut budget = ByteBudget(config.limits.semantic_tokens_bytes as usize);
         let Some(snapshot) = self.snapshot_for(&uri) else {
             return Dispatched::Now(Ok(Value::Null));
         };
@@ -146,14 +224,11 @@ impl ServerState {
         } else {
             params.range.end.line.saturating_add(1)
         };
-        if past <= first {
+        if params.range.start >= params.range.end || past <= first {
             return Dispatched::Now(Ok(json!({ "data": [] })));
         }
         let last = past - 1;
-        // `[]` and a reason, never a shorter answer: the protocol lets a server
-        // colour a *broader* range than it was asked for and says nothing about
-        // a narrower one, so a truncated answer is one a client cannot tell
-        // from "nothing to colour there".
+        // Apply the line-count gate to the client's range before clipping it to the document.
         if (last - first) as usize >= cap {
             self.log_message(
                 MessageType::Info,
@@ -171,15 +246,37 @@ impl ServerState {
             Box::new(move |snapshot: &Snapshot, _: &mut Notices| {
                 // The one shape here that may populate a line's cache: a
                 // viewport is bounded by the screen, and the user scrolls back.
-                let run: Vec<(LineNo, Vec<Token>)> = (first..=last)
-                    .filter_map(|at| {
-                        let no = LineNo::new(at);
-                        let line = snapshot.line(no)?;
-                        let mut out = Vec::new();
-                        classify(&line.bytes, &snapshot.analysis(line), overlays, &mut out);
-                        Some((no, out))
-                    })
-                    .collect();
+                let run = snapshot.line_span(first, past).lines().filter_map(|no| {
+                    let at = no.raw();
+                    let line = snapshot.line(no)?;
+                    if budget.0 == 0 || line.bytes.len() > snapshot.ctx.line_bytes as usize {
+                        return None;
+                    }
+                    let column_byte =
+                        |column| position_to_byte(line, Column::new(column), snapshot.encoding);
+                    let start = if at == first && params.range.start.character != 0 {
+                        start_byte(
+                            line,
+                            Column::new(params.range.start.character),
+                            snapshot.encoding,
+                        )
+                    } else {
+                        0
+                    };
+                    let end = if at == params.range.end.line {
+                        column_byte(params.range.end.character)
+                    } else {
+                        line.bytes.len()
+                    };
+                    if !budget.admit(end.saturating_sub(start)) {
+                        return None;
+                    }
+                    let analysis = snapshot.analysis(line);
+                    let window = ByteOffset::from_len(start)?..ByteOffset::from_len(end)?;
+                    let mut out = Vec::new();
+                    classify_range(&line.bytes, &analysis, overlays, window, &mut out);
+                    Some((no, out))
+                });
                 let mut data = Vec::new();
                 let mut counts = Vec::new();
                 // Line 0, not the viewport's first line: a range answer is a
@@ -199,7 +296,10 @@ impl ServerState {
         let Some(snapshot) = self.coloured(&uri) else {
             return Dispatched::Now(Ok(Value::Null));
         };
-        Dispatched::Lazy(Ok(Box::new(self.colour_whole(uri, &snapshot, true))))
+        let admitted = self.full_admission(&uri, &snapshot);
+        Dispatched::Lazy(Ok(Box::new(
+            self.colour_whole(uri, &snapshot, admitted, true),
+        )))
     }
 
     /// An edit to the last answer, or a whole one when nothing can be spliced.
@@ -211,11 +311,7 @@ impl ServerState {
         let Some(snapshot) = self.coloured(&uri) else {
             return Dispatched::Now(Ok(Value::Null));
         };
-        let cap = self
-            .effective_config(&uri)
-            .unwrap_or(&self.config.base)
-            .limits
-            .semantic_tokens_full_lines;
+        let admitted = self.full_admission(&uri, &snapshot);
         let overlays = self.client.overlaps_tokens;
 
         // Taken out before the answer is built, not after: if the work below
@@ -229,14 +325,16 @@ impl ServerState {
             .tokens
             .remove(&uri)
             .filter(|digest| digest.result_id.to_string() == params.previous_result_id)
-            .and_then(|digest| splice(&digest, &snapshot, cap, overlays));
+            .and_then(|digest| splice(&digest, &snapshot, &admitted, overlays));
 
         let Some(Spliced { edits, counts }) = spliced else {
             // No notice here: after the first whole answer a client sends
             // edits, and saying it again would say it on every keystroke.
-            return Dispatched::Lazy(Ok(Box::new(self.colour_whole(uri, &snapshot, false))));
+            return Dispatched::Lazy(Ok(Box::new(
+                self.colour_whole(uri, &snapshot, admitted, false),
+            )));
         };
-        let result_id = self.publish(uri, counts);
+        let result_id = self.publish(uri, counts, admitted);
         Dispatched::Lazy(Ok(Box::new(SemanticTokensDelta {
             result_id: Some(result_id.to_string()),
             edits,
@@ -258,42 +356,68 @@ impl ServerState {
         self.snapshot_for(uri)
     }
 
-    /// Colour a document from its first line, and publish what was sent.
-    fn colour_whole(&mut self, uri: Uri, snapshot: &Snapshot, notify: bool) -> Answer {
-        let cap = self
-            .effective_config(&uri)
+    fn full_admission(&self, uri: &Uri, snapshot: &Snapshot) -> Vec<bool> {
+        let limits = &self
+            .effective_config(uri)
             .unwrap_or(&self.config.base)
-            .limits
-            .semantic_tokens_full_lines;
+            .limits;
+        let mut budget = ByteBudget(limits.semantic_tokens_bytes as usize);
+        let end = snapshot
+            .content_lines()
+            .min(limits.semantic_tokens_full_lines);
+        snapshot.lines[..end]
+            .iter()
+            .map(|line| {
+                line.bytes.len() <= snapshot.ctx.line_bytes as usize
+                    && budget.admit(line.bytes.len())
+            })
+            .collect()
+    }
+
+    /// Colour a document from its first line, and publish what was sent.
+    fn colour_whole(
+        &mut self,
+        uri: Uri,
+        snapshot: &Snapshot,
+        admitted: Vec<bool>,
+        notify: bool,
+    ) -> Answer {
+        let cap = admitted.len();
         let lines = snapshot.content_lines();
-        let last = lines.min(cap);
         let mut data = Vec::new();
         let mut counts = Vec::new();
         // `analyze` and drop: a whole-document walk may not populate a cache,
         // which is what `dirty_run` does with no line to stop at.
-        let (run, _) = dirty_run(snapshot, 0, usize::MAX, last, self.client.overlaps_tokens);
+        let (run, _) = dirty_run(
+            snapshot,
+            0,
+            usize::MAX,
+            &admitted,
+            self.client.overlaps_tokens,
+        );
         encode(run, snapshot, LineNo::new(0), &mut data, &mut counts);
 
         if notify && lines > cap {
             self.log_message(
                 MessageType::Info,
                 &format!(
-                    "venue-reader: {} — colouring the first {cap} of {lines} lines; \
-                     raise fix.limits.semanticTokensFullLines to colour more",
+                    "venue-reader: {} — full highlighting considers the first {cap} of {lines} lines \
+                     (fix.limits.semanticTokensFullLines). Within those lines, fix.limits.semanticTokensBytes \
+                     limits the total source bytes highlighted.",
                     uri.as_str(),
                 ),
             );
         }
         // Published last: the answer is built before the digest is replaced, so
         // a failure above leaves the client's id matching what it still holds.
-        let result_id = self.publish(uri, counts);
+        let result_id = self.publish(uri, counts, admitted);
         Answer {
             result_id: result_id.to_string(),
             data,
         }
     }
 
-    fn publish(&mut self, uri: Uri, counts: Vec<u32>) -> u64 {
+    fn publish(&mut self, uri: Uri, counts: Vec<u32>, admitted: Vec<bool>) -> u64 {
         self.token_results += 1;
         let result_id = self.token_results;
         self.tokens.insert(
@@ -301,6 +425,7 @@ impl ServerState {
             Digest {
                 result_id,
                 counts,
+                admitted,
                 edited: Edited::Nothing,
             },
         );
@@ -317,11 +442,13 @@ struct Spliced {
 /// Where a token run starts in the flat array: five integers per token, so an
 /// edit's offsets count *integers* and not tokens.
 fn offset_of(counts: &[u32], line: usize) -> Option<u32> {
-    // An edit's offsets are `u32` by protocol, so an answer too large to
-    // address is one to refuse rather than to wrap: a wrapped `start` points
-    // into the middle of a token and silently recolours the rest of the file.
-    let tokens: u32 = counts[..line.min(counts.len())].iter().sum();
-    tokens.checked_mul(STRIDE as u32)
+    let tokens = counts[..line.min(counts.len())]
+        .iter()
+        .copied()
+        .try_fold(0u32, u32::checked_add)?;
+    tokens
+        .checked_mul(STRIDE as u32)
+        .filter(|&offset| offset <= i32::MAX as u32)
 }
 
 /// The last line before `line` that emitted anything — the token an edit's
@@ -344,7 +471,12 @@ fn predecessor(counts: &[u32], line: usize) -> LineNo {
 /// The first re-encodes the changed lines; the second exists whenever the
 /// change moved the cap boundary, which an insertion near the top does even
 /// though it is nowhere near the cap.
-fn splice(digest: &Digest, snapshot: &Snapshot, cap: usize, overlays: bool) -> Option<Spliced> {
+fn splice(
+    digest: &Digest,
+    snapshot: &Snapshot,
+    admitted: &[bool],
+    overlays: bool,
+) -> Option<Spliced> {
     let (first, last, delta) = match digest.edited {
         Edited::Nothing => {
             return Some(Spliced {
@@ -361,7 +493,17 @@ fn splice(digest: &Digest, snapshot: &Snapshot, cap: usize, overlays: bool) -> O
     };
     let old = &digest.counts;
     let k_old = old.len();
-    let k_new = snapshot.content_lines().min(cap);
+    let k_new = admitted.len();
+    // A size-changing edit can change admission for several otherwise unchanged lines.
+    let last = (last.saturating_add(1)..k_new)
+        .rev()
+        .find(|&at| {
+            usize::try_from(at as i64 - delta)
+                .ok()
+                .and_then(|old_line| digest.admitted.get(old_line))
+                .is_some_and(|&was| was != admitted[at])
+        })
+        .unwrap_or(last);
 
     let mut edits = Vec::new();
     let mut counts = old.clone();
@@ -372,7 +514,7 @@ fn splice(digest: &Digest, snapshot: &Snapshot, cap: usize, overlays: bool) -> O
         // where it was and only the boundary itself can have moved.
         (k_new.min(k_old), k_new.min(k_old))
     } else {
-        let (run, end) = dirty_run(snapshot, first, last, k_new, overlays);
+        let (run, end) = dirty_run(snapshot, first, last, admitted, overlays);
         let mut data = Vec::new();
         let mut run_counts = Vec::new();
         encode(
@@ -418,7 +560,7 @@ fn splice(digest: &Digest, snapshot: &Snapshot, cap: usize, overlays: bool) -> O
     };
 
     let join_new = join_new.min(k_new).min(counts.len());
-    let (run, _) = dirty_run(snapshot, join_new, usize::MAX, k_new, overlays);
+    let (run, _) = dirty_run(snapshot, join_new, usize::MAX, admitted, overlays);
     counts.truncate(join_new);
     let mut tail = Vec::new();
     let mut tail_counts = Vec::new();
@@ -461,23 +603,40 @@ fn dirty_run(
     snapshot: &Snapshot,
     first: usize,
     last: usize,
-    stop: usize,
+    admitted: &[bool],
     overlays: bool,
 ) -> (Vec<(LineNo, Vec<Token>)>, usize) {
     let mut run = Vec::new();
     let mut end = first;
-    for at in first..stop {
+    for (at, &admit) in admitted.iter().enumerate().skip(first) {
         let no = LineNo::new(at as u32);
-        let Some(line) = snapshot.line(no) else {
-            break;
-        };
+        end = at;
+        if !admit {
+            run.push((no, Vec::new()));
+            continue;
+        }
+        let line = &snapshot.lines[at];
         let mut out = Vec::new();
         // An edit is not viewport-bounded, so it may not populate a cache.
         let analysis = analyze(&line.bytes, &snapshot.ctx);
-        classify(&line.bytes, &analysis, overlays, &mut out);
+        if line.bytes.len() > i32::MAX as usize && !matches!(analysis, LineAnalysis::Skipped(_)) {
+            // A delta needs its first *emitted* successor, even after a long whitespace prefix.
+            let column = last_wire_column(line, snapshot.encoding, i32::MAX as u32);
+            let end = position_to_byte(line, column, snapshot.encoding);
+            if let Some(end) = ByteOffset::from_len(end) {
+                classify_range(
+                    &line.bytes,
+                    &analysis,
+                    overlays,
+                    ByteOffset::new(0)..end,
+                    &mut out,
+                );
+            }
+        } else {
+            classify(&line.bytes, &analysis, overlays, &mut out);
+        }
         let tokenised = !out.is_empty();
         run.push((no, out));
-        end = at;
         if at > last && tokenised {
             break;
         }
@@ -542,6 +701,107 @@ mod tests {
         let (mut data, mut counts) = (Vec::new(), Vec::new());
         encode(runs, &snapshot, LineNo::new(0), &mut data, &mut counts);
         (data, counts)
+    }
+
+    #[test]
+    fn deltas_outside_wire_integer_offsets_fall_back_to_full() {
+        let largest = i32::MAX as u32 / STRIDE as u32;
+        assert_eq!(offset_of(&[largest], 1), Some(largest * STRIDE as u32));
+        assert_eq!(offset_of(&[largest, 1], 2), None);
+        assert_eq!(offset_of(&[u32::MAX, 1], 2), None);
+    }
+
+    #[test]
+    fn wire_end_avoids_partial_characters() {
+        let snapshot = snapshot("a🚀z", PositionEncoding::Utf8);
+        let line = snapshot.line(LineNo::new(0)).unwrap();
+        for limit in 1..5 {
+            assert_eq!(
+                last_wire_column(line, PositionEncoding::Utf8, limit),
+                Column::new(1)
+            );
+        }
+        assert_eq!(
+            last_wire_column(line, PositionEncoding::Utf8, 5),
+            Column::new(5)
+        );
+        assert_eq!(
+            last_wire_column(line, PositionEncoding::Utf16, 2),
+            Column::new(1)
+        );
+        assert_eq!(
+            last_wire_column(line, PositionEncoding::Utf16, 3),
+            Column::new(3)
+        );
+    }
+
+    #[test]
+    #[ignore = "run in release mode to measure the million-field case"]
+    fn warm_range_traversal_on_dense_lines() {
+        use crate::document::position::work::{DECODED, VALIDATED};
+        use crate::render::tokens::work::{ANCESTORS, LOOKUPS, VISITS};
+        use std::time::Instant;
+
+        let prefix = "8=FIX.4.4|35=D|453=1|448=ABCDEFGHIJKLMNOPQRSTUVWXYZ|447=D|452=1|802=1|523=X|803=1|54=1|";
+        let suffix = "43=Y|49=Z|56=A|";
+        let mut first_answers = Vec::new();
+        for count in [1_000, 1_000_000] {
+            let fixed_fields = prefix.matches('=').count() + suffix.matches('=').count();
+            let text = format!(
+                "{prefix}{}{suffix}",
+                "58=αabcdefghijklmnopq|".repeat(count - fixed_fields)
+            );
+            let (mut state, uri) = super::super::testing::state_with(&text);
+            state.encoding = PositionEncoding::Utf16;
+            let snapshot = state.snapshot_for(&uri).unwrap();
+            let line = snapshot.line(LineNo::new(0)).unwrap();
+            let started = Instant::now();
+            let analysis = snapshot.analysis(line);
+            let cold_us = started.elapsed().as_micros();
+            assert_eq!(analysis.message().unwrap().fields.len(), count);
+            let width = text.encode_utf16().count() as u32;
+            let mut answer_index = 0;
+            for overlays in [false, true] {
+                state.client.overlaps_tokens = overlays;
+                for (label, start) in [("prefix", 0), ("middle", width / 2), ("end", width - 80)] {
+                    let params: SemanticTokensRangeParams = serde_json::from_value(json!({
+                        "textDocument":{"uri":uri.as_str()},
+                        "range":{"start":{"line":0,"character":start},"end":{"line":0,"character":start + 80}}
+                    })).unwrap();
+                    let first_request = Instant::now();
+                    let actual = super::super::testing::answered(
+                        state.semantic_tokens_range_task_prepared(params.clone()),
+                    );
+                    let initial_us = first_request.elapsed().as_micros();
+                    if label == "prefix" {
+                        if count == 1_000 {
+                            first_answers.push(actual.clone());
+                        } else {
+                            assert_eq!(actual, first_answers[answer_index]);
+                        }
+                        answer_index += 1;
+                    }
+                    let token_count = actual["data"].as_array().unwrap().len() / STRIDE;
+                    let mut samples = Vec::new();
+                    for _ in 0..9 {
+                        for counter in [&DECODED, &VALIDATED, &ANCESTORS, &LOOKUPS, &VISITS] {
+                            counter.set(0);
+                        }
+                        let started = Instant::now();
+                        let answer = super::super::testing::answered(
+                            state.semantic_tokens_range_task_prepared(params.clone()),
+                        );
+                        samples.push(started.elapsed().as_nanos());
+                        assert_eq!(answer, actual);
+                        assert!(VISITS.get() <= 14 && LOOKUPS.get() <= 22 && ANCESTORS.get() <= 2);
+                        assert!(DECODED.get() < 17_000 && VALIDATED.get() < 17_000);
+                    }
+                    samples.sort_unstable();
+                    println!("fields={count} overlays={overlays} {label} analysis_us={cold_us} first_request_us={initial_us} warm_median_ns={} visited={} lookup={} ancestors={} utf16_chars={} utf8_validated_bytes={} tokens={token_count} result_bytes={}",
+                        samples[4],VISITS.get(),LOOKUPS.get(),ANCESTORS.get(),DECODED.get(),VALIDATED.get(),actual.to_string().len());
+                }
+            }
+        }
     }
 
     /// The client's own loop: edits are ascending and disjoint in the original's
@@ -879,6 +1139,36 @@ mod tests {
         assert_eq!(edits_of(&answer).len(), 0, "{answer}");
     }
 
+    #[test]
+    #[cfg(not(feature = "bench-no-line-cache"))]
+    fn range_budget_skips_a_fragment_without_caching_it() {
+        let (mut state, uri) = coloured("8=A\n8=AAAAAAA\n8=B", 100);
+        state.config.base.limits.semantic_tokens_bytes = 6;
+        super::super::testing::reconfigure(&mut state);
+        let answer = ask_range(&mut state, &uri, 0, 3);
+        assert_eq!(integers(&answer["data"]).len(), 4 * STRIDE);
+        assert_eq!(
+            super::super::testing::cached(&mut state, &uri),
+            [true, false, true]
+        );
+    }
+
+    #[test]
+    fn deltas_replace_unchanged_lines_when_their_byte_budget_moves() {
+        let text = "#12345\n#b\n#cc\n#d\n#e";
+        let (mut state, uri) = coloured(text, 100);
+        state.config.base.limits.semantic_tokens_bytes = 9;
+        super::super::testing::reconfigure(&mut state);
+        let (id, before) = ask_full(&mut state, &uri);
+        assert_eq!(before.len(), 2 * STRIDE);
+        edit_at(&mut state, &uri, 2, (0, 1, 0, 6), "x");
+        agrees_with_a_fresh_answer(&mut state, &uri, &before, &id);
+        let (id, before) = ask_full(&mut state, &uri);
+        assert_eq!(before.len(), 4 * STRIDE);
+        edit_at(&mut state, &uri, 3, (0, 1, 0, 2), "12345");
+        agrees_with_a_fresh_answer(&mut state, &uri, &before, &id);
+    }
+
     proptest::proptest! {
         /// The property the whole delta exists to keep, over random line edits
         /// against random caps: whatever the server sends — edits or a whole
@@ -886,13 +1176,16 @@ mod tests {
         /// had it asked again.
         #[test]
         fn a_delta_leaves_the_client_holding_the_fresh_answer(
-            lines in 1usize..7,
+            widths in proptest::collection::vec(0usize..14, 1..7),
             cap in 1usize..7,
+            byte_budget in 0u32..130,
             edits in proptest::collection::vec((0usize..7, 0usize..7, 0usize..3), 1..3),
         ) {
             let mut model: Vec<String> =
-                (0..lines).map(|at| format!("8=FIX.4.4|35={}", at % 10)).collect();
+                widths.into_iter().map(|width| format!("8=FIX.4.4|58={}", "A".repeat(width))).collect();
             let (mut state, uri) = coloured(&model.join("\n"), cap);
+            state.config.base.limits.semantic_tokens_bytes = byte_budget;
+            super::super::testing::reconfigure(&mut state);
             let (id, before) = ask_full(&mut state, &uri);
 
             for (version, (from, to, inserted)) in edits.into_iter().enumerate() {

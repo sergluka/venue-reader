@@ -2,7 +2,6 @@
 //! Repairs keep BodyLength(9) and CheckSum(10) consistent without guessing BeginString(8).
 
 use super::{Diag, DiagnosticKind, Edit, Fixability, LineCtx, Precondition, Repair, Rule};
-use crate::codec::tokenize;
 use crate::config::Severity;
 use crate::tag;
 
@@ -163,10 +162,8 @@ pub fn repair(ctx: &LineCtx) -> Option<Repair> {
         return None;
     }
     let facts = ctx.integrity();
-    // Stage 3 dropped `MessageAnalysis::separator` as write-only, and it should
-    // stay dropped: a byte on every cached analysis for something only a repair
-    // reads. One line is cheap to re-tokenise.
-    let separator = tokenize(ctx.bytes).separator.unwrap_or(b'|') as char;
+    // An eligible line contains at least two fields separated by the wire delimiter.
+    let separator = char::from(ctx.bytes[fields[0].value_end().index()]);
 
     let mut names = Vec::new();
     let mut edits = Vec::new();

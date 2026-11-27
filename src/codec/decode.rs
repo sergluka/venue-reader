@@ -1,7 +1,7 @@
 //! Source-owned field lookup and tolerant repeating-group annotation.
 
 use super::packed::Packed16;
-use super::tokenize::{tokenize, LineKind, LineTokens};
+use super::tokenize::{check_line_bytes, tokenize, LineKind, LineTokens};
 use super::{
     Field, GroupInstance, LineAnalysis, MessageAnalysis, MessageRef, Resolution, ResolutionIssue,
     Selector, COUNTER, IN_HEADER, IN_TRAILER, NO_GROUP, SCOPE_MASK,
@@ -20,6 +20,7 @@ pub fn decode(bytes: &[u8], dict: &Dict, version: &Arc<str>) -> LineAnalysis {
 pub fn decode_non_message(tokenized: LineTokens) -> LineAnalysis {
     match tokenized.kind {
         LineKind::Empty => LineAnalysis::Empty,
+        LineKind::Skipped(reason) => LineAnalysis::Skipped(reason),
         LineKind::Comment => LineAnalysis::Comment,
         LineKind::Other | LineKind::Message => LineAnalysis::Other,
     }
@@ -78,6 +79,12 @@ pub fn decode_sources(
     version: Arc<str>,
     resolution: Resolution,
 ) -> LineAnalysis {
+    if let Err(reason) = check_line_bytes(bytes.len(), u32::MAX) {
+        return LineAnalysis::Skipped(reason);
+    }
+    if tokenized.kind != LineKind::Message {
+        return decode_non_message(tokenized);
+    }
     let msg_type = tokenized
         .fields
         .iter()
@@ -89,8 +96,8 @@ pub fn decode_sources(
     decode_resolved(bytes, tokenized, sources, version, resolution, msg_type)
 }
 
-/// [`decode_sources`] for a caller that already resolved MsgType(35).
-pub fn decode_resolved(
+/// Decode a length-checked message after resolving MsgType(35).
+pub(crate) fn decode_resolved(
     bytes: &[u8],
     tokenized: LineTokens,
     sources: DictionarySources,
@@ -98,9 +105,6 @@ pub fn decode_resolved(
     resolution: Resolution,
     msg_type: Option<MessageRef>,
 ) -> LineAnalysis {
-    if tokenized.kind != LineKind::Message {
-        return decode_non_message(tokenized);
-    }
     let mut fields: Vec<Field> = tokenized.fields.iter().map(Field::new).collect();
     let mut groups = Vec::new();
     let mut annotator = Annotator {
@@ -375,6 +379,8 @@ impl Annotator<'_> {
                 owner,
                 entry,
                 count_field_idx: count_at as u32,
+                first_field: at as u32,
+                last_field: at as u32,
                 parent_idx,
                 depth,
             });
@@ -383,6 +389,7 @@ impl Annotator<'_> {
                 self.groups.pop();
                 break;
             }
+            self.groups[instance as usize].last_field = (next - 1) as u32;
             at = next;
         }
         at

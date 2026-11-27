@@ -868,3 +868,31 @@ fn summary_metadata_requires_both_capability_and_configuration() {
         }
     }
 }
+
+#[test]
+fn a_skipped_line_contributes_no_field_or_summary_hints() {
+    let settings = json!({
+        "limits":{"lineBytes":HEARTBEAT.len()},
+        "inlayHints":{"tagNames":{"enabled":true}},
+        "messageSummary":{"template":"test summary","channels":{"inlayHints":true}}
+    });
+    let text = format!("{HEARTBEAT}\n{HEARTBEAT}58=extra|\n{HEARTBEAT}");
+    let mut client = open_with(settings, plain_caps(), &text);
+    let hints = over(&mut client, (0, 0), (3, 0));
+    let rows: std::collections::BTreeSet<_> = hints
+        .iter()
+        .map(|hint| hint["position"]["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(rows, [0, 2].into());
+    let skipped = client
+        .request(
+            "textDocument/inlayHint",
+            json!({
+                "textDocument":{"uri":URI},
+                "range":{"start":{"line":1,"character":0},"end":{"line":2,"character":0}}
+            }),
+        )
+        .unwrap();
+    assert_eq!(skipped, json!([]));
+    client.shutdown();
+}

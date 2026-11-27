@@ -27,9 +27,10 @@ use serde_json::json;
 use super::dispatch::Snapshot;
 use super::progress::{notify, Progress};
 use super::{OutgoingRequest, ServerState};
+use crate::codec::{tokenize::check_limits, LineAnalysis};
 use crate::ctx::analyze;
 use crate::document::{Column, Columns, LineNo};
-use crate::rules::{Diag, Scope};
+use crate::rules::{Checked, Diag, Scope};
 use crate::transport::Sink;
 use cap::{Admit, CappedFindings, Quota};
 
@@ -294,20 +295,7 @@ fn walk(job: &Job, reports: &Sender<Report>) -> usize {
         if number % CANCEL_EVERY == 0 && job.cancel.load(Ordering::Relaxed) {
             return total;
         }
-        // `analyze`, not `cached_analysis`: a whole-document walk may not
-        // populate the cache. This is the caller that rule exists for.
-        let analysis = analyze(&line.bytes, &job.snapshot.ctx);
-        let scope = Scope {
-            labels: analysis
-                .message()
-                .map(|message| job.snapshot.names.of_analysis(message))
-                .unwrap_or_default(),
-            // What the cap would refuse is only counted. Fixed for the whole
-            // line, so one line still renders all it finds.
-            count_from: quota.refused_from(),
-            only: None,
-        };
-        let checked = job.snapshot.rules.check(&line.bytes, &analysis, &scope);
+        let checked = check_line(&job.snapshot, &line.bytes, &quota);
         total += checked.counted;
         for diag in checked.diags {
             if let Some(key) = &diag.document_key {
@@ -353,6 +341,26 @@ fn walk(job: &Job, reports: &Sender<Report>) -> usize {
         });
     }
     total
+}
+
+fn check_line(snapshot: &Snapshot, bytes: &[u8], quota: &Quota) -> Checked {
+    let analysis = if snapshot.rules.is_empty() {
+        match check_limits(bytes, snapshot.ctx.line_bytes, snapshot.ctx.fields_per_line) {
+            Ok(()) => return Checked::default(),
+            Err(reason) => LineAnalysis::Skipped(reason),
+        }
+    } else {
+        analyze(bytes, &snapshot.ctx)
+    };
+    let scope = Scope {
+        labels: analysis
+            .message()
+            .map(|message| snapshot.names.of_analysis(message))
+            .unwrap_or_default(),
+        count_from: quota.refused_from(),
+        only: None,
+    };
+    snapshot.rules.check(bytes, &analysis, &scope)
 }
 
 /// LSP takes a `uinteger` 0..=100. An empty document is finished, not nowhere.
@@ -465,7 +473,7 @@ impl ServerState {
             .config
             .documents
             .get(uri)
-            .is_some_and(|configuration| !configuration.rules.is_empty());
+            .is_some_and(|configuration| configuration.resolved.config.diagnostics.enabled);
         let Some(version) = self.docs.get(uri).map(|doc| doc.version) else {
             return;
         };
@@ -507,7 +515,7 @@ impl ServerState {
         let Some(configuration) = self.config.documents.get(uri) else {
             return;
         };
-        let enabled = !configuration.rules.is_empty();
+        let enabled = configuration.resolved.config.diagnostics.enabled;
         let Some(version) = self.docs.get(uri).map(|doc| doc.version) else {
             return;
         };
@@ -559,13 +567,13 @@ impl ServerState {
             let Some(config) = self.effective_config(&uri) else {
                 continue;
             };
+            if !config.diagnostics.enabled {
+                continue;
+            }
             let cap = config.limits.diagnostics_per_document;
             let Some(snapshot) = self.snapshot_for(&uri) else {
                 continue; // closed between the edit and the debounce
             };
-            if snapshot.rules.is_empty() {
-                continue;
-            }
             self.diagnostics.submit(uri.clone(), snapshot, cap);
             self.request_progress(&uri);
         }
@@ -1436,5 +1444,69 @@ mod tests {
         worker.submit(doc.clone(), snapshot(BAD), 10);
         assert!(first.load(Ordering::Relaxed), "the older walk is stopped");
         assert!(worker.inflight[&doc].generation > first_generation);
+    }
+
+    #[test]
+    fn queued_diagnostics_from_an_older_line_limit_cannot_publish_at_the_same_version() {
+        let (sender, receiver) = unbounded::<lsp_server::Message>();
+        let mut state = ServerState::new(sender);
+        let doc = uri("limits.fix");
+        state.docs.insert(
+            doc.clone(),
+            Document::open(BAD.as_bytes(), 1, Ctx::for_test("FIX.4.4")),
+        );
+        state.configure_open_document(&doc);
+        super::super::testing::settle(&mut state);
+
+        let next_report = |state: &ServerState| {
+            state
+                .diagnostics
+                .reports_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("worker report")
+        };
+        let original = state.snapshot_for(&doc).unwrap();
+        state.diagnostics.submit(doc.clone(), original, 10);
+        let mut stale = Vec::new();
+        loop {
+            let report = next_report(&state);
+            let done = matches!(report, Report::Done { .. });
+            stale.push(report);
+            if done {
+                break;
+            }
+        }
+        assert!(stale
+            .iter()
+            .any(|report| matches!(report, Report::Batch { found, .. } if !found.is_empty())));
+
+        state.apply_base_value(&json!({"limits":{"fieldsPerLine":1}}));
+        super::super::testing::settle(&mut state);
+        for report in stale {
+            state.on_diagnostic_report(report);
+        }
+        let current = state.snapshot_for(&doc).unwrap();
+        assert_eq!(current.version, 1);
+        state.diagnostics.submit(doc.clone(), current, 10);
+        while state.diagnostics.inflight.contains_key(&doc) {
+            state.on_diagnostic_report(next_report(&state));
+        }
+        let mut codes = Vec::new();
+        for message in receiver.try_iter() {
+            let Message::Notification(note) = message else {
+                continue;
+            };
+            if note.method == "textDocument/publishDiagnostics" {
+                assert_eq!(note.params["version"], 1);
+                codes.extend(
+                    note.params["diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|finding| finding["code"].clone()),
+                );
+            }
+        }
+        assert_eq!(codes, [json!("analysisLimit")]);
     }
 }

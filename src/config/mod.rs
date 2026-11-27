@@ -576,6 +576,12 @@ const _: () = {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Limits {
+    /// Physical line bytes, excluding the line ending.
+    pub line_bytes: u32,
+    /// Accepted FIX fields per physical line, including repeats and the envelope.
+    pub fields_per_line: u32,
+    /// Inclusive source-byte budget per semantic-token request.
+    pub semantic_tokens_bytes: u32,
     /// Per-file cap for dictionary XML,
     /// checked on stat before opening and re-checked after a bounded read. A
     /// file over the cap is never parsed: the entry is refused with an error
@@ -657,6 +663,9 @@ impl Default for Limits {
     // Manual: a derived Default would silently mean "0 bytes allowed".
     fn default() -> Self {
         Limits {
+            line_bytes: 50 * 1024 * 1024,
+            fields_per_line: 1_000_000,
+            semantic_tokens_bytes: 65_536,
             dictionary_bytes: 16 * 1024 * 1024,
             diagnostics_per_document: 10_000,
             range_lines: 2000,

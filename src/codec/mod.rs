@@ -20,7 +20,7 @@ use std::sync::Arc;
 pub use decode::{decode, decode_non_message, decode_tokenized};
 pub use integrity::Integrity;
 
-pub use tokenize::{tokenize, FieldSpan, LineKind, LineTokens};
+pub use tokenize::{tokenize, tokenize_bounded, FieldSpan, LineKind, LineTokens, SkipReason};
 
 use crate::dictionary::{
     DictionarySources, EnumIdx, FieldIdx, FieldView, GroupIdx, GroupView, MessageView, MsgIdx,
@@ -64,15 +64,7 @@ impl ByteOffset {
         self.0 as usize
     }
 
-    /// From a length or an offset the platform sizes — `None` when it does not
-    /// fit, which callers answer rather than assert.
-    ///
-    /// The one *fallible* narrowing — `tokenize::byte` truncates, and says so.
-    /// This one exists because the editing path in `document` keeps `usize` end
-    /// to end: a wrapped offset there would apply an edit at the wrong place,
-    /// and a `debug_assert` would make that a release-only bug. Where it is
-    /// reached — hover, on a line longer than 4 GiB — saying nothing beats
-    /// pointing somewhere arbitrary.
+    /// Checked conversion from a byte length or offset on the host.
     pub fn from_len(len: usize) -> Option<ByteOffset> {
         u32::try_from(len).ok().map(ByteOffset)
     }
@@ -271,8 +263,7 @@ impl Field {
 /// `parent`, so a field stores a single index instead of a per-field list.
 ///
 /// **Instances are pushed parent-before-child**, so an instance's `parent` is
-/// always a lower index than its own. [`MessageAnalysis::group_spans`] rests
-/// on that: it merges children into parents in one reverse pass.
+/// always a lower index than its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupInstance {
     pub group: GroupIdx,
@@ -284,12 +275,15 @@ pub struct GroupInstance {
     pub count_field_idx: u32,
     /// Index into `MessageAnalysis.groups`, or [`NO_GROUP`].
     parent_idx: u32,
+    /// Inclusive field indices, including nested entries.
+    pub first_field: u32,
+    pub last_field: u32,
     /// 1 for a top-level group, at most `MAX_GROUP_DEPTH`.
     pub depth: u8,
 }
 
 // Every group entry of a cached line holds one.
-const _: () = assert!(std::mem::size_of::<GroupInstance>() == 16);
+const _: () = assert!(std::mem::size_of::<GroupInstance>() == 24);
 
 impl GroupInstance {
     /// Index of the instance this one sits inside, always lower than its own.
@@ -301,9 +295,8 @@ impl GroupInstance {
 /// Byte spans of one message's repeating groups — see
 /// [`MessageAnalysis::group_spans`], which is the only thing that builds one.
 pub struct GroupSpans {
-    /// Parallel to `MessageAnalysis.groups`. `None` only for an instance no
-    /// field was marked with, which the annotator does not produce.
-    instances: Vec<Option<Range<ByteOffset>>>,
+    /// Parallel to `MessageAnalysis.groups`.
+    instances: Vec<Range<ByteOffset>>,
     /// Keyed by count field: its span, and the definition it opens. The
     /// definition is kept here because it is in hand while the table is built,
     /// and a consumer that looks it up by scanning the instances turns a
@@ -314,7 +307,7 @@ pub struct GroupSpans {
 impl GroupSpans {
     /// What one entry covers, count fields of nested groups included.
     pub fn instance(&self, index: u32) -> Option<Range<ByteOffset>> {
-        self.instances.get(index as usize)?.clone()
+        self.instances.get(index as usize).cloned()
     }
 
     /// What every entry of one group occurrence covers, its count tag included.
@@ -330,13 +323,6 @@ impl GroupSpans {
     /// The definition a count field opens.
     pub fn group_def(&self, count_field_idx: u32) -> Option<GroupRef> {
         self.groups.get(&count_field_idx).map(|(_, of)| *of)
-    }
-}
-
-fn widen(slot: &mut Option<Range<ByteOffset>>, span: Range<ByteOffset>) {
-    match slot {
-        Some(have) => widen_range(have, span),
-        None => *slot = Some(span),
     }
 }
 
@@ -440,6 +426,7 @@ pub enum LineAnalysis {
     Comment,
     /// Non-blank, but no `tag=value` pair could be read.
     Other,
+    Skipped(SkipReason),
     Message(MessageAnalysis),
 }
 
@@ -486,6 +473,7 @@ impl LineAnalysis {
             LineAnalysis::Empty => LineKind::Empty,
             LineAnalysis::Comment => LineKind::Comment,
             LineAnalysis::Other => LineKind::Other,
+            LineAnalysis::Skipped(reason) => LineKind::Skipped(*reason),
             LineAnalysis::Message(_) => LineKind::Message,
         }
     }
@@ -567,38 +555,18 @@ impl MessageAnalysis {
             .position(|field| field.span().contains(&byte))
     }
 
-    /// PossDupFlag(43) is `Y`: the line repeats a message that was sent before.
-    pub fn is_poss_dup(&self, line: &[u8]) -> bool {
-        self.first(crate::tag::POSS_DUP_FLAG)
-            .and_then(|field| field.text(line))
-            == Some(crate::tag::YES)
+    pub fn entry_span(&self, entry: &GroupInstance) -> Range<ByteOffset> {
+        self.fields[entry.first_field as usize].tag_start
+            ..self.fields[entry.last_field as usize].value_end()
     }
 
     /// Byte spans of this message's repeating groups.
-    ///
-    /// Derived on request rather than stored on `GroupInstance`: three
-    /// request-time consumers want it — the symbol tree, expand-selection and
-    /// semantic tokens — and none is worth widening what a cached
-    /// `LineAnalysis` retains. Item 23; decision record `group-span-home.md`.
-    ///
-    /// One forward pass over `fields`, because `Annotator` marks every field
-    /// with its innermost instance and an entry's fields are contiguous; then
-    /// one reverse pass over `groups`, because instances are pushed
-    /// parent-before-child.
     pub fn group_spans(&self) -> GroupSpans {
-        let mut instances: Vec<Option<Range<ByteOffset>>> = vec![None; self.groups.len()];
-        for field in &self.fields {
-            if let Some(at) = field.group_idx() {
-                widen(&mut instances[at as usize], field.span());
-            }
-        }
-        for at in (0..self.groups.len()).rev() {
-            if let (Some(span), Some(parent)) =
-                (instances[at].clone(), self.groups[at].parent_idx())
-            {
-                widen(&mut instances[parent as usize], span);
-            }
-        }
+        let instances: Vec<_> = self
+            .groups
+            .iter()
+            .map(|entry| self.entry_span(entry))
+            .collect();
 
         // Keyed by the count field rather than by `GroupIdx`: a `GroupIdx` is a
         // *definition*, and one message may use the same definition twice.
@@ -607,9 +575,7 @@ impl MessageAnalysis {
         // pointing at `453=3` means the group.
         let mut groups: BTreeMap<u32, (Range<ByteOffset>, GroupRef)> = BTreeMap::new();
         for (at, instance) in self.groups.iter().enumerate() {
-            let Some(span) = instances[at].clone() else {
-                continue;
-            };
+            let span = instances[at].clone();
             let count = instance.count_field_idx;
             let slot = groups.entry(count).or_insert_with(|| {
                 (

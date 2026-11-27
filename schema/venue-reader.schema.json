@@ -375,6 +375,20 @@
     "limits": {
       "type": "object",
       "properties": {
+        "lineBytes": {
+          "type": "integer",
+          "default": 52428800,
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Maximum physical line size in bytes for FIX analysis. Includes the log prefix and delimiters, excluding the line ending."
+        },
+        "fieldsPerLine": {
+          "type": "integer",
+          "default": 1000000,
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Maximum number of FIX fields analyzed on one line, including the envelope, repeated tags and empty values."
+        },
         "rangeLines": {
           "type": "integer",
           "default": 2000,
@@ -387,10 +401,17 @@
           "minimum": 0,
           "description": "Maximum compact JSON result bytes for fix.decode, including metadata and escaping but excluding the JSON-RPC envelope. Oversized results fail as a whole."
         },
+        "semanticTokensBytes": {
+          "type": "integer",
+          "default": 65536,
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Inclusive source-byte budget per semantic-token request. The server skips line fragments that exceed the remaining budget and continues with later lines."
+        },
         "semanticTokensFullLines": {
           "type": "integer",
           "default": 2000,
-          "description": "How many lines from the top a whole-document colouring answers about; past it the tail is uncoloured and one log line says so. 2000 is about 255000 tokens on a dense log, which is what a client can rebuild per response without a heap it cannot afford \u2014 the server itself colours the whole file in half a second.",
+          "description": "Maximum document prefix in lines for full and delta semantic tokens. The semanticTokensBytes budget applies within this prefix.",
           "minimum": 0
         },
         "codeLensLines": {

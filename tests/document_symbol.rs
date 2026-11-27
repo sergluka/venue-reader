@@ -58,6 +58,36 @@ fn a_client_that_takes_nesting_gets_the_tree() {
     client.shutdown();
 }
 
+#[test]
+fn outline_and_literal_lenses_classify_lines_with_the_same_limits() {
+    let mut client = TestClient::start();
+    client.initialize_with(json!({
+        "capabilities": nesting_client(),
+        "initializationOptions": {"fix": {
+            "limits": {"lineBytes": 18, "fieldsPerLine": 2},
+            "messageSummary": {"template": "message"}
+        }}
+    }));
+    client.did_open(
+        URI,
+        "log 8=FIX.4.4|35=D\n8=FIX.4.4|35=D|1=\nlog 8=FIX.4.4|35=DD\n35=0",
+        1,
+    );
+    for method in ["textDocument/documentSymbol", "textDocument/codeLens"] {
+        let answer = client
+            .request(method, json!({"textDocument": {"uri": URI}}))
+            .unwrap();
+        let rows: Vec<_> = answer
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["range"]["start"]["line"].as_u64().unwrap())
+            .collect();
+        assert_eq!(rows, [0, 3], "{method}");
+    }
+    client.shutdown();
+}
+
 /// `Object` (19) and `Struct` (23) are outside the set a client understands
 /// without listing one, so a client that lists nothing gets `Class` and
 /// `Array` — and the tree is otherwise identical.

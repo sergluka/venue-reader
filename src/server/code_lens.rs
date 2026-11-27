@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use super::dispatch::{Dispatched, HandlerResult, Notices, RequestTask, Snapshot};
 use super::ServerState;
-use crate::codec::{tokenize, LineKind};
+use crate::codec::LineKind;
 use crate::document::LineNo;
 
 impl ServerState {
@@ -62,7 +62,7 @@ fn list(params: &CodeLensParams, cap: usize, snapshot: &Snapshot) -> HandlerResu
     let mut out = Vec::new();
     for (number, line) in snapshot.lines.iter().enumerate() {
         if guaranteed_title {
-            if tokenize(&line.bytes).kind != LineKind::Message {
+            if snapshot.ctx.line_kind(&line.bytes) != LineKind::Message {
                 continue;
             }
         } else {

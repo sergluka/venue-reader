@@ -237,7 +237,7 @@ fn range_actions(
             "isPreferred": true,
             "edit": { "documentChanges": [{
                 "textDocument": { "uri": params.text_document.uri, "version": snapshot.version },
-                "edits": as_text_edits(&repair.edits, number, snapshot),
+                "edits": as_text_edits(&repair.edits, number, snapshot)?,
             }]},
         }));
     }
@@ -355,7 +355,7 @@ fn write_workspace_edit(
         return Err(repair_error(RepairError::Cancelled));
     }
     if let (Some(first), Some(last)) = (first, previous) {
-        finish_edit(output, snapshot, first, last);
+        finish_edit(output, snapshot, first, last).map_err(repair_error)?;
     }
     output.extend_from_slice(b"]}]}");
     Ok(first.is_some())
@@ -366,18 +366,20 @@ fn finish_edit(
     snapshot: &Snapshot,
     first: (LineNo, ByteOffset),
     last: (LineNo, ByteOffset),
-) {
+) -> Result<(), RepairError> {
     let position = |(number, offset)| {
         let line = snapshot.line(number).expect("repair line exists");
-        json!({"line": number, "character": byte_to_position(line, offset, snapshot.encoding)})
+        let column = byte_to_position(line, offset, snapshot.encoding);
+        Ok::<_, RepairError>(json!({"line": number, "character": edit_column(column)?}))
     };
     output.extend_from_slice(b"\",\"range\":");
     serde_json::to_writer(
         &mut *output,
-        &json!({"start": position(first), "end": position(last)}),
+        &json!({"start": position(first)?, "end": position(last)?}),
     )
     .expect("JSON range serializes");
     output.push(b'}');
+    Ok(())
 }
 
 fn append_original(
@@ -479,9 +481,13 @@ fn requested_lines(
 /// malformed line the two edits need not be in spatial order, and the batch
 /// walk requires ascending input. This used to re-establish that at the call
 /// site, which is exactly what `Columns` exists to stop.
-fn as_text_edits(edits: &[Edit], number: LineNo, snapshot: &Snapshot) -> Vec<Value> {
+fn as_text_edits(
+    edits: &[Edit],
+    number: LineNo,
+    snapshot: &Snapshot,
+) -> Result<Vec<Value>, RepairError> {
     let Some(line) = snapshot.line(number) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let columns = Columns::of(
         line,
@@ -491,20 +497,41 @@ fn as_text_edits(edits: &[Edit], number: LineNo, snapshot: &Snapshot) -> Vec<Val
     edits
         .iter()
         .map(|edit| {
-            json!({
+            Ok(json!({
                 "range": {
-                    "start": { "line": number, "character": columns.at(edit.start) },
-                    "end": { "line": number, "character": columns.at(edit.end) },
+                    "start": { "line": number, "character": edit_column(columns.at(edit.start))? },
+                    "end": { "line": number, "character": edit_column(columns.at(edit.end))? },
                 },
                 "newText": edit.text,
-            })
+            }))
         })
         .collect()
+}
+
+// Clipping a presentation range is safe; clipping a replacement would edit different bytes.
+fn edit_column(column: crate::document::Column) -> Result<u32, RepairError> {
+    if column.fits_lsp() {
+        Ok(column.wire_value())
+    } else {
+        Err(RepairError::Unsafe(
+            "Repair exceeds the LSP position limit".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editing_refuses_columns_beyond_the_lsp_wire_limit() {
+        use crate::document::Column;
+        let limit = i32::MAX as u32;
+        assert_eq!(edit_column(Column::new(limit)).unwrap(), limit);
+        let beyond = Column::new(limit + 1);
+        assert_eq!(json!(beyond), json!(limit));
+        assert!(matches!(edit_column(beyond), Err(RepairError::Unsafe(_))));
+    }
     use std::sync::Arc;
 
     use crate::codec::ByteOffset;

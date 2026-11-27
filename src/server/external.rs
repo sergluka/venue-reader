@@ -71,8 +71,8 @@ pub(super) struct DocumentInput {
     pub lifetime: u64,
     /// Modeline revision captured when the batch started.
     pub revision: u64,
-    /// Modeline layer current at `revision`.
-    pub modeline: SettingsLayer,
+    pub version: i32,
+    pub edges: super::config_pull::ModelineEdges,
     /// Last committed state available for reuse.
     pub previous: Option<Arc<DocumentConfig>>,
 }
@@ -142,6 +142,7 @@ pub(super) struct Prepared {
 
 /// Worker-produced document state without main-loop-owned runtime objects.
 pub(super) struct PreparedDocument {
+    pub modeline: SettingsLayer,
     /// Effective merged layers and their warnings.
     pub resolved: Resolved,
     /// Project state reusable by a later incremental batch.
@@ -612,8 +613,11 @@ fn prepare_document(
         layers.push(layer);
     }
     layers.extend(projects.iter().cloned());
+    let modeline = document
+        .edges
+        .parse(&document.uri, base.config.limits.line_bytes);
     if base.config.overrides.modeline {
-        layers.push(document.modeline.clone());
+        layers.push(modeline.clone());
     }
     let mut resolved = overrides::merge(&layers, RuleRegistry::known_ids())?;
     resolved.warnings.extend(base.warnings.clone());
@@ -778,6 +782,7 @@ fn prepare_document(
             .collect()
     };
     Ok(PreparedDocument {
+        modeline,
         resolved,
         project: ProjectSnapshot {
             layers: projects,

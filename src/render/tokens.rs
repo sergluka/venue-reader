@@ -11,6 +11,7 @@ use std::ops::Range;
 use crate::codec::{ByteOffset, Field, LineAnalysis, MessageAnalysis};
 use crate::dictionary::Datatype;
 use crate::tag;
+use std::cmp::Ordering;
 
 /// The names of an enum's `ALL`, and the proof that it is in discriminant order
 /// — which is what a token's index on the wire means. A variant listed out of
@@ -236,14 +237,38 @@ pub struct LineMods {
 /// `overlays` adds one token per group entry covering the whole entry, which is
 /// only useful to a client that declared it can render overlapping tokens.
 pub fn classify(line: &[u8], analysis: &LineAnalysis, overlays: bool, out: &mut Vec<Token>) {
+    classify_range(
+        line,
+        analysis,
+        overlays,
+        ByteOffset::new(0)..end_of(line),
+        out,
+    );
+}
+
+pub fn classify_range(
+    line: &[u8],
+    analysis: &LineAnalysis,
+    overlays: bool,
+    window: Range<ByteOffset>,
+    out: &mut Vec<Token>,
+) {
+    if window.is_empty() {
+        return;
+    }
     match analysis {
-        LineAnalysis::Message(message) => message_tokens(line, message, overlays, out),
-        LineAnalysis::Comment => out.push(Token {
-            range: ByteOffset::new(0)..end_of(line),
-            kind: Kind::Comment,
-            mods: 0,
-        }),
-        LineAnalysis::Empty | LineAnalysis::Other => {}
+        LineAnalysis::Message(message) => message_tokens(line, message, overlays, &window, out),
+        LineAnalysis::Comment => {
+            let range = ByteOffset::new(0)..end_of(line);
+            if intersects(&range, &window) {
+                out.push(Token {
+                    range,
+                    kind: Kind::Comment,
+                    mods: 0,
+                });
+            }
+        }
+        LineAnalysis::Empty | LineAnalysis::Other | LineAnalysis::Skipped(_) => {}
     }
 }
 
@@ -251,54 +276,92 @@ fn end_of(line: &[u8]) -> ByteOffset {
     ByteOffset::from_len(line.len()).unwrap_or(ByteOffset::new(u32::MAX))
 }
 
-fn message_tokens(line: &[u8], message: &MessageAnalysis, overlays: bool, out: &mut Vec<Token>) {
-    if message.prefix_len > ByteOffset::new(0) {
+fn intersects(range: &Range<ByteOffset>, window: &Range<ByteOffset>) -> bool {
+    range.start < window.end && window.start < range.end
+}
+
+fn message_tokens(
+    line: &[u8],
+    message: &MessageAnalysis,
+    overlays: bool,
+    window: &Range<ByteOffset>,
+    out: &mut Vec<Token>,
+) {
+    if window.start < message.prefix_len {
         out.push(Token {
             range: ByteOffset::new(0)..message.prefix_len,
             kind: Kind::Comment,
             mods: 0,
         });
     }
-
+    let first = if window.start == ByteOffset::new(0) {
+        0
+    } else {
+        message.fields.partition_point(|field| {
+            #[cfg(test)]
+            work::lookup();
+            field.value_end() <= window.start
+        })
+    };
+    let Some(first_field) = message.fields.get(first) else {
+        return;
+    };
     let line_mods = line_modifiers(line, message);
 
-    // Only for the overlay, and only when one is wanted: the spans cost a
-    // vector and a map per line, while "which field opens a group" is a cheaper
-    // question asked of the instances directly.
-    let spans = overlays.then(|| message.group_spans());
-    // An entry's first field is the one that raises the highest instance index
-    // seen so far: instances are numbered as they are opened, so returning to a
-    // parent after a nested group never looks like a new entry.
-    let mut deepest_seen: Option<u32> = None;
-
-    for field in &message.fields {
-        let mods = field_modifiers(message, field, &line_mods);
-        let instance = field.group_idx();
-
-        out.push(Token {
-            range: field.tag_start..field.tag_end(),
-            kind: Kind::Property,
-            mods,
-        });
-
-        // After the tag, never before it: a client that declared overlap and
-        // does not render it then drops the overlay rather than the field.
-        if overlays {
-            if let Some(idx) = instance.filter(|idx| deepest_seen < Some(*idx)) {
-                deepest_seen = Some(idx);
-                if let Some(range) = spans.as_ref().and_then(|spans| spans.instance(idx)) {
+    // A viewport can start between two fields of the same entry.
+    if overlays && first > 0 {
+        for entry in message.ancestors(first_field) {
+            #[cfg(test)]
+            work::ANCESTORS.set(work::ANCESTORS.get() + 1);
+            if (entry.first_field as usize) < first {
+                let range = message.entry_span(entry);
+                if intersects(&range, window) {
+                    let field = &message.fields[entry.first_field as usize];
                     out.push(Token {
                         range,
+                        kind: Kind::Group,
+                        mods: field_modifiers(message, field, &line_mods),
+                    });
+                }
+            }
+        }
+    }
+
+    for (at, field) in message.fields[first..].iter().enumerate() {
+        #[cfg(test)]
+        work::visit();
+        if field.tag_start >= window.end {
+            break;
+        }
+        let mods = field_modifiers(message, field, &line_mods);
+        let range = field.tag_start..field.tag_end();
+        if intersects(&range, window) {
+            out.push(Token {
+                range,
+                kind: Kind::Property,
+                mods,
+            });
+        }
+
+        // At the same start column the field precedes its overlapping entry.
+        if overlays {
+            if let Some(entry) = field
+                .group_idx()
+                .map(|index| &message.groups[index as usize])
+            {
+                if entry.first_field as usize == first + at {
+                    out.push(Token {
+                        range: message.entry_span(entry),
                         kind: Kind::Group,
                         mods,
                     });
                 }
             }
         }
-
-        if field.value_start() < field.value_end() {
+        let range = field.value_start()..field.value_end();
+        if !range.is_empty() && intersects(&range, window) {
             out.push(Token {
-                range: field.value_start()..field.value_end(),
+                range,
                 kind: value_kind(line, message, field),
                 mods,
             });
@@ -314,26 +377,39 @@ pub(super) fn line_modifiers(line: &[u8], message: &MessageAnalysis) -> LineMods
     {
         shared |= Mod::Session.bit();
     }
-    if message.is_poss_dup(line) {
-        shared |= Mod::PossDup.bit();
-    }
-    // Peers are pair-local: the lexicographically smaller of two distinct,
-    // nonempty CompIDs is peer1, whichever end sent the message.
-    let (mut sender, mut target) = (0, 0);
-    if let (Some(from), Some(to)) = (
-        message.first(tag::SENDER_COMP_ID),
-        message.first(tag::TARGET_COMP_ID),
-    ) {
-        let (from, to) = (from.value(line), to.value(line));
-        if !from.is_empty() && !to.is_empty() && from != to {
-            let (first, second) = (Mod::Peer1.bit(), Mod::Peer2.bit());
-            (sender, target) = if from < to {
-                (first, second)
-            } else {
-                (second, first)
-            };
+    let mut poss_dup = None;
+    let mut sender = None;
+    let mut target = None;
+    for field in &message.fields {
+        #[cfg(test)]
+        work::visit();
+        if !field.is_header() {
+            break;
+        }
+        match field.tag {
+            tag::POSS_DUP_FLAG if poss_dup.is_none() => {
+                poss_dup = Some(field.value(line) == tag::YES.as_bytes());
+            }
+            tag::SENDER_COMP_ID if sender.is_none() => sender = Some(field.value(line)),
+            tag::TARGET_COMP_ID if target.is_none() => target = Some(field.value(line)),
+            _ => continue,
+        }
+        if poss_dup.is_some() && sender.is_some() && target.is_some() {
+            break;
         }
     }
+    if poss_dup == Some(true) {
+        shared |= Mod::PossDup.bit();
+    }
+    let (sender, target) = match sender
+        .zip(target)
+        .filter(|(sender, target)| !sender.is_empty() && !target.is_empty())
+        .map(|(sender, target)| sender.cmp(target))
+    {
+        Some(Ordering::Less) => (Mod::Peer1.bit(), Mod::Peer2.bit()),
+        Some(Ordering::Greater) => (Mod::Peer2.bit(), Mod::Peer1.bit()),
+        _ => (0, 0),
+    };
     LineMods {
         shared,
         sender,
@@ -425,6 +501,22 @@ fn of_datatype(class: Datatype) -> Kind {
 }
 
 #[cfg(test)]
+pub(crate) mod work {
+    use std::cell::Cell;
+    thread_local! {
+        pub static ANCESTORS: Cell<usize> = const { Cell::new(0) };
+        pub static LOOKUPS: Cell<usize> = const { Cell::new(0) };
+        pub static VISITS: Cell<usize> = const { Cell::new(0) };
+    }
+    pub fn lookup() {
+        LOOKUPS.set(LOOKUPS.get() + 1);
+    }
+    pub fn visit() {
+        VISITS.set(VISITS.get() + 1);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::ctx::{analyze, Ctx};
@@ -455,6 +547,30 @@ mod tests {
             assert!(values
                 .iter()
                 .all(|token| token.mods & (Mod::Peer1.bit() | Mod::Peer2.bit()) == 0));
+        }
+    }
+
+    #[test]
+    fn line_modifiers_use_only_the_first_values_in_the_leading_header() {
+        let ctx = Ctx::for_test("FIX.4.4");
+        for (fields, duplicate, peers) in [
+            ("43=Y|49=A|56=B|55=X", true, true),
+            ("43=N|43=Y|49=|49=A|56=B|55=X", false, false),
+            ("43=|43=Y|49=A|56=B|55=X", false, true),
+            ("49=A|55=X|43=Y|56=B", false, false),
+            ("55=X|43=Y|49=A|56=B", false, false),
+        ] {
+            let line = format!("8=FIX.4.4|35=D|{fields}");
+            let (_, values) = tokens(&line, false, &ctx);
+            assert!(!values.is_empty(), "{line}");
+            for token in values {
+                assert_eq!(token.mods & Mod::PossDup.bit() != 0, duplicate, "{line}");
+                let text = &line[token.range.start.index()..token.range.end.index()];
+                if text == "A" || text == "B" {
+                    let expected = if text == "A" { Mod::Peer1 } else { Mod::Peer2 };
+                    assert_eq!(token.mods & expected.bit() != 0, peers, "{line}");
+                }
+            }
         }
     }
 

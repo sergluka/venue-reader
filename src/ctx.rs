@@ -1,8 +1,8 @@
 //! Configuration and raw selectors resolve sources before entering the codec.
 
 use crate::codec::{
-    decode, decode_non_message, tokenize, LineAnalysis, LineKind, MessageAnalysis, Resolution,
-    ResolutionIssue, Selector,
+    decode, decode_non_message, tokenize_bounded, LineAnalysis, LineKind, LineTokens,
+    MessageAnalysis, Resolution, ResolutionIssue, Selector,
 };
 use crate::config::Config;
 use crate::dictionary::{
@@ -18,6 +18,8 @@ use xxhash_rust::xxh3::Xxh3;
 /// Immutable dictionary selection and defaults used to resolve each line.
 pub struct Ctx {
     fingerprint: u64,
+    pub line_bytes: u32,
+    pub fields_per_line: u32,
     registry: Arc<Registry>,
     choice: Option<DictionaryChoice>,
     default_application: Option<ApplicationIdentity>,
@@ -67,6 +69,8 @@ impl Ctx {
             hasher.update(&[0]);
         }
         hasher.update(&registry.identity().to_le_bytes());
+        hasher.update(&config.limits.line_bytes.to_le_bytes());
+        hasher.update(&config.limits.fields_per_line.to_le_bytes());
         if let Some(choice) = choice {
             hasher.update(&[1]);
             hasher.update(&choice.identity.to_le_bytes());
@@ -82,6 +86,8 @@ impl Ctx {
         choice: Option<DictionaryChoice>,
     ) -> Arc<Ctx> {
         Arc::new(Ctx {
+            line_bytes: config.limits.line_bytes,
+            fields_per_line: config.limits.fields_per_line,
             fingerprint: Self::fingerprint_for(config, &registry, choice.as_ref()),
             registry,
             choice,
@@ -96,6 +102,12 @@ impl Ctx {
             .get(version)
             .map(|version| version.name.clone())
             .unwrap_or_else(|| Arc::from(version))
+    }
+    pub fn tokenize(&self, bytes: &[u8]) -> LineTokens {
+        tokenize_bounded(bytes, self.line_bytes, self.fields_per_line)
+    }
+    pub(crate) fn line_kind(&self, bytes: &[u8]) -> LineKind {
+        crate::codec::tokenize::line_kind(bytes, self.line_bytes, self.fields_per_line)
     }
     pub fn fingerprint(&self) -> u64 {
         self.fingerprint
@@ -270,7 +282,7 @@ fn effective_identity<'a>(
 }
 
 pub fn analyze(bytes: &[u8], ctx: &Ctx) -> LineAnalysis {
-    let tokens = tokenize(bytes);
+    let tokens = ctx.tokenize(bytes);
     if tokens.kind != LineKind::Message {
         return decode_non_message(tokens);
     }
@@ -751,6 +763,7 @@ mod tests {
         decorated.message_summary.channels.code_lens = false;
         decorated.hover.enabled = false;
         decorated.semantic_tokens.enabled = false;
+        decorated.limits.semantic_tokens_bytes = 0;
         decorated.document_link.url = "https://example.com/{version}/{tag}".into();
         decorated.document_symbol.template = "{35.valueName}".into();
         decorated.inlay_hints = serde_json::from_value(serde_json::json!({

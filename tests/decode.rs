@@ -367,3 +367,22 @@ fn cancellation_after_dispatch_produces_no_duplicate_response() {
     assert!(responses[0].response_result.is_ok());
     client.shutdown();
 }
+
+#[test]
+fn a_skipped_message_keeps_its_empty_row_in_each_requested_selection() {
+    let text = format!("{HEARTBEAT}\r\n{HEARTBEAT}58=extra|\r\n{HEARTBEAT}");
+    let mut client = start(&text, json!({"limits":{"fieldsPerLine":2}}));
+    let requested = json!([range(2, 10, 2, 14), range(0, 10, 2, 0), range(1, 10, 1, 14)]);
+    let answer = decode(&mut client, requested).unwrap();
+    assert_eq!(
+        answer["results"],
+        json!([
+            {"rangeIndex":0,"lines":[{"line":2,"text":DECODED_TYPE}]},
+            {"rangeIndex":1,"lines":[
+                {"line":0,"text":DECODED_TYPE},{"line":1,"text":""},{"line":2,"text":""}
+            ]},
+            {"rangeIndex":2,"lines":[{"line":1,"text":""}]}
+        ])
+    );
+    client.shutdown();
+}

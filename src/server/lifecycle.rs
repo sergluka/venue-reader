@@ -55,6 +55,7 @@ impl ServerState {
         self.client.refreshes_semantic_tokens = capabilities::refreshes_semantic_tokens(&caps);
         // The group overlay covers ranges the member fields already carry, so a
         // client that does not render overlap gets the fields alone.
+        self.client.range_only_tokens = capabilities::declares_range(&caps);
         self.client.overlaps_tokens = capabilities::overlaps_tokens(&caps);
         self.client.takes_actions = capabilities::offers_code_actions(&caps);
         self.client.defers_action_edits = capabilities::defers_action_edits(&caps);

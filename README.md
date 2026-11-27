@@ -354,9 +354,15 @@ document edits. Fix-all discovery additionally uses code-action data and lazy-ed
 resolution; clients supporting disabled actions can show why it is unavailable.
 Custom commands return data that the client must display or use.
 
+By default the server analyses physical lines up to 50 MiB and 1,000,000 FIX
+fields. If a line exceeds either limit, the text stays editable and a warning
+at the start of the line identifies the limit. Other lines retain their FIX features.
+
 Several features limit their output for large logs. By default, code-lens summaries
-stop above 20,000 document lines, and full semantic tokens cover the first
-2,000 lines. Range requests let clients request a smaller part of the document.
+stop above 20,000 document lines. Semantic highlighting has a separate budget
+of 64 KiB of source per request. When a requested part of a line exceeds the
+remaining budget, the server skips it and continues with later lines. Full
+requests consider the first 2,000 lines. Range requests can reach other lines.
 The outline reduces detail when its budget is exhausted; diagnostics are capped.
 Fix-all scans the whole document in the background without truncating repairs at
 these limits. It supports cancellation and does not populate the analysis cache.
